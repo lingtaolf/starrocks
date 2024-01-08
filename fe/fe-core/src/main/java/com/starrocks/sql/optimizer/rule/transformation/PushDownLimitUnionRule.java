@@ -1,7 +1,21 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.sql.optimizer.rule.transformation;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
@@ -22,13 +36,14 @@ public class PushDownLimitUnionRule extends TransformationRule {
     @Override
     public boolean check(OptExpression input, OptimizerContext context) {
         LogicalLimitOperator limit = (LogicalLimitOperator) input.getOp();
-        // 1. Has offset can't push down
-        return !limit.hasOffset();
+        return limit.isLocal();
     }
 
     @Override
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
         LogicalLimitOperator limit = (LogicalLimitOperator) input.getOp();
+        Preconditions.checkState(!limit.hasOffset());
+
         OptExpression child = input.inputAt(0);
         LogicalOperator logicOperator = (LogicalOperator) child.getOp();
 
@@ -38,7 +53,7 @@ public class PushDownLimitUnionRule extends TransformationRule {
         // push down
         List<OptExpression> newUnionChild = Lists.newArrayList();
         for (OptExpression unionChild : child.getInputs()) {
-            OptExpression nl = new OptExpression(new LogicalLimitOperator(limit.getLimit()));
+            OptExpression nl = new OptExpression(LogicalLimitOperator.local(limit.getLimit()));
             nl.getInputs().add(unionChild);
             newUnionChild.add(nl);
         }

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/runtime/small_file_mgr.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,11 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_RUNTIME_SMALL_FILE_MGR_H
-#define STARROCKS_BE_SRC_RUNTIME_SMALL_FILE_MGR_H
+#pragma once
 
-#include <stdint.h>
-
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -49,35 +43,33 @@ struct CacheEntry {
  */
 class SmallFileMgr {
 public:
-    SmallFileMgr(ExecEnv* env, const std::string& local_path);
+    SmallFileMgr(ExecEnv* env, std::string local_path);
 
     ~SmallFileMgr();
 
     // call init() when BE start up. load all local files
-    Status init();
+    [[nodiscard]] Status init();
 
     // get file by specified file_id, return 'file_path'
     // if file does not exist, it will be downloaded from FE
-    Status get_file(int64_t file_id, const std::string& md5, std::string* file_path);
+    [[nodiscard]] Status get_file(int64_t file_id, const std::string& md5, std::string* file_path);
 
 private:
-    Status _load_local_files();
+    [[nodiscard]] Status _load_local_files();
 
     // load one single local file
-    Status _load_single_file(const std::string& path, const std::string& file_name);
+    [[nodiscard]] Status _load_single_file(const std::string& path, const std::string& file_name);
 
-    Status _check_file(const CacheEntry& entry, const std::string& md5);
+    [[nodiscard]] Status _check_file(const CacheEntry& entry, const std::string& md5);
 
-    Status _download_file(int64_t file_id, const std::string& md5, std::string* file_path);
+    [[nodiscard]] Status _download_file(int64_t file_id, const std::string& md5, std::string* file_path);
 
 private:
     std::mutex _lock;
-    ExecEnv* _exec_env;
+    [[maybe_unused]] ExecEnv* _exec_env;
     std::string _local_path;
     // file id -> small file
     std::unordered_map<int64_t, CacheEntry> _file_cache;
 };
 
 } // end namespace starrocks
-
-#endif // STARROCKS_BE_SRC_RUNTIME_SMALL_FILE_MGR_H

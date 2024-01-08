@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/olap/version_graph.cpp
 
@@ -27,6 +40,7 @@
 #include <queue>
 
 #include "common/logging.h"
+#include "util/ratelimit.h"
 #include "util/time.h"
 
 namespace starrocks {
@@ -34,8 +48,8 @@ namespace starrocks {
 void TimestampedVersionTracker::_construct_versioned_tracker(const std::vector<RowsetMetaSharedPtr>& rs_metas) {
     int64_t max_version = 0;
 
-    // construct the roset graph
-    _version_graph.reconstruct_version_graph(rs_metas, &max_version);
+    // construct the rowset graph
+    _version_graph.construct_version_graph(rs_metas, &max_version);
 }
 
 void TimestampedVersionTracker::construct_versioned_tracker(const std::vector<RowsetMetaSharedPtr>& rs_metas) {
@@ -62,7 +76,7 @@ void TimestampedVersionTracker::get_stale_version_path_json_doc(rapidjson::Docum
         auto path_id_str = std::to_string(path_id);
         rapidjson::Value path_id_value;
         path_id_value.SetString(path_id_str.c_str(), path_id_str.length(), path_arr.GetAllocator());
-        item.AddMember("path id", path_id_value, path_arr.GetAllocator());
+        item.AddMember("path_id", path_id_value, path_arr.GetAllocator());
 
         // add max create time to item
         auto time_zone = cctz::local_time_zone();
@@ -72,26 +86,27 @@ void TimestampedVersionTracker::get_stale_version_path_json_doc(rapidjson::Docum
 
         rapidjson::Value create_time_value;
         create_time_value.SetString(create_time_str.c_str(), create_time_str.length(), path_arr.GetAllocator());
-        item.AddMember("last create time", create_time_value, path_arr.GetAllocator());
+        item.AddMember("last_create_time", create_time_value, path_arr.GetAllocator());
 
         // add path list to item
         std::stringstream path_list_stream;
-        path_list_stream << path_id_str;
         auto path_list_ptr = path_version_path->timestamped_versions();
         auto path_list_iter = path_list_ptr.begin();
         while (path_list_iter != path_list_ptr.end()) {
-            path_list_stream << " -> ";
             path_list_stream << "[";
             path_list_stream << (*path_list_iter)->version().first;
             path_list_stream << "-";
             path_list_stream << (*path_list_iter)->version().second;
             path_list_stream << "]";
             path_list_iter++;
+            if (path_list_iter != path_list_ptr.end()) {
+                path_list_stream << "->";
+            }
         }
         std::string path_list = path_list_stream.str();
         rapidjson::Value path_list_value;
         path_list_value.SetString(path_list.c_str(), path_list.length(), path_arr.GetAllocator());
-        item.AddMember("path list", path_list_value, path_arr.GetAllocator());
+        item.AddMember("path_list", path_list_value, path_arr.GetAllocator());
 
         // add item to path_arr
         path_arr.PushBack(item, path_arr.GetAllocator());
@@ -100,24 +115,16 @@ void TimestampedVersionTracker::get_stale_version_path_json_doc(rapidjson::Docum
     }
 }
 
-void TimestampedVersionTracker::recover_versioned_tracker(
-        const std::map<int64_t, PathVersionListSharedPtr>& stale_version_path_map) {
-    auto _path_map_iter = stale_version_path_map.begin();
-    // recover stale_version_path_map
-    while (_path_map_iter != stale_version_path_map.end()) {
-        // add PathVersionListSharedPtr to map
-        _stale_version_path_map[_path_map_iter->first] = _path_map_iter->second;
+int64_t TimestampedVersionTracker::get_max_continuous_version() const {
+    return _version_graph.max_continuous_version();
+}
 
-        std::vector<TimestampedVersionSharedPtr>& timestamped_versions = _path_map_iter->second->timestamped_versions();
-        std::vector<TimestampedVersionSharedPtr>::iterator version_path_iter = timestamped_versions.begin();
-        while (version_path_iter != timestamped_versions.end()) {
-            // add version to _version_graph
-            _version_graph.add_version_to_graph((*version_path_iter)->version());
-            version_path_iter++;
-        }
-        _path_map_iter++;
-    }
-    LOG(INFO) << "recover_versioned_tracker current map info " << _get_current_path_map_str();
+void TimestampedVersionTracker::update_max_continuous_version() {
+    _version_graph.update_max_continuous_version();
+}
+
+int64_t TimestampedVersionTracker::get_min_readable_version() const {
+    return _version_graph.min_readable_version();
 }
 
 void TimestampedVersionTracker::add_version(const Version& version) {
@@ -131,7 +138,7 @@ void TimestampedVersionTracker::add_stale_path_version(const std::vector<RowsetM
     }
 
     PathVersionListSharedPtr ptr(new TimestampedVersionPathContainer());
-    for (auto rs : stale_rs_metas) {
+    for (const auto& rs : stale_rs_metas) {
         TimestampedVersionSharedPtr vt_ptr(new TimestampedVersion(rs->version(), rs->creation_time()));
         ptr->add_timestamped_version(vt_ptr);
     }
@@ -139,7 +146,7 @@ void TimestampedVersionTracker::add_stale_path_version(const std::vector<RowsetM
     std::vector<TimestampedVersionSharedPtr>& timestamped_versions = ptr->timestamped_versions();
 
     struct TimestampedVersionPtrCompare {
-        bool operator()(const TimestampedVersionSharedPtr ptr1, const TimestampedVersionSharedPtr ptr2) {
+        bool operator()(const TimestampedVersionSharedPtr& ptr1, const TimestampedVersionSharedPtr& ptr2) {
             return ptr1->version().first < ptr2->version().first;
         }
     };
@@ -149,14 +156,14 @@ void TimestampedVersionTracker::add_stale_path_version(const std::vector<RowsetM
 }
 
 // Capture consistent versions from graph
-OLAPStatus TimestampedVersionTracker::capture_consistent_versions(const Version& spec_version,
-                                                                  std::vector<Version>* version_path) const {
+Status TimestampedVersionTracker::capture_consistent_versions(const Version& spec_version,
+                                                              std::vector<Version>* version_path) const {
     return _version_graph.capture_consistent_versions(spec_version, version_path);
 }
 
 void TimestampedVersionTracker::capture_expired_paths(int64_t stale_sweep_endtime,
                                                       std::vector<int64_t>* path_version_vec) const {
-    std::map<int64_t, PathVersionListSharedPtr>::const_iterator iter = _stale_version_path_map.begin();
+    auto iter = _stale_version_path_map.begin();
 
     while (iter != _stale_version_path_map.end()) {
         int64_t max_create_time = iter->second->max_create_time();
@@ -183,13 +190,12 @@ PathVersionListSharedPtr TimestampedVersionTracker::fetch_and_delete_path_by_id(
         return nullptr;
     }
 
-    LOG(INFO) << _get_current_path_map_str();
     PathVersionListSharedPtr ptr = fetch_path_version_by_id(path_id);
 
     _stale_version_path_map.erase(path_id);
 
     for (auto& version : ptr->timestamped_versions()) {
-        _version_graph.delete_version_from_graph(version->version());
+        (void)_version_graph.delete_version_from_graph(version->version());
     }
     return ptr;
 }
@@ -198,11 +204,11 @@ std::string TimestampedVersionTracker::_get_current_path_map_str() {
     std::stringstream tracker_info;
     tracker_info << "current expired next_path_id " << _next_path_id << std::endl;
 
-    std::map<int64_t, PathVersionListSharedPtr>::const_iterator iter = _stale_version_path_map.begin();
+    auto iter = _stale_version_path_map.begin();
     while (iter != _stale_version_path_map.end()) {
         tracker_info << "current expired path_version " << iter->first;
         std::vector<TimestampedVersionSharedPtr>& timestamped_versions = iter->second->timestamped_versions();
-        std::vector<TimestampedVersionSharedPtr>::iterator version_path_iter = timestamped_versions.begin();
+        auto version_path_iter = timestamped_versions.begin();
         int64_t max_create_time = -1;
         while (version_path_iter != timestamped_versions.end()) {
             if (max_create_time < (*version_path_iter)->get_create_time()) {
@@ -223,7 +229,7 @@ std::string TimestampedVersionTracker::_get_current_path_map_str() {
     return tracker_info.str();
 }
 
-void TimestampedVersionPathContainer::add_timestamped_version(TimestampedVersionSharedPtr version) {
+void TimestampedVersionPathContainer::add_timestamped_version(const TimestampedVersionSharedPtr& version) {
     // compare and refresh _max_create_time
     if (version->get_create_time() > _max_create_time) {
         _max_create_time = version->get_create_time();
@@ -235,225 +241,228 @@ std::vector<TimestampedVersionSharedPtr>& TimestampedVersionPathContainer::times
     return _timestamped_versions_container;
 }
 
+void VersionGraph::update_max_continuous_version() {
+    _max_continuous_version = _get_max_continuous_version_from(0);
+}
+
 void VersionGraph::construct_version_graph(const std::vector<RowsetMetaSharedPtr>& rs_metas, int64_t* max_version) {
+    _version_graph.clear();
+    _max_continuous_version = -1;
+    _min_readable_version = -1;
     if (rs_metas.empty()) {
         VLOG(3) << "there is no version in the header.";
         return;
     }
 
-    // Distill vertex values from versions in TabletMeta.
-    std::vector<int64_t> vertex_values;
-    vertex_values.reserve(2 * rs_metas.size());
-
-    for (size_t i = 0; i < rs_metas.size(); ++i) {
-        vertex_values.push_back(rs_metas[i]->start_version());
-        vertex_values.push_back(rs_metas[i]->end_version() + 1);
-        if (max_version != nullptr and *max_version < rs_metas[i]->end_version()) {
-            *max_version = rs_metas[i]->end_version();
-        }
-    }
-    std::sort(vertex_values.begin(), vertex_values.end());
-
-    // Items in vertex_values are sorted, but not unique.
-    // we choose unique items in vertex_values to create vertexes.
-    int64_t last_vertex_value = -1;
-    for (size_t i = 0; i < vertex_values.size(); ++i) {
-        if (i != 0 && vertex_values[i] == last_vertex_value) {
-            continue;
-        }
-
-        // Add vertex to graph.
-        _add_vertex_to_graph(vertex_values[i]);
-        last_vertex_value = vertex_values[i];
-    }
     // Create edges for version graph according to TabletMeta's versions.
-    for (size_t i = 0; i < rs_metas.size(); ++i) {
+    for (const auto& rs_meta : rs_metas) {
         // Versions in header are unique.
-        // We ensure _vertex_index_map has its start_version.
-        int64_t start_vertex_index = _vertex_index_map[rs_metas[i]->start_version()];
-        int64_t end_vertex_index = _vertex_index_map[rs_metas[i]->end_version() + 1];
-        // Add one edge from start_version to end_version.
-        _version_graph[start_vertex_index].edges.push_front(end_vertex_index);
-        // Add reverse edge from end_version to start_version.
-        _version_graph[end_vertex_index].edges.push_front(start_vertex_index);
+        _add_version_to_graph(rs_meta->version());
+
+        if (max_version != nullptr && *max_version < rs_meta->end_version()) {
+            *max_version = rs_meta->end_version();
+        }
     }
-}
-
-void VersionGraph::reconstruct_version_graph(const std::vector<RowsetMetaSharedPtr>& rs_metas, int64_t* max_version) {
-    _version_graph.clear();
-    _vertex_index_map.clear();
-
-    construct_version_graph(rs_metas, max_version);
+    _max_continuous_version = _get_max_continuous_version_from(0);
+    _min_readable_version = -1;
+    for (const auto& rs_meta : rs_metas) {
+        const auto& version = rs_meta->version();
+        if (version.second <= _max_continuous_version && version.first != version.second) {
+            // it's a compacted version
+            _min_readable_version = std::max(version.second, _min_readable_version);
+        }
+    }
+    _tablet_id = rs_metas[0]->tablet_id();
 }
 
 void VersionGraph::add_version_to_graph(const Version& version) {
-    // Add version.first as new vertex of version graph if not exist.
-    int64_t start_vertex_value = version.first;
-    int64_t end_vertex_value = version.second + 1;
-
-    // Add vertex to graph.
-    _add_vertex_to_graph(start_vertex_value);
-    _add_vertex_to_graph(end_vertex_value);
-
-    int64_t start_vertex_index = _vertex_index_map[start_vertex_value];
-    int64_t end_vertex_index = _vertex_index_map[end_vertex_value];
-
-    // We assume this version is new version, so we just add two edges
-    // into version graph. add one edge from start_version to end_version
-    _version_graph[start_vertex_index].edges.push_front(end_vertex_index);
-
-    // We add reverse edge(from end_version to start_version) to graph
-    _version_graph[end_vertex_index].edges.push_front(start_vertex_index);
+    _add_version_to_graph(version);
+    if (version.first == _max_continuous_version + 1) {
+        _max_continuous_version = _get_max_continuous_version_from(_max_continuous_version + 1);
+    } else if (version.first == 0) {
+        // We need to reconstruct max_continuous_version from zero if input version is starting from zero
+        // e.g.
+        // 1. Tablet A is doing schema change
+        // 2. We create a new tablet B releated A, and we will create a initial rowset and _max_continuous_version
+        //    will be updated to 1
+        // 3. Tablet A has a rowset R with version (0, m)
+        // 4. Schema change will try convert R
+        // 5. The start version of R (0) is not equal to `_max_continuous_version + 1`, and the _max_continuous_version
+        //    will not update
+        _max_continuous_version = _get_max_continuous_version_from(0);
+    }
 }
 
-OLAPStatus VersionGraph::delete_version_from_graph(const Version& version) {
+void VersionGraph::_add_version_to_graph(const Version& version) {
+    // Add version.first as new vertex of version graph if not exist.
+    auto& start_vertex = _add_vertex_to_graph(version.first);
+    // Add version.second + 1 as new vertex of version graph if not exist.
+    auto& end_vertex = _add_vertex_to_graph(version.second + 1);
+
+    // sorted by version, we assume one vertex has few edge so that we use O(n) algorithm
+    auto end_vertex_it = start_vertex->edges.begin();
+    while (end_vertex_it != start_vertex->edges.end()) {
+        if ((*end_vertex_it)->value < end_vertex->value) {
+            break;
+        }
+        end_vertex_it++;
+    }
+    start_vertex->edges.insert(end_vertex_it, end_vertex.get());
+
+    // We add reverse edge(from end_version to start_version) to graph
+    auto start_vertex_it = end_vertex->edges.begin();
+    while (start_vertex_it != end_vertex->edges.end()) {
+        if ((*start_vertex_it)->value < start_vertex->value) {
+            break;
+        }
+        start_vertex_it++;
+    }
+    end_vertex->edges.insert(start_vertex_it, start_vertex.get());
+}
+
+Status VersionGraph::delete_version_from_graph(const Version& version) {
     int64_t start_vertex_value = version.first;
     int64_t end_vertex_value = version.second + 1;
+    auto start_iter = _version_graph.find(start_vertex_value);
+    auto end_iter = _version_graph.find(end_vertex_value);
 
-    if (_vertex_index_map.find(start_vertex_value) == _vertex_index_map.end() ||
-        _vertex_index_map.find(end_vertex_value) == _vertex_index_map.end()) {
+    if (start_iter == _version_graph.end() || end_iter == _version_graph.end()) {
         LOG(WARNING) << "vertex for version does not exists. "
                      << "version=" << version.first << "-" << version.second;
-        return OLAP_ERR_HEADER_DELETE_VERSION;
+        return Status::NotFound("Not found version");
     }
 
-    int64_t start_vertex_index = _vertex_index_map[start_vertex_value];
-    int64_t end_vertex_index = _vertex_index_map[end_vertex_value];
     // Remove edge and its reverse edge.
     // When there are same versions in edges, just remove the frist version.
-    auto start_edges_iter = _version_graph[start_vertex_index].edges.begin();
-    while (start_edges_iter != _version_graph[start_vertex_index].edges.end()) {
-        if (*start_edges_iter == end_vertex_index) {
-            _version_graph[start_vertex_index].edges.erase(start_edges_iter);
+    auto start_edges_iter = start_iter->second->edges.begin();
+    while (start_edges_iter != start_iter->second->edges.end()) {
+        if ((*start_edges_iter)->value == end_vertex_value) {
+            start_iter->second->edges.erase(start_edges_iter);
             break;
         }
         start_edges_iter++;
     }
 
-    auto end_edges_iter = _version_graph[end_vertex_index].edges.begin();
-    while (end_edges_iter != _version_graph[end_vertex_index].edges.end()) {
-        if (*end_edges_iter == start_vertex_index) {
-            _version_graph[end_vertex_index].edges.erase(end_edges_iter);
+    auto end_edges_iter = end_iter->second->edges.begin();
+    while (end_edges_iter != end_iter->second->edges.end()) {
+        if ((*end_edges_iter)->value == start_vertex_value) {
+            end_iter->second->edges.erase(end_edges_iter);
             break;
         }
         end_edges_iter++;
     }
 
-    return OLAP_SUCCESS;
+    if (start_iter->second->edges.empty()) {
+        _version_graph.erase(start_iter);
+    }
+
+    if (end_iter->second->edges.empty()) {
+        _version_graph.erase(end_iter);
+    }
+
+    if (version.second <= _max_continuous_version) {
+        _min_readable_version = std::max(_min_readable_version, version.second);
+    }
+    return Status::OK();
 }
 
-void VersionGraph::_add_vertex_to_graph(int64_t vertex_value) {
+std::unique_ptr<Vertex>& VersionGraph::_add_vertex_to_graph(int64_t vertex_value) {
     // Vertex with vertex_value already exists.
-    if (_vertex_index_map.find(vertex_value) != _vertex_index_map.end()) {
+    auto iter = _version_graph.find(vertex_value);
+    if (iter != _version_graph.end()) {
         VLOG(3) << "vertex with vertex value already exists. value=" << vertex_value;
-        return;
+        return iter->second;
     }
 
-    _version_graph.emplace_back(Vertex(vertex_value));
-    _vertex_index_map[vertex_value] = _version_graph.size() - 1;
+    _version_graph[vertex_value] = std::make_unique<Vertex>(vertex_value);
+
+    return _version_graph[vertex_value];
 }
 
-OLAPStatus VersionGraph::capture_consistent_versions(const Version& spec_version,
-                                                     std::vector<Version>* version_path) const {
+int64_t VersionGraph::_get_max_continuous_version_from(int64_t version) {
+    auto iter = _version_graph.find(version);
+    if (iter == _version_graph.end()) {
+        // should not happen, just log error and return from version
+        LOG(ERROR) << "_get_max_continuous_version_from failed: from version not found " << version;
+        return version;
+    }
+    Vertex* cur = iter->second.get();
+    while (true) {
+        if (cur->edges.empty()) {
+            break;
+        }
+        auto largest_next = cur->edges.front();
+        if (largest_next->value < cur->value) {
+            break;
+        }
+        cur = largest_next;
+    }
+    return cur->value - 1;
+}
+
+Status VersionGraph::capture_consistent_versions(const Version& spec_version,
+                                                 std::vector<Version>* version_path) const {
     if (spec_version.first > spec_version.second) {
-        LOG(WARNING) << "invalid specfied version. "
+        LOG(WARNING) << "invalid specified version. "
                      << "spec_version=" << spec_version.first << "-" << spec_version.second;
-        return OLAP_ERR_INPUT_PARAMETER_ERROR;
+        return Status::InternalError("Invalid specified version");
     }
 
-    // bfs_queue's element is vertex_index.
-    std::queue<int64_t> bfs_queue;
-    // predecessor[i] means the predecessor of vertex_index 'i'.
-    std::vector<int64_t> predecessor(_version_graph.size());
-    // visited[int64_t]==true means it had entered bfs_queue.
-    std::vector<bool> visited(_version_graph.size());
-    // [start_vertex_value, end_vertex_value)
-    int64_t start_vertex_value = spec_version.first;
-    int64_t end_vertex_value = spec_version.second + 1;
-    // -1 is invalid vertex index.
-    int64_t start_vertex_index = -1;
-    // -1 is valid vertex index.
-    int64_t end_vertex_index = -1;
+    auto start_vertex_iter = _version_graph.find(spec_version.first);
+    auto end_vertex_iter = _version_graph.find(spec_version.second + 1);
 
-    for (size_t i = 0; i < _version_graph.size(); ++i) {
-        if (_version_graph[i].value == start_vertex_value) {
-            start_vertex_index = i;
-        }
-        if (_version_graph[i].value == end_vertex_value) {
-            end_vertex_index = i;
-        }
+    if (start_vertex_iter == _version_graph.end() || end_vertex_iter == _version_graph.end()) {
+        RATE_LIMIT_BY_TAG(_tablet_id,
+                          LOG(WARNING) << "fail to find path in version_graph. "
+                                       << "spec_version: " << spec_version.first << "-" << spec_version.second
+                                       << " tablet_id: " << _tablet_id,
+                          1000);
+        return Status::NotFound("Version not found");
     }
 
-    if (start_vertex_index < 0 || end_vertex_index < 0) {
-        LOG(WARNING) << "fail to find path in version_graph. "
-                     << "spec_version: " << spec_version.first << "-" << spec_version.second;
-        return OLAP_ERR_VERSION_NOT_EXIST;
-    }
-
-    for (size_t i = 0; i < _version_graph.size(); ++i) {
-        visited[i] = false;
-    }
-
-    bfs_queue.push(start_vertex_index);
-    visited[start_vertex_index] = true;
-    // The predecessor of root is itself.
-    predecessor[start_vertex_index] = start_vertex_index;
-
-    while (bfs_queue.empty() == false && visited[end_vertex_index] == false) {
-        int64_t top_vertex_index = bfs_queue.front();
-        bfs_queue.pop();
-        for (const auto& it : _version_graph[top_vertex_index].edges) {
-            if (visited[it] == false) {
-                // If we don't support reverse version in the path, and start vertex
-                // value is larger than the end vertex value, we skip this edge.
-                if (_version_graph[top_vertex_index].value > _version_graph[it].value) {
-                    continue;
-                }
-
-                visited[it] = true;
-                predecessor[it] = top_vertex_index;
-                bfs_queue.push(it);
+    int64_t end_value = spec_version.second + 1;
+    auto cur_vertex = start_vertex_iter->second.get();
+    while (cur_vertex->value != end_value) {
+        Vertex* next_vertex = nullptr;
+        for (const auto edge : cur_vertex->edges) {
+            // reverse edge
+            if (edge->value < cur_vertex->value) {
+                break;
             }
+
+            // cross edge
+            // NOTICE: we assume if a version can be reached, then every down path can lead to that version
+            // so using greedy algorithm is OK
+            if (edge->value > end_value) {
+                continue;
+            }
+
+            next_vertex = edge;
+            break;
+        }
+
+        if (next_vertex != nullptr) {
+            if (version_path != nullptr) {
+                version_path->emplace_back(cur_vertex->value, next_vertex->value - 1);
+            }
+            cur_vertex = next_vertex;
+        } else {
+            LOG(WARNING) << "fail to find path in version_graph. "
+                         << "spec_version: " << spec_version.first << "-" << spec_version.second;
+            return Status::NotFound("Version not found");
         }
     }
 
-    if (!visited[end_vertex_index]) {
-        LOG(WARNING) << "fail to find path in version_graph. "
-                     << "spec_version: " << spec_version.first << "-" << spec_version.second;
-        return OLAP_ERR_VERSION_NOT_EXIST;
-    }
-
-    std::vector<int64_t> reversed_path;
-    int64_t tmp_vertex_index = end_vertex_index;
-    reversed_path.push_back(tmp_vertex_index);
-
-    // For start_vertex_index, its predecessor must be itself.
-    while (predecessor[tmp_vertex_index] != tmp_vertex_index) {
-        tmp_vertex_index = predecessor[tmp_vertex_index];
-        reversed_path.push_back(tmp_vertex_index);
-    }
-
-    if (version_path != nullptr) {
-        // Make version_path from reversed_path.
+    if (VLOG_ROW_IS_ON && version_path != nullptr) {
         std::stringstream shortest_path_for_debug;
-        for (size_t path_id = reversed_path.size() - 1; path_id > 0; --path_id) {
-            int64_t tmp_start_vertex_value = _version_graph[reversed_path[path_id]].value;
-            int64_t tmp_end_vertex_value = _version_graph[reversed_path[path_id - 1]].value;
-
-            // tmp_start_vertex_value mustn't be equal to tmp_end_vertex_value
-            if (tmp_start_vertex_value <= tmp_end_vertex_value) {
-                version_path->emplace_back(tmp_start_vertex_value, tmp_end_vertex_value - 1);
-            } else {
-                version_path->emplace_back(tmp_end_vertex_value, tmp_start_vertex_value - 1);
-            }
-
-            shortest_path_for_debug << (*version_path)[version_path->size() - 1] << ' ';
+        for (const auto& version : *version_path) {
+            shortest_path_for_debug << version << ' ';
         }
-        VLOG(10) << "success to find path for spec_version. spec_version=" << spec_version
+        VLOG_ROW << "success to find path for spec_version. spec_version=" << spec_version
                  << ", path=" << shortest_path_for_debug.str();
     }
 
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
 } // namespace starrocks

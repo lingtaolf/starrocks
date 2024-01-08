@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/ThriftServerEventProcessor.java
 
@@ -28,7 +41,6 @@ import org.apache.logging.log4j.Logger;
 import org.apache.thrift.protocol.TProtocol;
 import org.apache.thrift.server.ServerContext;
 import org.apache.thrift.server.TServerEventHandler;
-import org.apache.thrift.transport.TFramedTransport;
 import org.apache.thrift.transport.TSocket;
 import org.apache.thrift.transport.TTransport;
 
@@ -40,11 +52,10 @@ public class ThriftServerEventProcessor implements TServerEventHandler {
 
     private ThriftServer thriftServer;
 
-    private static ThreadLocal<ThriftServerContext> connectionContext;
+    private static ThreadLocal<ThriftServerContext> connectionContext = new ThreadLocal<>();
 
     public ThriftServerEventProcessor(ThriftServer thriftServer) {
         this.thriftServer = thriftServer;
-        connectionContext = new ThreadLocal<>();
     }
 
     public static ThriftServerContext getConnectionContext() {
@@ -58,35 +69,16 @@ public class ThriftServerEventProcessor implements TServerEventHandler {
     @Override
     public ServerContext createContext(TProtocol input, TProtocol output) {
         // param input is class org.apache.thrift.protocol.TBinaryProtocol
-        TSocket tSocket = null;
         TTransport transport = input.getTransport();
+        Preconditions.checkState(transport instanceof TSocket);
 
-        switch (thriftServer.getType()) {
-            case THREADED:
-                // class org.apache.thrift.transport.TFramedTransport
-                Preconditions.checkState(transport instanceof TFramedTransport);
-                TFramedTransport framedTransport = (TFramedTransport) transport;
-                // NOTE: we need patch code in TNonblockingServer, we don't use for now.
-                //  see https://issues.apache.org/jira/browse/THRIFT-1053
-                break;
-            case SIMPLE:
-            case THREAD_POOL:
-                // org.apache.thrift.transport.TSocket
-                Preconditions.checkState(transport instanceof TSocket);
-                tSocket = (TSocket) transport;
-                break;
-        }
-        if (tSocket == null) {
-            LOG.info("fail to get client socket. server type: {}", thriftServer.getType());
-            return null;
-        }
+        TSocket tSocket = (TSocket) transport;
         SocketAddress socketAddress = tSocket.getSocket().getRemoteSocketAddress();
         InetSocketAddress inetSocketAddress = null;
         if (socketAddress instanceof InetSocketAddress) {
             inetSocketAddress = (InetSocketAddress) socketAddress;
         } else {
-            LOG.info("fail to get client socket address. server type: {}",
-                    thriftServer.getType());
+            LOG.warn("fail to get client socket address");
             return null;
         }
         TNetworkAddress clientAddress = new TNetworkAddress(
@@ -95,7 +87,7 @@ public class ThriftServerEventProcessor implements TServerEventHandler {
 
         thriftServer.addConnect(clientAddress);
 
-        LOG.info("create thrift context. client: {}", clientAddress);
+        LOG.debug("create thrift context. client: {}", clientAddress);
         return new ThriftServerContext(clientAddress);
     }
 
@@ -110,7 +102,7 @@ public class ThriftServerEventProcessor implements TServerEventHandler {
         TNetworkAddress clientAddress = thriftServerContext.getClient();
         connectionContext.remove();
         thriftServer.removeConnect(clientAddress);
-        LOG.info("delete thrift context. client: {}", clientAddress);
+        LOG.debug("delete thrift context. client: {}", clientAddress);
     }
 
     @Override
@@ -119,9 +111,9 @@ public class ThriftServerEventProcessor implements TServerEventHandler {
             return;
         }
 
+        Preconditions.checkState(serverContext instanceof ThriftServerContext);
         ThriftServerContext thriftServerContext = (ThriftServerContext) serverContext;
         TNetworkAddress clientAddress = thriftServerContext.getClient();
-        Preconditions.checkState(serverContext instanceof ThriftServerContext);
         connectionContext.set(new ThriftServerContext(clientAddress));
     }
 }

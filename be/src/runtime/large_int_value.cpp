@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/runtime/large_int_value.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -28,26 +24,7 @@
 namespace starrocks {
 
 std::ostream& operator<<(std::ostream& os, __int128 const& value) {
-    std::ostream::sentry s(os);
-    if (s) {
-        unsigned __int128 tmp = value < 0 ? -value : value;
-        char buffer[48];
-        char* d = std::end(buffer);
-        do {
-            --d;
-            *d = "0123456789"[tmp % 10];
-            tmp /= 10;
-        } while (tmp != 0);
-        if (value < 0) {
-            --d;
-            *d = '-';
-        }
-        int len = std::end(buffer) - d;
-        if (os.rdbuf()->sputn(d, len) != len) {
-            os.setstate(std::ios_base::badbit);
-        }
-    }
-    return os;
+    return os << LargeIntValue::to_string(value);
 }
 
 std::istream& operator>>(std::istream& is, __int128& value) {

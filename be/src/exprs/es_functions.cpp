@@ -1,37 +1,32 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exprs/es_functions.cpp
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "exprs/es_functions.h"
 
-#include "exprs/anyval_util.h"
-#include "exprs/expr.h"
-#include "runtime/tuple_row.h"
-#include "util/debug_util.h"
+#include "column/column_builder.h"
+#include "column/column_viewer.h"
 
 namespace starrocks {
 
-void ESFunctions::init() {}
+StatusOr<ColumnPtr> ESFunctions::match(FunctionContext* context, const Columns& columns) {
+    auto size = columns[0]->size();
+    ColumnBuilder<TYPE_BOOLEAN> result(size);
+    for (int row = 0; row < size; ++row) {
+        result.append(true);
+    }
 
-BooleanVal ESFunctions::match(FunctionContext* ctx, const StringVal& col, const StringVal& condition) {
-    return BooleanVal(true);
+    return result.build(ColumnHelper::is_all_const(columns));
 }
 
 } // namespace starrocks

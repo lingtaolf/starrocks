@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/load/routineload/KafkaRoutineLoadJobTest.java
 
@@ -25,15 +38,10 @@ import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.starrocks.analysis.ColumnSeparator;
-import com.starrocks.analysis.CreateRoutineLoadStmt;
 import com.starrocks.analysis.LabelName;
 import com.starrocks.analysis.ParseNode;
-import com.starrocks.analysis.PartitionNames;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.OlapTable;
-import com.starrocks.catalog.Table;
 import com.starrocks.common.LoadException;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.common.Pair;
@@ -42,6 +50,10 @@ import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.common.util.KafkaUtil;
 import com.starrocks.load.RoutineLoadDesc;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.ColumnSeparator;
+import com.starrocks.sql.ast.CreateRoutineLoadStmt;
+import com.starrocks.sql.ast.PartitionNames;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.thrift.TResourceInfo;
 import com.starrocks.transaction.GlobalTransactionMgr;
@@ -91,7 +103,7 @@ public class KafkaRoutineLoadJobTest {
     }
 
     @Test
-    public void testBeNumMin(@Mocked Catalog catalog,
+    public void testBeNumMin(@Mocked GlobalStateMgr globalStateMgr,
                              @Mocked SystemInfoService systemInfoService,
                              @Mocked Database database,
                              @Mocked RoutineLoadDesc routineLoadDesc) throws MetaNotFoundException {
@@ -102,70 +114,98 @@ public class KafkaRoutineLoadJobTest {
         List<Long> beIds1 = Lists.newArrayList(1L);
         List<Long> beIds2 = Lists.newArrayList(1L, 2L, 3L, 4L);
 
-        String clusterName1 = "default1";
-        String clusterName2 = "default2";
-
         new Expectations() {
             {
-                Catalog.getCurrentSystemInfo();
+                GlobalStateMgr.getCurrentSystemInfo();
                 minTimes = 0;
                 result = systemInfoService;
-                systemInfoService.getClusterBackendIds(clusterName1, true);
-                minTimes = 0;
-                result = beIds1;
-                systemInfoService.getClusterBackendIds(clusterName2, true);
+                systemInfoService.getBackendIds(true);
                 result = beIds2;
+                minTimes = 0;
+                systemInfoService.getAliveBackendNumber();
+                result = beIds2.size();
+                minTimes = 0;
+                systemInfoService.getTotalBackendNumber();
+                result = beIds2.size();
                 minTimes = 0;
             }
         };
 
-        // 2 partitions, 1 be
-        RoutineLoadJob routineLoadJob =
-                new KafkaRoutineLoadJob(1L, "kafka_routine_load_job", clusterName1, 1L,
-                        1L, "127.0.0.1:9020", "topic1");
-        Deencapsulation.setField(routineLoadJob, "currentKafkaPartitions", partitionList1);
-        Assert.assertEquals(1, routineLoadJob.calculateCurrentConcurrentTaskNum());
-
         // 3 partitions, 4 be
-        routineLoadJob = new KafkaRoutineLoadJob(1L, "kafka_routine_load_job", clusterName2, 1L,
+        RoutineLoadJob routineLoadJob = new KafkaRoutineLoadJob(1L, "kafka_routine_load_job", 1L,
                 1L, "127.0.0.1:9020", "topic1");
         Deencapsulation.setField(routineLoadJob, "currentKafkaPartitions", partitionList2);
         Assert.assertEquals(3, routineLoadJob.calculateCurrentConcurrentTaskNum());
 
         // 4 partitions, 4 be
-        routineLoadJob = new KafkaRoutineLoadJob(1L, "kafka_routine_load_job", clusterName2, 1L,
+        routineLoadJob = new KafkaRoutineLoadJob(1L, "kafka_routine_load_job", 1L,
                 1L, "127.0.0.1:9020", "topic1");
         Deencapsulation.setField(routineLoadJob, "currentKafkaPartitions", partitionList3);
         Assert.assertEquals(4, routineLoadJob.calculateCurrentConcurrentTaskNum());
 
         // 7 partitions, 4 be
-        routineLoadJob = new KafkaRoutineLoadJob(1L, "kafka_routine_load_job", clusterName2, 1L,
+        routineLoadJob = new KafkaRoutineLoadJob(1L, "kafka_routine_load_job", 1L,
                 1L, "127.0.0.1:9020", "topic1");
         Deencapsulation.setField(routineLoadJob, "currentKafkaPartitions", partitionList4);
         Assert.assertEquals(4, routineLoadJob.calculateCurrentConcurrentTaskNum());
     }
 
+    @Test 
+    public void testShowConfluentSchemaRegistryUrl() {
+        KafkaRoutineLoadJob routineLoadJob1 = new KafkaRoutineLoadJob(1L, "kafka_routine_load_job", 1L,
+                1L, "127.0.0.1:9020", "topic1");
+        routineLoadJob1.setConfluentSchemaRegistryUrl("http://abc:def@addr.com");
+        String sourceString = routineLoadJob1.dataSourcePropertiesJsonToString();
+        String expected = "{\"topic\":\"topic1\",\"confluent.schema.registry.url\":\"http://addr.com\"," + 
+                                            "\"currentKafkaPartitions\":\"\",\"brokerList\":\"127.0.0.1:9020\"}";
+        Assert.assertEquals(expected, sourceString);
+
+        KafkaRoutineLoadJob routineLoadJob2 = new KafkaRoutineLoadJob(1L, "kafka_routine_load_job", 1L,
+                1L, "127.0.0.1:9020", "topic1");
+        routineLoadJob2.setConfluentSchemaRegistryUrl("https://abc:def@addr.com");
+        sourceString = routineLoadJob2.dataSourcePropertiesJsonToString();
+        expected = "{\"topic\":\"topic1\",\"confluent.schema.registry.url\":\"https://addr.com\"," + 
+                                    "\"currentKafkaPartitions\":\"\",\"brokerList\":\"127.0.0.1:9020\"}";
+        Assert.assertEquals(expected, sourceString);
+
+        KafkaRoutineLoadJob routineLoadJob3 = new KafkaRoutineLoadJob(1L, "kafka_routine_load_job", 1L,
+                1L, "127.0.0.1:9020", "topic1");
+        routineLoadJob3.setConfluentSchemaRegistryUrl("https://addr.com");
+        sourceString = routineLoadJob3.dataSourcePropertiesJsonToString();
+        expected = "{\"topic\":\"topic1\",\"confluent.schema.registry.url\":\"https://addr.com\"," + 
+                                    "\"currentKafkaPartitions\":\"\",\"brokerList\":\"127.0.0.1:9020\"}";
+        Assert.assertEquals(expected, sourceString);
+
+        KafkaRoutineLoadJob routineLoadJob4 = new KafkaRoutineLoadJob(1L, "kafka_routine_load_job", 1L,
+                1L, "127.0.0.1:9020", "topic1");
+        routineLoadJob4.setConfluentSchemaRegistryUrl("http://addr.com");
+        sourceString = routineLoadJob4.dataSourcePropertiesJsonToString();
+        expected = "{\"topic\":\"topic1\",\"confluent.schema.registry.url\":\"http://addr.com\"," + 
+                                    "\"currentKafkaPartitions\":\"\",\"brokerList\":\"127.0.0.1:9020\"}";
+        Assert.assertEquals(expected, sourceString);
+    }
+
     @Test
-    public void testDivideRoutineLoadJob(@Injectable RoutineLoadManager routineLoadManager,
+    public void testDivideRoutineLoadJob(@Injectable RoutineLoadMgr routineLoadManager,
                                          @Mocked RoutineLoadDesc routineLoadDesc)
             throws UserException {
 
-        Catalog catalog = Deencapsulation.newInstance(Catalog.class);
+        GlobalStateMgr globalStateMgr = Deencapsulation.newInstance(GlobalStateMgr.class);
 
         RoutineLoadJob routineLoadJob =
-                new KafkaRoutineLoadJob(1L, "kafka_routine_load_job", "default", 1L,
+                new KafkaRoutineLoadJob(1L, "kafka_routine_load_job", 1L,
                         1L, "127.0.0.1:9020", "topic1");
 
-        new Expectations(catalog) {
+        new Expectations(globalStateMgr) {
             {
-                catalog.getRoutineLoadManager();
+                globalStateMgr.getRoutineLoadMgr();
                 minTimes = 0;
                 result = routineLoadManager;
             }
         };
 
         RoutineLoadTaskScheduler routineLoadTaskScheduler = new RoutineLoadTaskScheduler(routineLoadManager);
-        Deencapsulation.setField(catalog, "routineLoadTaskScheduler", routineLoadTaskScheduler);
+        Deencapsulation.setField(globalStateMgr, "routineLoadTaskScheduler", routineLoadTaskScheduler);
 
         Deencapsulation.setField(routineLoadJob, "currentKafkaPartitions", Arrays.asList(1, 4, 6));
 
@@ -191,16 +231,16 @@ public class KafkaRoutineLoadJobTest {
 
     @Test
     public void testProcessTimeOutTasks(@Injectable GlobalTransactionMgr globalTransactionMgr,
-                                        @Injectable RoutineLoadManager routineLoadManager) {
-        Catalog catalog = Deencapsulation.newInstance(Catalog.class);
+                                        @Injectable RoutineLoadMgr routineLoadManager) {
+        GlobalStateMgr globalStateMgr = Deencapsulation.newInstance(GlobalStateMgr.class);
 
         RoutineLoadJob routineLoadJob =
-                new KafkaRoutineLoadJob(1L, "kafka_routine_load_job", "default", 1L,
+                new KafkaRoutineLoadJob(1L, "kafka_routine_load_job", 1L,
                         1L, "127.0.0.1:9020", "topic1");
         long maxBatchIntervalS = 10;
         new Expectations() {
             {
-                catalog.getRoutineLoadManager();
+                globalStateMgr.getRoutineLoadMgr();
                 minTimes = 0;
                 result = routineLoadManager;
             }
@@ -209,8 +249,9 @@ public class KafkaRoutineLoadJobTest {
         List<RoutineLoadTaskInfo> routineLoadTaskInfoList = new ArrayList<>();
         Map<Integer, Long> partitionIdsToOffset = Maps.newHashMap();
         partitionIdsToOffset.put(100, 0L);
-        KafkaTaskInfo kafkaTaskInfo = new KafkaTaskInfo(new UUID(1, 1), 1L, "default_cluster",
-                maxBatchIntervalS * 2 * 1000, System.currentTimeMillis(), partitionIdsToOffset);
+        KafkaTaskInfo kafkaTaskInfo = new KafkaTaskInfo(new UUID(1, 1), 1L,
+                maxBatchIntervalS * 2 * 1000, System.currentTimeMillis(), partitionIdsToOffset,
+                routineLoadJob.getTaskTimeoutSecond() * 1000);
         kafkaTaskInfo.setExecuteStartTimeMs(System.currentTimeMillis() - maxBatchIntervalS * 2 * 1000 - 1);
         routineLoadTaskInfoList.add(kafkaTaskInfo);
 
@@ -221,14 +262,14 @@ public class KafkaRoutineLoadJobTest {
             {
                 List<RoutineLoadTaskInfo> idToRoutineLoadTask =
                         Deencapsulation.getField(routineLoadJob, "routineLoadTaskInfoList");
-                Assert.assertNotEquals("1", idToRoutineLoadTask.get(0).getId());
+                Assert.assertNotEquals("1", idToRoutineLoadTask.get(0).getId().toString());
                 Assert.assertEquals(1, idToRoutineLoadTask.size());
             }
         };
     }
 
     @Test
-    public void testFromCreateStmtWithErrorTable(@Mocked Catalog catalog,
+    public void testFromCreateStmtWithErrorTable(@Mocked GlobalStateMgr globalStateMgr,
                                                  @Injectable Database database) throws LoadException {
         CreateRoutineLoadStmt createRoutineLoadStmt = initCreateRoutineLoadStmt();
         RoutineLoadDesc routineLoadDesc = new RoutineLoadDesc(columnSeparator, null, null, null, partitionNames);
@@ -251,7 +292,7 @@ public class KafkaRoutineLoadJobTest {
     }
 
     @Test
-    public void testFromCreateStmt(@Mocked Catalog catalog,
+    public void testFromCreateStmt(@Mocked GlobalStateMgr globalStateMgr,
                                    @Injectable Database database,
                                    @Injectable OlapTable table) throws UserException {
         CreateRoutineLoadStmt createRoutineLoadStmt = initCreateRoutineLoadStmt();
@@ -264,7 +305,7 @@ public class KafkaRoutineLoadJobTest {
         Deencapsulation.setField(createRoutineLoadStmt, "kafkaPartitionOffsets", partitionIdToOffset);
         Deencapsulation.setField(createRoutineLoadStmt, "kafkaBrokerList", serverAddress);
         Deencapsulation.setField(createRoutineLoadStmt, "kafkaTopic", topicName);
-        long dbId = 1l;
+        long dbId = 1L;
         long tableId = 2L;
 
         new Expectations() {
@@ -278,9 +319,9 @@ public class KafkaRoutineLoadJobTest {
                 table.getId();
                 minTimes = 0;
                 result = tableId;
-                table.getType();
+                table.isOlapOrCloudNativeTable();
                 minTimes = 0;
-                result = Table.TableType.OLAP;
+                result = true;
             }
         };
 

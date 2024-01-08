@@ -4,12 +4,10 @@
 // #category: operations on strings
 // #summary: Functions for joining strings and numbers using a delimiter.
 //
-#ifndef STRINGS_JOIN_H_
-#define STRINGS_JOIN_H_
+#pragma once
 
-#include <stdio.h>
-#include <string.h>
-
+#include <cstdio>
+#include <cstring>
 #include <ext/hash_map>
 using __gnu_cxx::hash;
 using __gnu_cxx::hash_map; // Not used in this file.
@@ -317,5 +315,3 @@ template <class CONTAINER>
 inline string JoinInts(const CONTAINER& components, const char* delim) {
     return JoinElements(components, delim);
 }
-
-#endif // STRINGS_JOIN_H_

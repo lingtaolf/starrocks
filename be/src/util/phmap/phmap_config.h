@@ -1,9 +1,21 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/greg7mdp/parallel-hashmap/blob/master/parallel_hashmap/phmap_config.h
 
-#if !defined(phmap_config_h_guard_)
-#define phmap_config_h_guard_
+#pragma once
 
 // ---------------------------------------------------------------------------
 // Copyright (c) 2019, Gregory Popovitch - greg7mdp@gmail.com
@@ -12,7 +24,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      https://www.apache.org/licenses/LICENSE-2.0
+//     https://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,7 +41,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      https://www.apache.org/licenses/LICENSE-2.0
+//     https://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -43,7 +55,7 @@
 #define PHMAP_VERSION_PATCH 0
 
 // Included for the __GLIBC__ macro (or similar macros on other systems).
-#include <limits.h>
+#include <climits>
 
 #ifdef __cplusplus
 // Included for __GLIBCXX__, _LIBCPP_VERSION
@@ -737,5 +749,3 @@ auto ArraySizeHelper(const T (&array)[N]) -> char (&)[N];
     do {                       \
     } while (false)
 #endif // PHMAP_HAVE_EXCEPTIONS
-
-#endif // phmap_config_h_guard_

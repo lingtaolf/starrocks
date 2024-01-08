@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/http/rest/TableSchemaAction.java
 
@@ -21,8 +34,8 @@
 
 package com.starrocks.http.rest;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Strings;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.OlapTable;
@@ -30,18 +43,21 @@ import com.starrocks.catalog.PrimitiveType;
 import com.starrocks.catalog.ScalarType;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.Type;
-import com.starrocks.cluster.ClusterNamespace;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.StarRocksHttpException;
 import com.starrocks.http.ActionController;
 import com.starrocks.http.BaseRequest;
 import com.starrocks.http.BaseResponse;
 import com.starrocks.http.IllegalArgException;
-import com.starrocks.mysql.privilege.PrivPredicate;
+import com.starrocks.meta.lock.LockType;
+import com.starrocks.meta.lock.Locker;
+import com.starrocks.privilege.AccessDeniedException;
+import com.starrocks.privilege.PrivilegeType;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.analyzer.Authorizer;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpResponseStatus;
-import org.codehaus.jackson.map.ObjectMapper;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -59,13 +75,12 @@ public class TableSchemaAction extends RestBaseAction {
 
     public static void registerAction(ActionController controller) throws IllegalArgException {
         // the extra `/api` path is so disgusting
-        controller.registerHandler(HttpMethod.GET,
-                "/api/{" + DB_KEY + "}/{" + TABLE_KEY + "}/_schema", new TableSchemaAction
-                        (controller));
+        controller.registerHandler(HttpMethod.GET, "/api/{" + DB_KEY + "}/{" + TABLE_KEY + "}/_schema",
+                new TableSchemaAction(controller));
     }
 
     @Override
-    protected void executeWithoutPassword(BaseRequest request, BaseResponse response) throws DdlException {
+    protected void executeWithoutPassword(BaseRequest request, BaseResponse response) throws DdlException, AccessDeniedException {
         // just allocate 2 slot for top holder map
         Map<String, Object> resultMap = new HashMap<>(2);
         String dbName = request.getSingleParameter(DB_KEY);
@@ -75,15 +90,17 @@ public class TableSchemaAction extends RestBaseAction {
                     || Strings.isNullOrEmpty(tableName)) {
                 throw new StarRocksHttpException(HttpResponseStatus.BAD_REQUEST, "No database or table selected.");
             }
-            String fullDbName = ClusterNamespace.getFullName(ConnectContext.get().getClusterName(), dbName);
             // check privilege for select, otherwise return 401 HTTP status
-            checkTblAuth(ConnectContext.get().getCurrentUserIdentity(), fullDbName, tableName, PrivPredicate.SELECT);
-            Database db = Catalog.getCurrentCatalog().getDb(fullDbName);
+            Authorizer.checkTableAction(ConnectContext.get().getCurrentUserIdentity(), ConnectContext.get().getCurrentRoleIds(),
+                    dbName, tableName, PrivilegeType.SELECT);
+
+            Database db = GlobalStateMgr.getCurrentState().getDb(dbName);
             if (db == null) {
                 throw new StarRocksHttpException(HttpResponseStatus.NOT_FOUND,
                         "Database [" + dbName + "] " + "does not exists");
             }
-            db.readLock();
+            Locker locker = new Locker();
+            locker.lockDatabase(db, LockType.READ);
             try {
                 Table table = db.getTable(tableName);
                 if (table == null) {
@@ -121,7 +138,7 @@ public class TableSchemaAction extends RestBaseAction {
                             e.getMessage() == null ? "Null Pointer Exception" : e.getMessage());
                 }
             } finally {
-                db.readUnlock();
+                locker.unLockDatabase(db, LockType.READ);
             }
         } catch (StarRocksHttpException e) {
             // status code  should conforms to HTTP semantic

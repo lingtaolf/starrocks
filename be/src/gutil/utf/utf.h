@@ -1,7 +1,6 @@
-#ifndef _UTFH_
-#define _UTFH_ 1
+#pragma once
 
-#include <stdint.h>
+#include <cstdint>
 
 typedef signed int Rune; /* Code-point values in Unicode 4.0 are 21 bits wide.*/
 
@@ -208,6 +207,4 @@ int isspacerune(Rune r);
 
 #ifdef __cplusplus
 }
-#endif
-
 #endif

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/olap/base_tablet.h
 
@@ -19,8 +32,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_OLAP_BASE_TABLET_H
-#define STARROCKS_BE_SRC_OLAP_BASE_TABLET_H
+#pragma once
 
 #include <memory>
 
@@ -38,58 +50,92 @@ class DataDir;
 // storage engine evolves.
 class BaseTablet : public std::enable_shared_from_this<BaseTablet> {
 public:
-    BaseTablet(MemTracker* mem_tracker, TabletMetaSharedPtr tablet_meta, DataDir* data_dir);
+    BaseTablet(const TabletMetaSharedPtr& tablet_meta, DataDir* data_dir);
+    // for ut
+    BaseTablet() = default;
+
     virtual ~BaseTablet() = default;
 
-    inline DataDir* data_dir() const;
-    const std::string& tablet_path() const;
+    DataDir* data_dir() const;
+
+    void set_data_dir(DataDir* data_dir) { _data_dir = data_dir; }
+
+    // A tablet's data are stored in disk files under a directory with structure like:
+    //   ${storage_root_path}/${shard_number}/${tablet_id}/${schema_hash}
+    //
+    // The reason why create a directory ${schema_hash} under the directory ${tablet_id} is that in some very
+    // earlier versions of Doris(https://github.com/apache/incubator-doris), it's possible to have multiple
+    // tablets with the same tablet id but different schema hash, therefore the schema hash is constructed as
+    // part of the data path of a tablet to distinguish each other.
+    // The design that multiple tablets can share the same tablet id has been dropped by Doris, but the directory
+    // structure has been kept.
+    // Since StarRocks is built on earlier work on Doris, this directory structure has been kept in StarRocks too.
+    //
+    // `schema_hash_path()` returns the full path of the directory ${schema_hash}.
+    // `tablet_id_path()` returns the full path of the directory ${tablet_id}.
+    const std::string& schema_hash_path() const;
+
+    std::string tablet_id_path() const;
 
     TabletState tablet_state() const { return _state; }
-    OLAPStatus set_tablet_state(TabletState state);
+    Status set_tablet_state(TabletState state);
 
     // Property encapsulated in TabletMeta
-    inline const TabletMetaSharedPtr tablet_meta();
+    const TabletMetaSharedPtr tablet_meta();
+    const TabletMetaSharedPtr tablet_meta() const;
 
-    inline TabletUid tablet_uid() const;
-    inline int64_t table_id() const;
+    void set_tablet_meta(const TabletMetaSharedPtr& tablet_meta) { _tablet_meta = tablet_meta; }
+
+    TabletUid tablet_uid() const;
+    int64_t belonged_table_id() const;
     // Returns a string can be used to uniquely identify a tablet.
     // The result string will often be printed to the log.
-    inline const std::string full_name() const;
-    inline int64_t partition_id() const;
-    inline int64_t tablet_id() const;
-    inline int32_t schema_hash() const;
-    inline int16_t shard_id();
-    inline const int64_t creation_time() const;
-    inline void set_creation_time(int64_t creation_time);
-    inline bool equal(int64_t tablet_id, int32_t schema_hash);
+    const std::string full_name() const;
+    int64_t partition_id() const;
+    int64_t tablet_id() const;
+    int32_t schema_hash() const;
+    int16_t shard_id();
+    const int64_t creation_time() const;
+    void set_creation_time(int64_t creation_time);
+    bool equal(int64_t tablet_id, int32_t schema_hash);
 
     // properties encapsulated in TabletSchema
-    inline const TabletSchema& tablet_schema() const;
+    virtual const TabletSchema& unsafe_tablet_schema_ref() const;
 
-    inline MemTracker* mem_tracker() { return _mem_tracker; }
+    virtual const TabletSchemaCSPtr tablet_schema() const;
+
+    bool set_tablet_schema_into_rowset_meta() {
+        bool flag = false;
+        for (const RowsetMetaSharedPtr& rowset_meta : _tablet_meta->all_rs_metas()) {
+            if (!rowset_meta->get_meta_pb().has_tablet_schema()) {
+                rowset_meta->set_tablet_schema(tablet_schema());
+                flag = true;
+            }
+        }
+        return flag;
+    }
 
 protected:
     virtual void on_shutdown() {}
 
     void _gen_tablet_path();
 
-    MemTracker* _mem_tracker = nullptr;
-
     TabletState _state;
     TabletMetaSharedPtr _tablet_meta;
 
     DataDir* _data_dir;
-    std::string _tablet_path;
+    std::string _tablet_path; // TODO: remove this variable for less memory occupation
 
 private:
-    DISALLOW_COPY_AND_ASSIGN(BaseTablet);
+    BaseTablet(const BaseTablet&) = delete;
+    const BaseTablet& operator=(const BaseTablet&) = delete;
 };
 
 inline DataDir* BaseTablet::data_dir() const {
     return _data_dir;
 }
 
-inline const std::string& BaseTablet::tablet_path() const {
+inline const std::string& BaseTablet::schema_hash_path() const {
     return _tablet_path;
 }
 
@@ -97,11 +143,15 @@ inline const TabletMetaSharedPtr BaseTablet::tablet_meta() {
     return _tablet_meta;
 }
 
+inline const TabletMetaSharedPtr BaseTablet::tablet_meta() const {
+    return _tablet_meta;
+}
+
 inline TabletUid BaseTablet::tablet_uid() const {
     return _tablet_meta->tablet_uid();
 }
 
-inline int64_t BaseTablet::table_id() const {
+inline int64_t BaseTablet::belonged_table_id() const {
     return _tablet_meta->table_id();
 }
 
@@ -137,13 +187,15 @@ inline void BaseTablet::set_creation_time(int64_t creation_time) {
 }
 
 inline bool BaseTablet::equal(int64_t id, int32_t hash) {
-    return (tablet_id() == id) && (schema_hash() == hash);
+    return tablet_id() == id && schema_hash() == hash;
 }
 
-inline const TabletSchema& BaseTablet::tablet_schema() const {
+inline const TabletSchema& BaseTablet::unsafe_tablet_schema_ref() const {
     return _tablet_meta->tablet_schema();
 }
 
-} /* namespace starrocks */
+inline const TabletSchemaCSPtr BaseTablet::tablet_schema() const {
+    return _tablet_meta->tablet_schema_ptr();
+}
 
-#endif /* STARROCKS_BE_SRC_OLAP_BASE_TABLET_H */
+} /* namespace starrocks */

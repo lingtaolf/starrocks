@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/qe/QueryStatisticsItem.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -39,6 +35,7 @@ public final class QueryStatisticsItem {
     private final List<FragmentInstanceInfo> fragmentInstanceInfos;
     // root query profile
     private final RuntimeProfile queryProfile;
+    private final TUniqueId executionId;
 
     private QueryStatisticsItem(Builder builder) {
         this.queryId = builder.queryId;
@@ -49,6 +46,7 @@ public final class QueryStatisticsItem {
         this.queryStartTime = builder.queryStartTime;
         this.fragmentInstanceInfos = builder.fragmentInstanceInfos;
         this.queryProfile = builder.queryProfile;
+        this.executionId = builder.executionId;
     }
 
     public String getDb() {
@@ -67,9 +65,13 @@ public final class QueryStatisticsItem {
         return connId;
     }
 
-    public String getQueryExecTime() {
-        final long currentTime = System.currentTimeMillis();
-        return String.valueOf(currentTime - queryStartTime);
+    public long getQueryStartTime() {
+        return queryStartTime;
+    }
+
+    public long getQueryExecTime() {
+        long currentTime = System.currentTimeMillis();
+        return currentTime - queryStartTime;
     }
 
     public String getQueryId() {
@@ -84,6 +86,10 @@ public final class QueryStatisticsItem {
         return queryProfile;
     }
 
+    public TUniqueId getExecutionId() {
+        return executionId;
+    }
+
     public static final class Builder {
         private String queryId;
         private String db;
@@ -93,6 +99,7 @@ public final class QueryStatisticsItem {
         private long queryStartTime;
         private List<FragmentInstanceInfo> fragmentInstanceInfos;
         private RuntimeProfile queryProfile;
+        private TUniqueId executionId;
 
         public Builder() {
             fragmentInstanceInfos = Lists.newArrayList();
@@ -138,6 +145,11 @@ public final class QueryStatisticsItem {
             return this;
         }
 
+        public Builder executionId(TUniqueId executionId) {
+            this.executionId = executionId;
+            return this;
+        }
+
         public QueryStatisticsItem build() {
             initDefaultValue(this);
             return new QueryStatisticsItem(this);
@@ -166,6 +178,10 @@ public final class QueryStatisticsItem {
 
             if (queryProfile == null) {
                 queryProfile = new RuntimeProfile("");
+            }
+
+            if (executionId == null) {
+                executionId = new TUniqueId();
             }
         }
     }

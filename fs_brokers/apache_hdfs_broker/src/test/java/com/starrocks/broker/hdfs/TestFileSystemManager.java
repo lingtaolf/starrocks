@@ -1,9 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master
-//                     /fs_brokers/apache_hdfs_broker/src/test/java
-//                     /org/apache/doris/broker/hdfs/TestFileSystemManager.java 
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -217,4 +211,27 @@ public class TestFileSystemManager extends TestCase {
         assertNotNull(fs);
         fs.getDFSFileSystem().close();
     }
+
+    @Test
+    public void testGetFileSystemForMultipleNameServicesHA() throws IOException {
+        Map<String, String> properties = new HashMap<String, String>();
+        properties.put("username", "user");
+        properties.put("password", "passwd");
+        properties.put("fs.defaultFS", "hdfs://starrocks");
+        properties.put("dfs.nameservices", "DClusterNmg1,DClusterNmg2");
+        properties.put("dfs.ha.namenodes.DClusterNmg1", "nn11,nn12");
+        properties.put("dfs.namenode.rpc-address.DClusterNmg1.nn11", "127.0.0.1:8888");
+        properties.put("dfs.namenode.rpc-address.DClusterNmg1.nn12", "127.0.0.1:7777");
+        properties.put("dfs.client.failover.proxy.provider.DClusterNmg1",
+                "org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider");
+        properties.put("dfs.ha.namenodes.DClusterNmg2", "nn21,nn22");
+        properties.put("dfs.namenode.rpc-address.DClusterNmg2.nn21", "127.0.0.1:8020");
+        properties.put("dfs.namenode.rpc-address.DClusterNmg2.nn22", "127.0.0.1:8030");
+        properties.put("dfs.client.failover.proxy.provider.DClusterNmg2",
+                "org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider");
+        BrokerFileSystem fs = fileSystemManager.getFileSystem(testHdfsHost + "/user/user/dd_cdm/hive/dd_cdm/", properties);
+        assertNotNull(fs);
+        fs.getDFSFileSystem().close();
+    }
+
 }

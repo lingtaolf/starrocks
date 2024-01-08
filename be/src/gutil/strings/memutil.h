@@ -50,11 +50,10 @@
 // --                      MEMCASEIS
 // strcount                MEMCOUNT       (strcount is from strutil.h)
 
-#ifndef STRINGS_MEMUTIL_H_
-#define STRINGS_MEMUTIL_H_
+#pragma once
 
-#include <stddef.h>
-#include <string.h> // to get the POSIX mem*() routines
+#include <cstddef>
+#include <cstring> // to get the POSIX mem*() routines
 
 #include "gutil/port.h" // disable some warnings on Windows
 
@@ -134,5 +133,3 @@ inline int memcount(const char* buf, size_t len, char c) {
     }
     return num;
 }
-
-#endif // STRINGS_MEMUTIL_H_

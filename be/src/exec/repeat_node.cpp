@@ -1,58 +1,77 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/repeat_node.cpp
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "exec/repeat_node.h"
 
+#include "exec/pipeline/aggregate/repeat/repeat_operator.h"
+#include "exec/pipeline/limit_operator.h"
+#include "exec/pipeline/operator.h"
+#include "exec/pipeline/pipeline_builder.h"
 #include "exprs/expr.h"
-#include "gutil/strings/join.h"
-#include "runtime/raw_value.h"
-#include "runtime/row_batch.h"
 #include "runtime/runtime_state.h"
-#include "util/runtime_profile.h"
 
 namespace starrocks {
-
 RepeatNode::RepeatNode(ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl& descs)
         : ExecNode(pool, tnode, descs),
           _slot_id_set_list(tnode.repeat_node.slot_id_set_list),
           _all_slot_ids(tnode.repeat_node.all_slot_ids),
           _repeat_id_list(tnode.repeat_node.repeat_id_list),
+          _repeat_times_required(_repeat_id_list.size()),
+          _repeat_times_last(_repeat_times_required),
           _grouping_list(tnode.repeat_node.grouping_list),
           _output_tuple_id(tnode.repeat_node.output_tuple_id),
-          _tuple_desc(nullptr),
-          _child_row_batch(nullptr),
-          _child_eos(false),
-          _repeat_id_idx(0),
-          _runtime_state(nullptr) {}
+          _tuple_desc(descs.get_tuple_descriptor(_output_tuple_id)) {
+    // initial for null slots;
+    for (int i = 0; i < _repeat_times_required; ++i) {
+        std::set<SlotId>& repeat_ids = _slot_id_set_list[i];
+        std::vector<SlotId> null_slots;
+        for (auto slot_id : _all_slot_ids) {
+            if (repeat_ids.find(slot_id) == repeat_ids.end()) {
+                null_slots.push_back(slot_id);
+            }
+        }
+        _null_slot_ids.push_back(null_slots);
+    }
 
-RepeatNode::~RepeatNode() {}
+    // initial for _columns_null of 4096 rows;
+    _column_null = generate_null_column(config::vector_chunk_size);
+
+    // initial for _grouping_columns;
+    for (auto& group : _grouping_list) {
+        std::vector<ColumnPtr> columns;
+        columns.reserve(group.size());
+        for (auto slot_id : group) {
+            columns.push_back(generate_repeat_column(slot_id, config::vector_chunk_size));
+        }
+        _grouping_columns.push_back(columns);
+    }
+
+    DCHECK_EQ(_grouping_list.size(), _tuple_desc->slots().size());
+    DCHECK_EQ(_grouping_list[0].size(), _repeat_id_list.size());
+    DCHECK_EQ(_slot_id_set_list.size(), _repeat_id_list.size());
+}
 
 Status RepeatNode::prepare(RuntimeState* state) {
-    SCOPED_TIMER(_runtime_profile->total_time_counter());
     RETURN_IF_ERROR(ExecNode::prepare(state));
-    _runtime_state = state;
-    _tuple_desc = state->desc_tbl().get_tuple_descriptor(_output_tuple_id);
-    if (_tuple_desc == NULL) {
+
+    if (_tuple_desc == nullptr) {
         return Status::InternalError("Failed to get tuple descriptor.");
     }
+
+    _extend_column_timer = ADD_TIMER(runtime_profile(), "ExtendColumnTime");
+    _copy_column_timer = ADD_TIMER(runtime_profile(), "CopyColumnTime");
+    _update_column_timer = ADD_TIMER(runtime_profile(), "UpdateColumnTime");
 
     return Status::OK();
 }
@@ -65,157 +84,144 @@ Status RepeatNode::open(RuntimeState* state) {
     return Status::OK();
 }
 
-/**
- * copy the rows to new tuple based on repeat_id_idx and _repeat_id_list and fill in row_batch,
- *  and then set grouping_id and other grouping function slot in child_row_batch
- *  e.g. _repeat_id_list = [0, 3, 1, 2], _repeat_id_idx = 2, _grouping_list [[0, 3, 1, 2], [0, 1, 1, 0]],
- *  row_batch tuple 0 ['a', 'b', 1] -> [['a', null, 1] tuple 1 [1, 1]]
+/*
+ * for new chunk A.
+ * It used as first time and non-first time:
+ *
+ * first time(_repeat_times_last == 0):
+ * step 1:
+ * move A as curr_chunk
+ * copy curr_chunk as _curr_chunk.
+ *
+ * step 2:
+ * Extend multiple virtual columns for curr_chunk,
+ * virtual columns is consist of gourping_id and grouping()/grouping_id() columns.
+ *
+ * step 3:
+ * update columns of curr_chunk for unneed columns,
+ * and return reulst chunk to parent.
+ *
+ *
+ * non-first time, it measn _repeat_times_last in [1, _repeat_times_required):
+ * step 1:
+ * copy _curr_chunk as curr_chunk.
+ *
+ * step 2/step 3 is the same as first time.
+ *
  */
-Status RepeatNode::get_repeated_batch(RowBatch* child_row_batch, int repeat_id_idx, RowBatch* row_batch) {
-    DCHECK(child_row_batch != nullptr);
-    DCHECK_EQ(row_batch->num_rows(), 0);
-
-    // Fill all slots according to child
-    MemPool* tuple_pool = row_batch->tuple_data_pool();
-    const std::vector<TupleDescriptor*>& src_tuple_descs = child_row_batch->row_desc().tuple_descriptors();
-    const std::vector<TupleDescriptor*>& dst_tuple_descs = row_batch->row_desc().tuple_descriptors();
-    std::vector<Tuple*> dst_tuples(src_tuple_descs.size(), nullptr);
-    for (int i = 0; i < child_row_batch->num_rows(); ++i) {
-        int row_idx = row_batch->add_row();
-        TupleRow* dst_row = row_batch->get_row(row_idx);
-        TupleRow* src_row = child_row_batch->get_row(i);
-
-        auto src_it = src_tuple_descs.begin();
-        auto dst_it = dst_tuple_descs.begin();
-        for (int j = 0; src_it != src_tuple_descs.end() && dst_it != dst_tuple_descs.end(); ++src_it, ++dst_it, ++j) {
-            Tuple* src_tuple = src_row->get_tuple(j);
-            if (src_tuple == NULL) {
-                continue;
-            }
-
-            if (dst_tuples[j] == nullptr) {
-                int size = row_batch->capacity() * (*dst_it)->byte_size();
-                void* tuple_buffer = tuple_pool->allocate(size);
-                if (tuple_buffer == nullptr) {
-                    return Status::InternalError("Allocate memory for row batch failed.");
-                }
-                dst_tuples[j] = reinterpret_cast<Tuple*>(tuple_buffer);
-            } else {
-                char* new_tuple = reinterpret_cast<char*>(dst_tuples[j]);
-                new_tuple += (*dst_it)->byte_size();
-                dst_tuples[j] = reinterpret_cast<Tuple*>(new_tuple);
-            }
-            dst_row->set_tuple(j, dst_tuples[j]);
-            memset(dst_tuples[j], 0, (*dst_it)->num_null_bytes());
-            src_tuple->deep_copy(dst_tuples[j], **dst_it, tuple_pool);
-            for (int k = 0; k < (*src_it)->slots().size(); k++) {
-                SlotDescriptor* src_slot_desc = (*src_it)->slots()[k];
-                SlotDescriptor* dst_slot_desc = (*dst_it)->slots()[k];
-                DCHECK_EQ(src_slot_desc->type().type, dst_slot_desc->type().type);
-                DCHECK_EQ(src_slot_desc->col_name(), dst_slot_desc->col_name());
-                // set null base on repeated list
-                if (_all_slot_ids.find(src_slot_desc->id()) != _all_slot_ids.end()) {
-                    std::set<SlotId>& repeat_ids = _slot_id_set_list[repeat_id_idx];
-                    if (repeat_ids.find(src_slot_desc->id()) == repeat_ids.end()) {
-                        dst_tuples[j]->set_null(dst_slot_desc->null_indicator_offset());
-                        continue;
-                    }
-                }
-            }
-        }
-        row_batch->commit_last_row();
-    }
-    Tuple* tuple = nullptr;
-    // Fill grouping ID to tuple
-    for (int i = 0; i < child_row_batch->num_rows(); ++i) {
-        int row_idx = i;
-        TupleRow* row = row_batch->get_row(row_idx);
-
-        if (tuple == nullptr) {
-            int size = row_batch->capacity() * _tuple_desc->byte_size();
-            void* tuple_buffer = tuple_pool->allocate(size);
-            if (tuple_buffer == nullptr) {
-                return Status::InternalError("Allocate memory for row batch failed.");
-            }
-            tuple = reinterpret_cast<Tuple*>(tuple_buffer);
-        } else {
-            char* new_tuple = reinterpret_cast<char*>(tuple);
-            new_tuple += _tuple_desc->byte_size();
-            tuple = reinterpret_cast<Tuple*>(new_tuple);
-        }
-
-        row->set_tuple(src_tuple_descs.size(), tuple);
-        memset(tuple, 0, _tuple_desc->num_null_bytes());
-
-        for (size_t slot_idx = 0; slot_idx < _grouping_list.size(); ++slot_idx) {
-            int64_t val = _grouping_list[slot_idx][repeat_id_idx];
-            DCHECK_LT(slot_idx, _tuple_desc->slots().size()) << "TupleDescriptor: " << _tuple_desc->debug_string();
-            const SlotDescriptor* slot_desc = _tuple_desc->slots()[slot_idx];
-            tuple->set_not_null(slot_desc->null_indicator_offset());
-            RawValue::write(&val, tuple, slot_desc, tuple_pool);
-        }
-    }
-
-    return Status::OK();
-}
-
-Status RepeatNode::get_next(RuntimeState* state, RowBatch* row_batch, bool* eos) {
+Status RepeatNode::get_next(RuntimeState* state, ChunkPtr* chunk, bool* eos) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
-    RETURN_IF_CANCELLED(state);
-    DCHECK(_repeat_id_idx >= 0);
-    for (const std::vector<int64_t>& v : _grouping_list) {
-        DCHECK(_repeat_id_idx <= (int)v.size());
-    }
-    // current child has finished its repeat, get child's next batch
-    if (_child_row_batch.get() == nullptr) {
-        if (_child_eos) {
-            *eos = true;
-            return Status::OK();
+    DCHECK_EQ(_children.size(), 1);
+
+    for (;;) {
+        // if _repeat_times_last < _repeat_times_required
+        // continue access old chunk.
+        if (_repeat_times_last < _repeat_times_required) {
+            ChunkPtr curr_chunk = _curr_chunk->clone_empty(_curr_chunk->num_rows());
+            {
+                SCOPED_TIMER(_copy_column_timer);
+                curr_chunk->append_safe(*_curr_chunk, 0, _curr_chunk->num_rows());
+            }
+
+            extend_and_update_columns(&curr_chunk, chunk);
+
+            ++_repeat_times_last;
+            break;
+        } else {
+            _curr_chunk.reset();
+            // get a new chunk.
+            RETURN_IF_ERROR(_children[0]->get_next(state, chunk, eos));
+
+            // check for over.
+            if (*eos || (*chunk) == nullptr) {
+                break;
+            } else if ((*chunk)->num_rows() == 0) {
+                continue;
+            } else {
+                // got a new chunk.
+                _repeat_times_last = 0;
+                auto curr_chunk = std::move(*chunk);
+
+                {
+                    SCOPED_TIMER(_copy_column_timer);
+                    // Used for next time.
+                    _curr_chunk = curr_chunk->clone_empty(curr_chunk->num_rows());
+                    _curr_chunk->append_safe(*curr_chunk, 0, curr_chunk->num_rows());
+                }
+
+                extend_and_update_columns(&curr_chunk, chunk);
+
+                ++_repeat_times_last;
+                break;
+            }
         }
-
-        _child_row_batch.reset(new RowBatch(child(0)->row_desc(), state->batch_size(), mem_tracker()));
-        RETURN_IF_ERROR(child(0)->get_next(state, _child_row_batch.get(), &_child_eos));
-
-        if (_child_row_batch->num_rows() <= 0) {
-            _child_row_batch.reset(nullptr);
-            *eos = true;
-            return Status::OK();
-        }
     }
 
-    DCHECK_EQ(row_batch->num_rows(), 0);
-    RETURN_IF_ERROR(get_repeated_batch(_child_row_batch.get(), _repeat_id_idx, row_batch));
-    _repeat_id_idx++;
-
-    int size = _repeat_id_list.size();
-    if (_repeat_id_idx >= size) {
-        _child_row_batch.reset(nullptr);
-        _repeat_id_idx = 0;
+    if ((*chunk) != nullptr) {
+        ExecNode::eval_join_runtime_filters(chunk);
+        RETURN_IF_ERROR(ExecNode::eval_conjuncts(_conjunct_ctxs, (*chunk).get()));
+        _num_rows_returned += (*chunk)->num_rows();
     }
-
+    DCHECK_CHUNK(*chunk);
     return Status::OK();
 }
 
-Status RepeatNode::close(RuntimeState* state) {
-    if (is_closed()) {
-        return Status::OK();
+void RepeatNode::extend_and_update_columns(ChunkPtr* curr_chunk, ChunkPtr* chunk) {
+    {
+        SCOPED_TIMER(_extend_column_timer);
+        // extend virtual columns for gourping_id and grouping()/grouping_id() columns.
+        for (int i = 0; i < _grouping_list.size(); ++i) {
+            auto grouping_column =
+                    generate_repeat_column(_grouping_list[i][_repeat_times_last], (*curr_chunk)->num_rows());
+
+            (*curr_chunk)->append_column(grouping_column, _tuple_desc->slots()[i]->id());
+        }
     }
-    _child_row_batch.reset(nullptr);
-    return ExecNode::close(state);
+
+    {
+        SCOPED_TIMER(_update_column_timer);
+        // update columns for unneed columns.
+        std::vector<SlotId>& null_slot_ids = _null_slot_ids[_repeat_times_last];
+        for (auto slot_id : null_slot_ids) {
+            auto null_column = generate_null_column((*curr_chunk)->num_rows());
+
+            (*curr_chunk)->update_column(null_column, slot_id);
+        }
+    }
+
+    {
+        SCOPED_TIMER(_copy_column_timer);
+        // get result chunk.
+        *chunk = *curr_chunk;
+    }
 }
 
-void RepeatNode::debug_string(int indentation_level, std::stringstream* out) const {
-    *out << string(indentation_level * 2, ' ');
-    *out << "RepeatNode(";
-    *out << "repeat pattern: [" << JoinElements(_repeat_id_list, ",") << "]\n";
-    *out << "add " << _grouping_list.size() << " columns. \n";
-    *out << "added column values: ";
-    for (const std::vector<int64_t>& v : _grouping_list) {
-        *out << "[" << JoinElements(v, ",") << "] ";
+void RepeatNode::close(RuntimeState* state) {
+    if (is_closed()) {
+        return;
     }
-    *out << "\n";
-    ExecNode::debug_string(indentation_level, out);
-    *out << ")";
+    ExecNode::close(state);
+}
+
+std::vector<std::shared_ptr<pipeline::OperatorFactory> > RepeatNode::decompose_to_pipeline(
+        pipeline::PipelineBuilderContext* context) {
+    using namespace pipeline;
+
+    OpFactories operators = _children[0]->decompose_to_pipeline(context);
+
+    operators.emplace_back(std::make_shared<RepeatOperatorFactory>(
+            context->next_operator_id(), id(), std::move(_slot_id_set_list), std::move(_all_slot_ids),
+            std::move(_null_slot_ids), std::move(_repeat_id_list), _repeat_times_required, _repeat_times_last,
+            std::move(_column_null), std::move(_grouping_columns), std::move(_grouping_list), _output_tuple_id,
+            _tuple_desc, std::move(_conjunct_ctxs)));
+    // Create a shared RefCountedRuntimeFilterCollector
+    auto&& rc_rf_probe_collector = std::make_shared<RcRfProbeCollector>(1, std::move(this->runtime_filter_collector()));
+    // Initialize OperatorFactory's fields involving runtime filters.
+    this->init_runtime_filter_for_operator(operators.back().get(), context, rc_rf_probe_collector);
+    if (limit() != -1) {
+        operators.emplace_back(std::make_shared<LimitOperatorFactory>(context->next_operator_id(), id(), limit()));
+    }
+    return operators;
 }
 
 } // namespace starrocks

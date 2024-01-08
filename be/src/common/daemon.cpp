@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/common/daemon.cpp
 
@@ -22,56 +35,49 @@
 #include "common/daemon.h"
 
 #include <gflags/gflags.h>
-#include <gperftools/malloc_extension.h>
 
 #include "column/column_helper.h"
 #include "column/column_pool.h"
 #include "common/config.h"
 #include "common/minidump.h"
-#include "exprs/bitmap_function.h"
-#include "exprs/cast_functions.h"
-#include "exprs/compound_predicate.h"
-#include "exprs/decimal_operators.h"
-#include "exprs/decimalv2_operators.h"
-#include "exprs/encryption_functions.h"
-#include "exprs/es_functions.h"
-#include "exprs/grouping_sets_functions.h"
-#include "exprs/hash_functions.h"
-#include "exprs/hll_function.h"
-#include "exprs/hll_hash_function.h"
-#include "exprs/is_null_predicate.h"
-#include "exprs/json_functions.h"
-#include "exprs/like_predicate.h"
-#include "exprs/math_functions.h"
-#include "exprs/new_in_predicate.h"
-#include "exprs/operators.h"
-#include "exprs/percentile_function.h"
-#include "exprs/string_functions.h"
-#include "exprs/time_operators.h"
-#include "exprs/timestamp_functions.h"
-#include "exprs/utility_functions.h"
-#include "geo/geo_functions.h"
-#include "runtime/bufferpool/buffer_pool.h"
-#include "runtime/exec_env.h"
-#include "runtime/mem_tracker.h"
-#include "runtime/memory/chunk_allocator.h"
+#include "exec/workgroup/work_group.h"
+#include "gutil/cpu.h"
+#include "jemalloc/jemalloc.h"
+#include "runtime/memory/mem_chunk_allocator.h"
+#include "runtime/time_types.h"
 #include "runtime/user_function_cache.h"
-#include "runtime/vectorized/time_types.h"
 #include "storage/options.h"
+#include "storage/storage_engine.h"
 #include "util/cpu_info.h"
 #include "util/debug_util.h"
 #include "util/disk_info.h"
+#include "util/gc_helper.h"
 #include "util/logging.h"
 #include "util/mem_info.h"
+#include "util/misc.h"
+#include "util/monotime.h"
 #include "util/network_util.h"
 #include "util/starrocks_metrics.h"
-#include "util/system_metrics.h"
+#include "util/thread.h"
 #include "util/thrift_util.h"
 #include "util/time.h"
+#include "util/timezone_utils.h"
 
 namespace starrocks {
+DEFINE_bool(cn, false, "start as compute node");
 
-bool k_starrocks_exit = false;
+// NOTE: when BE receiving SIGTERM, this flag will be set to true. Then BE will reject
+// all ExecPlanFragments call by returning a fail status(brpc::EINTERNAL).
+// After all existing fragments executed, BE will exit.
+std::atomic<bool> k_starrocks_exit = false;
+
+// NOTE: when call `/api/_stop_be` http interface, this flag will be set to true. Then BE will reject
+// all ExecPlanFragments call by returning a fail status(brpc::EINTERNAL).
+// After all existing fragments executed, BE will exit.
+// The difference between k_starrocks_exit and the flag is that
+// k_starrocks_exit not only require waiting for all existing fragment to complete,
+// but also waiting for all threads to exit gracefully.
+std::atomic<bool> k_starrocks_exit_quick = false;
 
 class ReleaseColumnPool {
 public:
@@ -89,85 +95,29 @@ private:
     size_t _freed_bytes = 0;
 };
 
-void* tcmalloc_gc_thread(void* dummy) {
-    using namespace starrocks::vectorized;
+void gc_memory(void* arg_this) {
+    using namespace starrocks;
     const static float kFreeRatio = 0.5;
-    while (1) {
-        sleep(10);
-#if !defined(ADDRESS_SANITIZER) && !defined(LEAK_SANITIZER) && !defined(THREAD_SANITIZER)
-        MallocExtension::instance()->MarkThreadBusy();
-#endif
+
+    auto* daemon = static_cast<Daemon*>(arg_this);
+    while (!daemon->stopped()) {
+        nap_sleep(config::memory_maintenance_sleep_time_s, [daemon] { return daemon->stopped(); });
+
         ReleaseColumnPool releaser(kFreeRatio);
         ForEach<ColumnPoolList>(releaser);
         LOG_IF(INFO, releaser.freed_bytes() > 0) << "Released " << releaser.freed_bytes() << " bytes from column pool";
-        auto* local_column_pool_mem_tracker = ExecEnv::GetInstance()->local_column_pool_mem_tracker();
-        if (local_column_pool_mem_tracker != nullptr) {
-            // Frequent update MemTracker where allocate or release column may affect performance,
-            // so here update MemTracker regularly
-            local_column_pool_mem_tracker->consume(g_column_pool_total_local_bytes.get_value() -
-                                                   local_column_pool_mem_tracker->consumption());
-        }
-        auto* central_column_pool_mem_tracker = ExecEnv::GetInstance()->central_column_pool_mem_tracker();
-        if (central_column_pool_mem_tracker != nullptr) {
-            // Frequent update MemTracker where allocate or release column may affect performance,
-            // so here update MemTracker regularly
-            central_column_pool_mem_tracker->consume(g_column_pool_total_central_bytes.get_value() -
-                                                     central_column_pool_mem_tracker->consumption());
-        }
-
-#if !defined(ADDRESS_SANITIZER) && !defined(LEAK_SANITIZER) && !defined(THREAD_SANITIZER)
-        size_t used_size = 0;
-        size_t free_size = 0;
-        MallocExtension::instance()->GetNumericProperty("generic.current_allocated_bytes", &used_size);
-        MallocExtension::instance()->GetNumericProperty("tcmalloc.pageheap_free_bytes", &free_size);
-        size_t phy_size = used_size + free_size; // physical memory usage
-        if (phy_size > config::tc_use_memory_min) {
-            size_t max_free_size = phy_size * config::tc_free_memory_rate / 100;
-            if (free_size > max_free_size) {
-                MallocExtension::instance()->ReleaseToSystem(free_size - max_free_size);
-            }
-        }
-        MallocExtension::instance()->MarkThreadIdle();
-#endif
     }
-
-    return NULL;
-}
-
-void* memory_maintenance_thread(void* dummy) {
-    while (true) {
-        sleep(config::memory_maintenance_sleep_time_s);
-        ExecEnv* env = ExecEnv::GetInstance();
-        // ExecEnv may not have been created yet or this may be the catalogd or statestored,
-        // which don't have ExecEnvs.
-        if (env != nullptr) {
-            BufferPool* buffer_pool = env->buffer_pool();
-            if (buffer_pool != nullptr) buffer_pool->Maintenance();
-
-            // The process limit as measured by our trackers may get out of sync with the
-            // process usage if memory is allocated or freed without updating a MemTracker.
-            // The metric is refreshed whenever memory is consumed or released via a MemTracker,
-            // so on a system with queries executing it will be refreshed frequently. However
-            // if the system is idle, we need to refresh the tracker occasionally since
-            // untracked memory may be allocated or freed, e.g. by background threads.
-            if (env->process_mem_tracker() != nullptr && !env->process_mem_tracker()->is_consumption_metric_null()) {
-                env->process_mem_tracker()->RefreshConsumptionFromMetric();
-            }
-        }
-    }
-
-    return NULL;
 }
 
 /*
- * this thread will calculate some metrics at a fix interval(15 sec)
+ * This thread will calculate some metrics at a fix interval(15 sec)
  * 1. push bytes per second
  * 2. scan bytes per second
  * 3. max io util of all disks
  * 4. max network send bytes rate
  * 5. max network receive bytes rate
  */
-void* calculate_metrics(void* dummy) {
+void calculate_metrics(void* arg_this) {
     int64_t last_ts = -1L;
     int64_t lst_push_bytes = -1;
     int64_t lst_query_bytes = -1;
@@ -176,7 +126,8 @@ void* calculate_metrics(void* dummy) {
     std::map<std::string, int64_t> lst_net_send_bytes;
     std::map<std::string, int64_t> lst_net_receive_bytes;
 
-    while (true) {
+    auto* daemon = static_cast<Daemon*>(arg_this);
+    while (!daemon->stopped()) {
         StarRocksMetrics::instance()->metrics()->trigger_hook();
 
         if (last_ts == -1L) {
@@ -191,25 +142,25 @@ void* calculate_metrics(void* dummy) {
             long interval = (current_ts - last_ts);
             last_ts = current_ts;
 
-            // 1. push bytes per second
+            // 1. push bytes per second.
             int64_t current_push_bytes = StarRocksMetrics::instance()->push_request_write_bytes.value();
             int64_t pps = (current_push_bytes - lst_push_bytes) / (interval == 0 ? 1 : interval);
             StarRocksMetrics::instance()->push_request_write_bytes_per_second.set_value(pps < 0 ? 0 : pps);
             lst_push_bytes = current_push_bytes;
 
-            // 2. query bytes per second
+            // 2. query bytes per second.
             int64_t current_query_bytes = StarRocksMetrics::instance()->query_scan_bytes.value();
             int64_t qps = (current_query_bytes - lst_query_bytes) / (interval == 0 ? 1 : interval);
             StarRocksMetrics::instance()->query_scan_bytes_per_second.set_value(qps < 0 ? 0 : qps);
             lst_query_bytes = current_query_bytes;
 
-            // 3. max disk io util
+            // 3. max disk io util.
             StarRocksMetrics::instance()->max_disk_io_util_percent.set_value(
                     StarRocksMetrics::instance()->system_metrics()->get_max_io_util(lst_disks_io_time, 15));
-            // update lst map
+            // Update lst map.
             StarRocksMetrics::instance()->system_metrics()->get_disks_io_time(&lst_disks_io_time);
 
-            // 4. max network traffic
+            // 4. max network traffic.
             int64_t max_send = 0;
             int64_t max_receive = 0;
             StarRocksMetrics::instance()->system_metrics()->get_max_net_traffic(
@@ -221,10 +172,21 @@ void* calculate_metrics(void* dummy) {
                                                                                 &lst_net_receive_bytes);
         }
 
-        sleep(15); // 15 seconds
-    }
+        auto* mem_metrics = StarRocksMetrics::instance()->system_metrics()->memory_metrics();
 
-    return NULL;
+        LOG(INFO) << fmt::format(
+                "Current memory statistics: process({}), query_pool({}), load({}), "
+                "metadata({}), compaction({}), schema_change({}), column_pool({}), "
+                "page_cache({}), update({}), chunk_allocator({}), clone({}), consistency({})",
+                mem_metrics->process_mem_bytes.value(), mem_metrics->query_mem_bytes.value(),
+                mem_metrics->load_mem_bytes.value(), mem_metrics->metadata_mem_bytes.value(),
+                mem_metrics->compaction_mem_bytes.value(), mem_metrics->schema_change_mem_bytes.value(),
+                mem_metrics->column_pool_mem_bytes.value(), mem_metrics->storage_page_cache_mem_bytes.value(),
+                mem_metrics->update_mem_bytes.value(), mem_metrics->chunk_allocator_mem_bytes.value(),
+                mem_metrics->clone_mem_bytes.value(), mem_metrics->consistency_mem_bytes.value());
+
+        nap_sleep(15, [daemon] { return daemon->stopped(); });
+    }
 }
 
 static void init_starrocks_metrics(const std::vector<StorePath>& store_paths) {
@@ -232,37 +194,38 @@ static void init_starrocks_metrics(const std::vector<StorePath>& store_paths) {
     std::set<std::string> disk_devices;
     std::vector<std::string> network_interfaces;
     std::vector<std::string> paths;
+    paths.reserve(store_paths.size());
     for (auto& store_path : store_paths) {
         paths.emplace_back(store_path.path);
     }
     if (init_system_metrics) {
         auto st = DiskInfo::get_disk_devices(paths, &disk_devices);
         if (!st.ok()) {
-            LOG(WARNING) << "get disk devices failed, stauts=" << st.get_error_msg();
+            LOG(WARNING) << "get disk devices failed, status=" << st.message();
             return;
         }
         st = get_inet_interfaces(&network_interfaces);
         if (!st.ok()) {
-            LOG(WARNING) << "get inet interfaces failed, stauts=" << st.get_error_msg();
+            LOG(WARNING) << "get inet interfaces failed, status=" << st.message();
             return;
         }
     }
     StarRocksMetrics::instance()->initialize(paths, init_system_metrics, disk_devices, network_interfaces);
+}
 
-    if (config::enable_metric_calculator) {
-        pthread_t calculator_pid;
-        pthread_create(&calculator_pid, NULL, calculate_metrics, NULL);
+void sigterm_handler(int signo, siginfo_t* info, void* context) {
+    if (info == nullptr) {
+        LOG(ERROR) << "got signal: " << strsignal(signo) << "from unknown pid, is going to exit";
+    } else {
+        LOG(ERROR) << "got signal: " << strsignal(signo) << " from pid: " << info->si_pid << ", is going to exit";
     }
+    k_starrocks_exit.store(true);
 }
 
-void sigterm_handler(int signo) {
-    k_starrocks_exit = true;
-}
-
-int install_signal(int signo, void (*handler)(int)) {
+int install_signal(int signo, void (*handler)(int sig, siginfo_t* info, void* context)) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(struct sigaction));
-    sa.sa_handler = handler;
+    sa.sa_sigaction = handler;
     sigemptyset(&sa.sa_mask);
     auto ret = sigaction(signo, &sa, nullptr);
     if (ret != 0) {
@@ -283,19 +246,24 @@ void init_signals() {
 }
 
 void init_minidump() {
+#ifdef __x86_64__
     if (config::sys_minidump_enable) {
-        LOG(INFO) << "Minidump is enable";
+        LOG(INFO) << "Minidump is enabled";
         Minidump::init();
     } else {
-        LOG(INFO) << "Minidump is disable";
+        LOG(INFO) << "Minidump is disabled";
     }
+#else
+    LOG(INFO) << "Minidump is disabled on non-x86_64 arch";
+#endif
 }
 
-void init_daemon(int argc, char** argv, const std::vector<StorePath>& paths) {
-    // google::SetVersionString(get_build_version(false));
-    // google::ParseCommandLineFlags(&argc, &argv, true);
-    google::ParseCommandLineFlags(&argc, &argv, true);
-    init_glog("be", true);
+void Daemon::init(bool as_cn, const std::vector<StorePath>& paths) {
+    if (as_cn) {
+        init_glog("cn", true);
+    } else {
+        init_glog("be", true);
+    }
 
     LOG(INFO) << get_version_string(false);
 
@@ -303,48 +271,45 @@ void init_daemon(int argc, char** argv, const std::vector<StorePath>& paths) {
     CpuInfo::init();
     DiskInfo::init();
     MemInfo::init();
-    UserFunctionCache::instance()->init(config::user_function_dir);
-    Operators::init();
-    IsNullPredicate::init();
-    LikePredicate::init();
-    StringFunctions::init();
-    CastFunctions::init();
-    InPredicate::init();
-    MathFunctions::init();
-    EncryptionFunctions::init();
-    TimestampFunctions::init();
-    DecimalOperators::init();
-    DecimalV2Operators::init();
-    TimeOperators::init();
-    UtilityFunctions::init();
-    CompoundPredicate::init();
-    JsonFunctions::init();
-    HllHashFunctions::init();
-    ESFunctions::init();
-    GeoFunctions::init();
-    GroupingSetsFunctions::init();
-    BitmapFunctions::init();
-    HllFunctions::init();
-    HashFunctions::init();
-    PercentileFunctions::init();
-
-    vectorized::ColumnHelper::init_static_variable();
-    vectorized::date::init_date_cache();
-
-    pthread_t tc_malloc_pid;
-    pthread_create(&tc_malloc_pid, NULL, tcmalloc_gc_thread, NULL);
-
-    pthread_t buffer_pool_pid;
-    pthread_create(&buffer_pool_pid, NULL, memory_maintenance_thread, NULL);
-
     LOG(INFO) << CpuInfo::debug_string();
     LOG(INFO) << DiskInfo::debug_string();
     LOG(INFO) << MemInfo::debug_string();
+    LOG(INFO) << base::CPU::instance()->debug_string();
+
+    CHECK(UserFunctionCache::instance()->init(config::user_function_dir).ok());
+
+    date::init_date_cache();
+
+    TimezoneUtils::init_time_zones();
+
+    std::thread gc_thread(gc_memory, this);
+    Thread::set_thread_name(gc_thread, "gc_daemon");
+    _daemon_threads.emplace_back(std::move(gc_thread));
+
     init_starrocks_metrics(paths);
+
+    if (config::enable_metric_calculator) {
+        std::thread calculate_metrics_thread(calculate_metrics, this);
+        Thread::set_thread_name(calculate_metrics_thread, "metrics_daemon");
+        _daemon_threads.emplace_back(std::move(calculate_metrics_thread));
+    }
+
     init_signals();
     init_minidump();
+}
 
-    ChunkAllocator::init_instance(config::chunk_reserved_bytes_limit);
+void Daemon::stop() {
+    _stopped.store(true, std::memory_order_release);
+    size_t thread_size = _daemon_threads.size();
+    for (size_t i = 0; i < thread_size; ++i) {
+        if (_daemon_threads[i].joinable()) {
+            _daemon_threads[i].join();
+        }
+    }
+}
+
+bool Daemon::stopped() {
+    return _stopped.load(std::memory_order_consume);
 }
 
 } // namespace starrocks

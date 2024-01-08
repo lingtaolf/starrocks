@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/common/util/BrokerUtilTest.java
 
@@ -25,11 +38,11 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.analysis.BrokerDesc;
 import com.starrocks.catalog.BrokerMgr;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.FsBroker;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.GenericPool;
 import com.starrocks.common.UserException;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.thrift.TBrokerCloseReaderRequest;
 import com.starrocks.thrift.TBrokerCloseWriterRequest;
 import com.starrocks.thrift.TBrokerDeletePathRequest;
@@ -57,7 +70,7 @@ import org.apache.thrift.TException;
 import org.junit.Assert;
 import org.junit.Test;
 
-import java.io.UnsupportedEncodingException;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
 
@@ -159,9 +172,9 @@ public class BrokerUtilTest {
     }
 
     @Test
-    public void testReadFile(@Mocked TFileBrokerService.Client client, @Mocked Catalog catalog,
+    public void testReadFile(@Mocked TFileBrokerService.Client client, @Mocked GlobalStateMgr globalStateMgr,
                              @Injectable BrokerMgr brokerMgr)
-            throws TException, UserException, UnsupportedEncodingException {
+            throws TException, UserException {
         // list response
         TBrokerListResponse listResponse = new TBrokerListResponse();
         TBrokerOperationStatus status = new TBrokerOperationStatus();
@@ -181,7 +194,7 @@ public class BrokerUtilTest {
         String dppResultStr = "{'normal_rows': 10, 'abnormal_rows': 0, 'failed_reason': 'etl job failed'}";
         TBrokerReadResponse readResponse = new TBrokerReadResponse();
         readResponse.opStatus = status;
-        readResponse.setData(dppResultStr.getBytes("UTF-8"));
+        readResponse.setData(dppResultStr.getBytes(StandardCharsets.UTF_8));
 
         FsBroker fsBroker = new FsBroker("127.0.0.1", 99999);
 
@@ -204,7 +217,7 @@ public class BrokerUtilTest {
 
         new Expectations() {
             {
-                catalog.getBrokerMgr();
+                globalStateMgr.getBrokerMgr();
                 result = brokerMgr;
                 brokerMgr.getBroker(anyString, anyString);
                 result = fsBroker;
@@ -222,14 +235,14 @@ public class BrokerUtilTest {
 
         BrokerDesc brokerDesc = new BrokerDesc("broker0", Maps.newHashMap());
         byte[] data = BrokerUtil.readFile(filePath, brokerDesc);
-        String readStr = new String(data, "UTF-8");
+        String readStr = new String(data, StandardCharsets.UTF_8);
         Assert.assertEquals(dppResultStr, readStr);
     }
 
     @Test
-    public void testWriteFile(@Mocked TFileBrokerService.Client client, @Mocked Catalog catalog,
+    public void testWriteFile(@Mocked TFileBrokerService.Client client, @Mocked GlobalStateMgr globalStateMgr,
                               @Injectable BrokerMgr brokerMgr)
-            throws TException, UserException, UnsupportedEncodingException {
+            throws TException, UserException {
         // open writer response
         TBrokerOpenWriterResponse openWriterResponse = new TBrokerOpenWriterResponse();
         TBrokerOperationStatus status = new TBrokerOperationStatus();
@@ -257,7 +270,7 @@ public class BrokerUtilTest {
 
         new Expectations() {
             {
-                catalog.getBrokerMgr();
+                globalStateMgr.getBrokerMgr();
                 result = brokerMgr;
                 brokerMgr.getBroker(anyString, anyString);
                 result = fsBroker;
@@ -272,7 +285,7 @@ public class BrokerUtilTest {
         };
 
         BrokerDesc brokerDesc = new BrokerDesc("broker0", Maps.newHashMap());
-        byte[] configs = "{'label': 'label0'}".getBytes("UTF-8");
+        byte[] configs = "{'label': 'label0'}".getBytes(StandardCharsets.UTF_8);
         String destFilePath = "hdfs://127.0.0.1:10000/starrocks/jobs/1/label6/9/configs/jobconfig.json";
         try {
             BrokerUtil.writeFile(configs, destFilePath, brokerDesc);
@@ -282,7 +295,7 @@ public class BrokerUtilTest {
     }
 
     @Test
-    public void testDeletePath(@Mocked TFileBrokerService.Client client, @Mocked Catalog catalog,
+    public void testDeletePath(@Mocked TFileBrokerService.Client client, @Mocked GlobalStateMgr globalStateMgr,
                                @Injectable BrokerMgr brokerMgr) throws AnalysisException, TException {
         // delete response
         TBrokerOperationStatus status = new TBrokerOperationStatus();
@@ -308,7 +321,7 @@ public class BrokerUtilTest {
 
         new Expectations() {
             {
-                catalog.getBrokerMgr();
+                globalStateMgr.getBrokerMgr();
                 result = brokerMgr;
                 brokerMgr.getBroker(anyString, anyString);
                 result = fsBroker;

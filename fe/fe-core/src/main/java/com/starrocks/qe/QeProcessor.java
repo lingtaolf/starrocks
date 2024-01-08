@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/qe/QeProcessor.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -22,16 +18,26 @@
 package com.starrocks.qe;
 
 import com.starrocks.common.UserException;
+import com.starrocks.qe.scheduler.Coordinator;
+import com.starrocks.thrift.TBatchReportExecStatusParams;
+import com.starrocks.thrift.TBatchReportExecStatusResult;
 import com.starrocks.thrift.TNetworkAddress;
+import com.starrocks.thrift.TReportAuditStatisticsParams;
+import com.starrocks.thrift.TReportAuditStatisticsResult;
 import com.starrocks.thrift.TReportExecStatusParams;
 import com.starrocks.thrift.TReportExecStatusResult;
 import com.starrocks.thrift.TUniqueId;
 
+import java.util.List;
 import java.util.Map;
 
 public interface QeProcessor {
 
     TReportExecStatusResult reportExecStatus(TReportExecStatusParams params, TNetworkAddress beAddr);
+
+    TReportAuditStatisticsResult reportAuditStatistics(TReportAuditStatisticsParams params, TNetworkAddress beAddr);
+
+    TBatchReportExecStatusResult batchReportExecStatus(TBatchReportExecStatusParams params, TNetworkAddress beAddr);
 
     void registerQuery(TUniqueId queryId, Coordinator coord) throws UserException;
 
@@ -39,7 +45,15 @@ public interface QeProcessor {
 
     void unregisterQuery(TUniqueId queryId);
 
+    void monitorQuery(TUniqueId queryId, long expireTime);
+
+    void unMonitorQuery(TUniqueId queryId);
+
     Map<String, QueryStatisticsItem> getQueryStatistics();
 
     Coordinator getCoordinator(TUniqueId queryId);
+
+    List<Coordinator> getCoordinators();
+
+    long getCoordinatorCount();
 }

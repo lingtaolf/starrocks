@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/include/orc/Statistics.hh
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -20,8 +16,7 @@
  * limitations under the License.
  */
 
-#ifndef ORC_STATISTICS_HH
-#define ORC_STATISTICS_HH
+#pragma once
 
 #include "orc/Type.hh"
 #include "orc/Vector.hh"
@@ -60,7 +55,7 @@ public:
    */
 class BinaryColumnStatistics : public ColumnStatistics {
 public:
-    virtual ~BinaryColumnStatistics();
+    ~BinaryColumnStatistics() override;
 
     /**
      * Check whether column has total length.
@@ -76,7 +71,7 @@ public:
    */
 class BooleanColumnStatistics : public ColumnStatistics {
 public:
-    virtual ~BooleanColumnStatistics();
+    ~BooleanColumnStatistics() override;
 
     /**
      * Check whether column has true/false count.
@@ -93,7 +88,7 @@ public:
    */
 class DateColumnStatistics : public ColumnStatistics {
 public:
-    virtual ~DateColumnStatistics();
+    ~DateColumnStatistics() override;
 
     /**
      * Check whether column has minimum.
@@ -125,7 +120,7 @@ public:
    */
 class DecimalColumnStatistics : public ColumnStatistics {
 public:
-    virtual ~DecimalColumnStatistics();
+    ~DecimalColumnStatistics() override;
 
     /**
      * Check whether column has minimum.
@@ -169,7 +164,7 @@ public:
    */
 class DoubleColumnStatistics : public ColumnStatistics {
 public:
-    virtual ~DoubleColumnStatistics();
+    ~DoubleColumnStatistics() override;
 
     /**
      * Check whether column has minimum.
@@ -216,7 +211,7 @@ public:
    */
 class IntegerColumnStatistics : public ColumnStatistics {
 public:
-    virtual ~IntegerColumnStatistics();
+    ~IntegerColumnStatistics() override;
 
     /**
      * Check whether column has minimum.
@@ -262,7 +257,7 @@ public:
    */
 class StringColumnStatistics : public ColumnStatistics {
 public:
-    virtual ~StringColumnStatistics();
+    ~StringColumnStatistics() override;
 
     /**
      * Check whether column has minimum.
@@ -306,7 +301,7 @@ public:
    */
 class TimestampColumnStatistics : public ColumnStatistics {
 public:
-    virtual ~TimestampColumnStatistics();
+    ~TimestampColumnStatistics() override;
 
     /**
      * Check whether minimum timestamp exists.
@@ -389,7 +384,7 @@ public:
 
 class StripeStatistics : public Statistics {
 public:
-    virtual ~StripeStatistics();
+    ~StripeStatistics() override;
 
     /**
      * Get the statistics of a given RowIndex entry in a given column.
@@ -407,5 +402,3 @@ public:
     virtual uint32_t getNumberOfRowIndexStats(uint32_t columnId) const = 0;
 };
 } // namespace orc
-
-#endif

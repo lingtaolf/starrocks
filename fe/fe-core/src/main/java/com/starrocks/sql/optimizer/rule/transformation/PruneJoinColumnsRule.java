@@ -1,20 +1,30 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.sql.optimizer.rule.transformation;
 
-import com.starrocks.sql.optimizer.ExpressionContext;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
-import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
 import java.util.Collections;
 import java.util.List;
-import java.util.stream.Collectors;
 
 public class PruneJoinColumnsRule extends TransformationRule {
     public PruneJoinColumnsRule() {
@@ -26,18 +36,9 @@ public class PruneJoinColumnsRule extends TransformationRule {
     @Override
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
         LogicalJoinOperator joinOperator = (LogicalJoinOperator) input.getOp();
-        ColumnRefSet requiredInputColumns = joinOperator.getRequiredChildInputColumns();
 
-        ColumnRefSet requiredColumns = context.getTaskContext().get(0).getRequiredColumns();
-
-        List<ColumnRefOperator> newOutputs = joinOperator.getOutputColumns(new ExpressionContext(input)).getStream()
-                .filter(requiredColumns::contains)
-                .mapToObj(id -> context.getColumnRefFactory().getColumnRef(id))
-                .collect(Collectors.toList());
-        joinOperator.setPruneOutputColumns(newOutputs);
-
-        // Change the requiredColumns in context
-        requiredColumns.union(requiredInputColumns);
+        ColumnRefSet requiredColumns = context.getTaskContext().getRequiredColumns();
+        requiredColumns.union(joinOperator.getRequiredChildInputColumns());
 
         return Collections.emptyList();
     }

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/qe/AuditEventProcessorTest.java
 
@@ -21,34 +34,23 @@
 
 package com.starrocks.qe;
 
-import com.starrocks.catalog.Catalog;
 import com.starrocks.common.util.DigitalVersion;
 import com.starrocks.plugin.AuditEvent;
 import com.starrocks.plugin.AuditEvent.EventType;
 import com.starrocks.plugin.PluginInfo;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.utframe.UtFrameUtils;
-import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import java.io.File;
 import java.io.IOException;
-import java.util.UUID;
 
 public class AuditEventProcessorTest {
 
-    private static String runningDir = "fe/mocked/AuditProcessorTest/" + UUID.randomUUID().toString() + "/";
-
     @BeforeClass
     public static void beforeClass() throws Exception {
-        UtFrameUtils.createMinStarRocksCluster(runningDir);
-    }
-
-    @AfterClass
-    public static void tearDown() {
-        File file = new File(runningDir);
-        file.delete();
+        UtFrameUtils.createMinStarRocksCluster();
     }
 
     @Test
@@ -57,6 +59,7 @@ public class AuditEventProcessorTest {
                 .setTimestamp(System.currentTimeMillis())
                 .setClientIp("127.0.0.1")
                 .setUser("user1")
+                .setAuthorizedUser("user2")
                 .setDb("db1")
                 .setState("EOF")
                 .setQueryTime(2000)
@@ -64,10 +67,13 @@ public class AuditEventProcessorTest {
                 .setScanRows(200000)
                 .setReturnRows(1)
                 .setStmtId(1234)
-                .setStmt("select * from tbl1").build();
+                .setStmt("select * from tbl1")
+                .setCatalog("catalog1").build();
 
         Assert.assertEquals("127.0.0.1", event.clientIp);
         Assert.assertEquals(200000, event.scanRows);
+        Assert.assertEquals("catalog1", event.catalog);
+        Assert.assertEquals("user2", event.authorizedUser);
     }
 
     @Test
@@ -82,6 +88,7 @@ public class AuditEventProcessorTest {
                         .setTimestamp(System.currentTimeMillis())
                         .setClientIp("127.0.0.1")
                         .setUser("user1")
+                        .setAuthorizedUser("user2")
                         .setDb("db1")
                         .setState("EOF")
                         .setQueryTime(2000)
@@ -101,13 +108,14 @@ public class AuditEventProcessorTest {
 
     @Test
     public void testAuditEventProcessor() throws IOException {
-        AuditEventProcessor processor = Catalog.getCurrentAuditEventProcessor();
+        AuditEventProcessor processor = GlobalStateMgr.getCurrentAuditEventProcessor();
         long start = System.currentTimeMillis();
         for (int i = 0; i < 10000; i++) {
             AuditEvent event = new AuditEvent.AuditEventBuilder().setEventType(EventType.AFTER_QUERY)
                     .setTimestamp(System.currentTimeMillis())
                     .setClientIp("127.0.0.1")
                     .setUser("user1")
+                    .setAuthorizedUser("user2")
                     .setDb("db1")
                     .setState("EOF")
                     .setQueryTime(2000)

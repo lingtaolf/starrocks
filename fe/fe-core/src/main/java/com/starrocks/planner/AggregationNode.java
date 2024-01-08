@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/planner/AggregationNode.java
 
@@ -24,32 +37,46 @@ package com.starrocks.planner;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import com.starrocks.analysis.AggregateInfo;
 import com.starrocks.analysis.Analyzer;
+import com.starrocks.analysis.DescriptorTable;
 import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.FunctionCallExpr;
+import com.starrocks.analysis.SlotDescriptor;
 import com.starrocks.analysis.SlotId;
 import com.starrocks.analysis.SlotRef;
+import com.starrocks.analysis.TupleId;
+import com.starrocks.catalog.ScalarType;
+import com.starrocks.common.FeConstants;
+import com.starrocks.common.Pair;
 import com.starrocks.common.UserException;
+import com.starrocks.qe.ConnectContext;
+import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.thrift.TAggregationNode;
 import com.starrocks.thrift.TExplainLevel;
 import com.starrocks.thrift.TExpr;
+import com.starrocks.thrift.TNormalAggregationNode;
+import com.starrocks.thrift.TNormalPlanNode;
 import com.starrocks.thrift.TPlanNode;
 import com.starrocks.thrift.TPlanNodeType;
 import com.starrocks.thrift.TStreamingPreaggregationMode;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import org.apache.commons.collections.CollectionUtils;
 
-import java.util.ArrayList;
+import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
-//import com.starrocks.thrift.TAggregateFunctionCall;
+import static com.starrocks.qe.SessionVariableConstants.FORCE_PREAGGREGATION;
+import static com.starrocks.qe.SessionVariableConstants.FORCE_STREAMING;
+import static com.starrocks.qe.SessionVariableConstants.LIMITED;
 
-/**
- * Aggregation computation.
- */
 public class AggregationNode extends PlanNode {
-    private static final Logger LOG = LogManager.getLogger(AggregationNode.class);
     private final AggregateInfo aggInfo;
 
     // Set to true if this aggregation node needs to run the Finalize step. This
@@ -61,6 +88,19 @@ public class AggregationNode extends PlanNode {
 
     private String streamingPreaggregationMode = "auto";
 
+    private boolean useSortAgg = false;
+    private boolean usePerBucketOptimize = false;
+    
+    private boolean withLocalShuffle = false;
+
+    // identicallyDistributed meanings the PlanNode above OlapScanNode are cases as follows:
+    // 1. bucket shuffle join,
+    // 2. colocate join,
+    // 3. one-phase agg,
+    // 4. 1st phaes of three-phase-agg(2nd phase of four-phase agg eliminated).
+    // OlapScanNode and these PlanNodes have the same data partition policy.
+    private boolean identicallyDistributed = false;
+
     /**
      * Create an agg node that is not an intermediate node.
      * isIntermediate is true if it is a slave node in a 2-part agg plan.
@@ -71,19 +111,6 @@ public class AggregationNode extends PlanNode {
         this.children.add(input);
         this.needsFinalize = true;
         updateplanNodeName();
-    }
-
-    /**
-     * Copy c'tor used in clone().
-     */
-    private AggregationNode(PlanNodeId id, AggregationNode src) {
-        super(id, src, "AGGREGATE");
-        aggInfo = src.aggInfo;
-        needsFinalize = src.needsFinalize;
-    }
-
-    public AggregateInfo getAggInfo() {
-        return aggInfo;
     }
 
     // Unsets this node as requiring finalize. Only valid to call this if it is
@@ -98,8 +125,16 @@ public class AggregationNode extends PlanNode {
      * Sets this node as a preaggregation. Only valid to call this if it is not marked
      * as a preaggregation
      */
-    public void setIsPreagg(PlannerContext ctx_) {
-        useStreamingPreagg = aggInfo.getGroupingExprs().size() > 0;
+    public void setIsPreagg(boolean useStreamingPreAgg) {
+        useStreamingPreagg = useStreamingPreAgg;
+    }
+
+    public AggregateInfo getAggInfo() {
+        return aggInfo;
+    }
+
+    public boolean isNeedsFinalize() {
+        return needsFinalize;
     }
 
     /**
@@ -113,100 +148,33 @@ public class AggregationNode extends PlanNode {
         tupleIds.add(aggInfo.getIntermediateTupleId());
     }
 
+    public void setWithLocalShuffle(boolean withLocalShuffle) {
+        this.withLocalShuffle = withLocalShuffle;
+    }
+
     @Override
     public void init(Analyzer analyzer) throws UserException {
-        // Assign predicates to the top-most agg in the single-node plan that can evaluate
-        // them, as follows: For non-distinct aggs place them in the 1st phase agg node. For
-        // distinct aggs place them in the 2nd phase agg node. The conjuncts are
-        // transferred to the proper place in the multi-node plan via transferConjuncts().
-        if (tupleIds.get(0).equals(aggInfo.getResultTupleId()) && !aggInfo.isMerge()) {
-            // Ignore predicates bound by a grouping slot produced by a SlotRef grouping expr.
-            // Those predicates are already evaluated below this agg node (e.g., in a scan),
-            // because the grouping slot must be in the same equivalence class as another slot
-            // below this agg node. We must not ignore other grouping slots in order to retain
-            // conjuncts bound by those grouping slots in createEquivConjuncts() (IMPALA-2089).
-            // Those conjuncts cannot be redundant because our equivalence classes do not
-            // capture dependencies with non-SlotRef exprs.
-            // Set<SlotId> groupBySlots = Sets.newHashSet();
-            // for (int i = 0; i < aggInfo.getGroupingExprs().size(); ++i) {
-            //    if (aggInfo.getGroupingExprs().get(i).unwrapSlotRef(true) == null) continue;
-            //    groupBySlots.add(aggInfo.getOutputTupleDesc().getSlots().get(i).getId());
-            // }
-            // ArrayList<Expr> bindingPredicates =
-            //         analyzer.getBoundPredicates(tupleIds.get(0), groupBySlots, true);
-            ArrayList<Expr> bindingPredicates = Lists.newArrayList();
-            conjuncts.addAll(bindingPredicates);
-
-            // also add remaining unassigned conjuncts_
-            assignConjuncts(analyzer);
-
-            // TODO(zc)
-            // analyzer.createEquivConjuncts(tupleIds_.get(0), conjuncts_, groupBySlots);
-        }
-        // TODO(zc)
-        // conjuncts_ = orderConjunctsByCost(conjuncts_);
-
-        // Compute the mem layout for both tuples here for simplicity.
-        aggInfo.getOutputTupleDesc().computeMemLayout();
-        aggInfo.getIntermediateTupleDesc().computeMemLayout();
-
-        // do this at the end so it can take all conjuncts into account
-        computeStats(analyzer);
-
-        // don't call createDefaultSMap(), it would point our conjuncts (= Having clause)
-        // to our input; our conjuncts don't get substituted because they already
-        // refer to our output
-        outputSmap = getCombinedChildSmap();
-        aggInfo.substitute(outputSmap, analyzer);
-
-        // assert consistent aggregate expr and slot materialization
-        // aggInfo.checkConsistency();
-
-        hasNullableGenerateChild = checkHasNullableGenerateChild();
-        streamingPreaggregationMode = analyzer.getContext().getSessionVariable().getStreamingPreaggregationMode();
     }
 
     public void setStreamingPreaggregationMode(String mode) {
         this.streamingPreaggregationMode = mode;
     }
 
+    public void setUseSortAgg(boolean useSortAgg) {
+        this.useSortAgg = useSortAgg;
+    }
+
+    public void setUsePerBucketOptimize(boolean usePerBucketOptimize) {
+        this.usePerBucketOptimize = usePerBucketOptimize;
+    }
+
+    public void disablePhysicalPropertyOptimize() {
+        setUseSortAgg(false);
+        setUsePerBucketOptimize(false);
+    }
+
     @Override
     public void computeStats(Analyzer analyzer) {
-        super.computeStats(analyzer);
-        List<Expr> groupingExprs = aggInfo.getGroupingExprs();
-        cardinality = 1;
-        // cardinality: product of # of distinct values produced by grouping exprs
-        for (Expr groupingExpr : groupingExprs) {
-            long numDistinct = groupingExpr.getNumDistinctValues();
-            // TODO: remove these before 1.0
-            LOG.debug("grouping expr: " + groupingExpr.toSql() + " #distinct=" + Long.toString(
-                    numDistinct));
-            if (numDistinct == -1) {
-                cardinality = -1;
-                break;
-            }
-            // This is prone to overflow, because we keep multiplying cardinalities,
-            // even if the grouping exprs are functionally dependent (example:
-            // group by the primary key of a table plus a number of other columns from that
-            // same table)
-            // TODO: try to recognize functional dependencies
-            // TODO: as a shortcut, instead of recognizing functional dependencies,
-            // limit the contribution of a single table to the number of rows
-            // of that table (so that when we're grouping by the primary key col plus
-            // some others, the estimate doesn't overshoot dramatically)
-            cardinality *= numDistinct;
-        }
-        // take HAVING predicate into account
-        LOG.debug("Agg: cardinality=" + Long.toString(cardinality));
-        if (cardinality > 0) {
-            cardinality = Math.round((double) cardinality * computeSelectivity());
-            LOG.debug("sel=" + Double.toString(computeSelectivity()));
-        }
-        // if we ended up with an overflow, the estimate is certain to be wrong
-        if (cardinality < 0) {
-            cardinality = -1;
-        }
-        LOG.debug("stats Agg: cardinality=" + Long.toString(cardinality));
     }
 
     private void updateplanNodeName() {
@@ -225,6 +193,14 @@ public class AggregationNode extends PlanNode {
         }
         sb.append(")");
         setPlanNodeName(sb.toString());
+    }
+
+    public void setIdenticallyDistributed(boolean identicallyDistributed) {
+        this.identicallyDistributed = identicallyDistributed;
+    }
+
+    public boolean isIdenticallyDistributed() {
+        return identicallyDistributed;
     }
 
     @Override
@@ -257,6 +233,8 @@ public class AggregationNode extends PlanNode {
         if (sqlAggFuncBuilder.length() > 0) {
             msg.agg_node.setSql_aggregate_functions(sqlAggFuncBuilder.toString());
         }
+        msg.agg_node.setUse_sort_agg(useSortAgg);
+        msg.agg_node.setUse_per_bucket_optimize(usePerBucketOptimize);
 
         List<Expr> groupingExprs = aggInfo.getGroupingExprs();
         if (groupingExprs != null) {
@@ -272,14 +250,26 @@ public class AggregationNode extends PlanNode {
                 msg.agg_node.setSql_grouping_keys(sqlGroupingKeysBuilder.toString());
             }
         }
+
+        List<Expr> intermediateAggrExprs = aggInfo.getIntermediateAggrExprs();
+        if (intermediateAggrExprs != null && !intermediateAggrExprs.isEmpty()) {
+            msg.agg_node.setIntermediate_aggr_exprs(Expr.treesToThrift(intermediateAggrExprs));
+        }
+
         msg.agg_node.setHas_outer_join_child(hasNullableGenerateChild);
-        if (streamingPreaggregationMode.equalsIgnoreCase("force_streaming")) {
+        if (streamingPreaggregationMode.equalsIgnoreCase(FORCE_STREAMING)) {
             msg.agg_node.setStreaming_preaggregation_mode(TStreamingPreaggregationMode.FORCE_STREAMING);
-        } else if (streamingPreaggregationMode.equalsIgnoreCase("force_preaggregation")) {
+        } else if (streamingPreaggregationMode.equalsIgnoreCase(FORCE_PREAGGREGATION)) {
             msg.agg_node.setStreaming_preaggregation_mode(TStreamingPreaggregationMode.FORCE_PREAGGREGATION);
+        } else if (streamingPreaggregationMode.equalsIgnoreCase(LIMITED)) {
+            msg.agg_node.setStreaming_preaggregation_mode(TStreamingPreaggregationMode.LIMITED_MEM);
         } else {
             msg.agg_node.setStreaming_preaggregation_mode(TStreamingPreaggregationMode.AUTO);
         }
+
+        msg.agg_node.setAgg_func_set_version(FeConstants.AGG_FUNC_VERSION);
+        msg.agg_node.setInterpolate_passthrough(
+                useStreamingPreagg && ConnectContext.get().getSessionVariable().isInterpolatePassthrough());
     }
 
     protected String getDisplayLabelDetail() {
@@ -297,45 +287,37 @@ public class AggregationNode extends PlanNode {
             output.append(detailPrefix).append(nameDetail).append("\n");
         }
         if (aggInfo.getAggregateExprs() != null && aggInfo.getMaterializedAggregateExprs().size() > 0) {
-            output.append(detailPrefix).append("output: ").append(
-                    getExplainString(aggInfo.getAggregateExprs())).append("\n");
+            if (detailLevel == TExplainLevel.VERBOSE) {
+                output.append(detailPrefix).append("aggregate: ");
+            } else {
+                output.append(detailPrefix).append("output: ");
+            }
+            output.append(getVerboseExplain(aggInfo.getAggregateExprs(), detailLevel)).append("\n");
         }
-        output.append(detailPrefix).append("group by: ").append(
-                getExplainString(aggInfo.getGroupingExprs())).append("\n");
-        if (!conjuncts.isEmpty()) {
-            output.append(detailPrefix).append("having: ").append(getExplainString(conjuncts)).append("\n");
-        }
-        return output.toString();
-    }
-
-    @Override
-    protected String getNodeVerboseExplain(String detailPrefix) {
-        StringBuilder output = new StringBuilder();
-        String nameDetail = getDisplayLabelDetail();
-        if (nameDetail != null) {
-            output.append(detailPrefix).append(nameDetail).append("\n");
-        }
-        if (aggInfo.getAggregateExprs() != null && aggInfo.getMaterializedAggregateExprs().size() > 0) {
-            output.append(detailPrefix).append("aggregate: ").append(
-                    getVerboseExplain(aggInfo.getAggregateExprs())).append("\n");
-        }
-        if (aggInfo.getGroupingExprs() != null && aggInfo.getGroupingExprs().size() > 0) {
+        // TODO: unify them
+        if (detailLevel == TExplainLevel.VERBOSE) {
+            if (CollectionUtils.isNotEmpty(aggInfo.getGroupingExprs())) {
+                output.append(detailPrefix).append("group by: ").append(
+                        getVerboseExplain(aggInfo.getGroupingExprs(), detailLevel)).append("\n");
+            }
+        } else {
             output.append(detailPrefix).append("group by: ").append(
-                    getVerboseExplain(aggInfo.getGroupingExprs())).append("\n");
+                    getVerboseExplain(aggInfo.getGroupingExprs(), detailLevel)).append("\n");
         }
+
         if (!conjuncts.isEmpty()) {
-            output.append(detailPrefix).append("having: ").append(getVerboseExplain(conjuncts)).append("\n");
+            output.append(detailPrefix).append("having: ").append(getVerboseExplain(conjuncts, detailLevel))
+                    .append("\n");
         }
+        if (useSortAgg) {
+            output.append(detailPrefix).append("sorted streaming: true\n");
+        }
+
+        if (withLocalShuffle) {
+            output.append(detailPrefix).append("withLocalShuffle: true\n");
+        }
+
         return output.toString();
-    }
-
-    @Override
-    public void getMaterializedIds(Analyzer analyzer, List<SlotId> ids) {
-        super.getMaterializedIds(analyzer, ids);
-
-        // we indirectly reference all grouping slots (because we write them)
-        // so they're all materialized.
-        aggInfo.getRefdSlots(ids);
     }
 
     @Override
@@ -343,87 +325,147 @@ public class AggregationNode extends PlanNode {
         return children.get(0).getNumInstances();
     }
 
-    public boolean hasOuterJoinChild() {
-        return hasNullableGenerateChild;
-    }
-
-    public void setHasOuterJoinChild(boolean hasOuterJoinChild) {
-        this.hasNullableGenerateChild = hasOuterJoinChild;
+    @Override
+    public Optional<List<Expr>> candidatesOfSlotExpr(Expr expr, Function<Expr, Boolean> couldBound) {
+        if (!couldBound.apply(expr)) {
+            return Optional.empty();
+        }
+        if (!(expr instanceof SlotRef)) {
+            return Optional.empty();
+        }
+        List<Expr> newSlotExprs = Lists.newArrayList();
+        for (Expr gexpr : aggInfo.getGroupingExprs()) {
+            if (!(gexpr instanceof SlotRef)) {
+                continue;
+            }
+            if (((SlotRef) gexpr).getSlotId().asInt() == ((SlotRef) expr).getSlotId().asInt()) {
+                newSlotExprs.add(gexpr);
+            }
+        }
+        return newSlotExprs.size() > 0 ? Optional.of(newSlotExprs) : Optional.empty();
     }
 
     @Override
-    public boolean isVectorized() {
-        for (PlanNode node : getChildren()) {
-            if (!node.isVectorized()) {
-                return false;
-            }
+    public boolean pushDownRuntimeFilters(DescriptorTable descTbl, RuntimeFilterDescription description, Expr probeExpr,
+                                          List<Expr> partitionByExprs) {
+        if (!canPushDownRuntimeFilter()) {
+            return false;
         }
 
-        for (Expr expr : aggInfo.getAggregateExprs()) {
-            if (!expr.isVectorized()) {
-                return false;
-            }
+        if (!couldBound(probeExpr, description, descTbl)) {
+            return false;
         }
 
-        for (Expr expr : aggInfo.getGroupingExprs()) {
-            if (!expr.isVectorized()) {
-                return false;
-            }
-        }
-
-        for (Expr expr : conjuncts) {
-            if (!expr.isVectorized()) {
-                return false;
-            }
-        }
-
-        return true;
+        Function<Expr, Boolean> couldBoundChecker = couldBound(description, descTbl);
+        return pushdownRuntimeFilterForChildOrAccept(descTbl, description, probeExpr,
+                candidatesOfSlotExpr(probeExpr, couldBoundChecker),
+                partitionByExprs, candidatesOfSlotExprs(partitionByExprs, couldBoundForPartitionExpr()), 0, true);
     }
 
     @Override
-    public void setUseVectorized(boolean flag) {
-        this.useVectorized = flag;
-        for (Expr expr : conjuncts) {
-            expr.setUseVectorized(flag);
-        }
+    public boolean canUsePipeLine() {
+        return getChildren().stream().allMatch(PlanNode::canUsePipeLine);
+    }
 
-        for (Expr expr : aggInfo.getAggregateExprs()) {
-            expr.setUseVectorized(flag);
-        }
+    @Override
+    public boolean canUseRuntimeAdaptiveDop() {
+        return getChildren().stream().allMatch(PlanNode::canUseRuntimeAdaptiveDop);
+    }
 
-        for (Expr expr : aggInfo.getGroupingExprs()) {
-            expr.setUseVectorized(flag);
+    private void disableCacheIfHighCardinalityGroupBy(FragmentNormalizer normalizer) {
+        if (ConnectContext.get() == null || getCardinality() == -1) {
+            return;
         }
-
-        for (PlanNode node : getChildren()) {
-            node.setUseVectorized(flag);
+        long cardinalityLimit = ConnectContext.get().getSessionVariable().getQueryCacheAggCardinalityLimit();
+        long cardinality = getCardinality();
+        if (cardinality < cardinalityLimit || aggInfo.getGroupingExprs().isEmpty()) {
+            return;
+        }
+        List<Expr> groupByExprs = aggInfo.getGroupingExprs();
+        if (groupByExprs.size() > 3) {
+            normalizer.setUncacheable(true);
+        }
+        List<SlotRef> slotRefs = groupByExprs.stream().filter(e -> e instanceof SlotRef && e.getType().isStringType())
+                .map(e -> (SlotRef) e).collect(Collectors.toList());
+        // we assume that if there exists a very high cardinality of string-typed group-by columns whose average length is
+        // greater than 24 bytes(it is equivalent to three bigint-typed group-by columns), then cache populating penalty
+        // is unacceptable.
+        List<ColumnStatistic> stringColumnStatistics = slotRefs.stream()
+                .map(slot -> columnStatistics.get(new ColumnRefOperator(slot.getSlotId().asInt(),
+                        ScalarType.UNKNOWN_TYPE, "key", false)))
+                .filter(stat -> stat != null && !stat.isUnknown() &&
+                        stat.getAverageRowSize() * stat.getDistinctValuesCount() > 24 * cardinalityLimit)
+                .collect(Collectors.toList());
+        if (!stringColumnStatistics.isEmpty()) {
+            normalizer.setUncacheable(true);
         }
     }
 
     @Override
-    public boolean pushDownRuntimeFilters(RuntimeFilterDescription description, Expr probeExpr) {
-        if (probeExpr.isBoundByTupleIds(getTupleIds())) {
-            if (probeExpr instanceof SlotRef) {
-                for (Expr gexpr : aggInfo.getGroupingExprs()) {
-                    // push down only when both of them are slot ref and slot id match.
-                    if ((gexpr instanceof SlotRef) &&
-                            (((SlotRef) gexpr).getSlotId().asInt() == ((SlotRef) probeExpr).getSlotId().asInt())) {
-                        gexpr.setUseVectorized(gexpr.isVectorized());
-                        if (children.get(0).pushDownRuntimeFilters(description, gexpr)) {
-                            return true;
-                        }
-                    }
-                }
-            }
-
-            if (description.canProbeUse(this)) {
-                // can not push down to children.
-                // use runtime filter at this level.
-                description.addProbeExpr(id.asInt(), probeExpr);
-                probeRuntimeFilters.add(description);
-                return true;
-            }
-        }
+    public boolean extractConjunctsToNormalize(FragmentNormalizer normalizer) {
+        List<Expr> conjuncts = normalizer.getConjunctsByPlanNodeId(this);
+        normalizer.filterOutPartColRangePredicates(getId(), conjuncts,
+                FragmentNormalizer.getSlotIdSet(aggInfo.getGroupingExprs()));
         return false;
+    }
+
+    @Override
+    protected void toNormalForm(TNormalPlanNode planNode, FragmentNormalizer normalizer) {
+        disableCacheIfHighCardinalityGroupBy(normalizer);
+        TNormalAggregationNode aggrNode = new TNormalAggregationNode();
+        TupleId tupleId = needsFinalize ? aggInfo.getOutputTupleId() : aggInfo.getIntermediateTupleId();
+        List<SlotId> slotIds = normalizer.getExecPlan().getDescTbl().getTupleDesc(tupleId).getSlots()
+                .stream().map(SlotDescriptor::getId).collect(Collectors.toList());
+
+        List<Expr> groupingExprs = aggInfo.getGroupingExprs();
+        Map<SlotId, Expr> slotIdsAndGroupingExprs = Maps.newHashMap();
+        int numGroupingExprs = (groupingExprs == null || groupingExprs.isEmpty()) ? 0 : groupingExprs.size();
+
+        IntStream.range(0, numGroupingExprs).forEach(i ->
+                slotIdsAndGroupingExprs.put(slotIds.get(i), groupingExprs.get(i)));
+        Pair<List<Integer>, List<ByteBuffer>> remappedGroupExprs =
+                normalizer.normalizeSlotIdsAndExprs(slotIdsAndGroupingExprs);
+        aggrNode.setGrouping_exprs(remappedGroupExprs.second);
+
+        Map<SlotId, Expr> slotIdsAndAggExprs = Maps.newHashMap();
+        List<FunctionCallExpr> aggExprs = aggInfo.getMaterializedAggregateExprs();
+        int numAggExprs = (aggExprs == null || aggExprs.isEmpty()) ? 0 : aggExprs.size();
+        IntStream.range(0, numAggExprs).forEach(i ->
+                slotIdsAndAggExprs.put(slotIds.get(i + numGroupingExprs), aggExprs.get(i)));
+
+        normalizer.addSlotsUseAggColumns(slotIdsAndAggExprs);
+        normalizer.disableMultiversionIfExprsUseAggColumns(groupingExprs);
+
+        Pair<List<Integer>, List<ByteBuffer>> remappedAggExprs =
+                normalizer.normalizeSlotIdsAndExprs(slotIdsAndAggExprs);
+        aggrNode.setAggregate_functions(remappedAggExprs.second);
+
+        aggrNode.setIntermediate_tuple_id(normalizer.remapTupleId(aggInfo.getIntermediateTupleId()).asInt());
+        aggrNode.setOutput_tuple_id(normalizer.remapTupleId(aggInfo.getOutputTupleId()).asInt());
+        aggrNode.setNeed_finalize(needsFinalize);
+        aggrNode.setUse_streaming_preaggregation(useStreamingPreagg);
+        aggrNode.setHas_outer_join_child(hasNullableGenerateChild);
+        if (streamingPreaggregationMode.equalsIgnoreCase("force_streaming")) {
+            aggrNode.setStreaming_preaggregation_mode(TStreamingPreaggregationMode.FORCE_STREAMING);
+        } else if (streamingPreaggregationMode.equalsIgnoreCase("force_preaggregation")) {
+            aggrNode.setStreaming_preaggregation_mode(TStreamingPreaggregationMode.FORCE_PREAGGREGATION);
+        } else {
+            aggrNode.setStreaming_preaggregation_mode(TStreamingPreaggregationMode.AUTO);
+        }
+        aggrNode.setAgg_func_set_version(FeConstants.AGG_FUNC_VERSION);
+        planNode.setNode_type(TPlanNodeType.AGGREGATION_NODE);
+        planNode.setAgg_node(aggrNode);
+        normalizeConjuncts(normalizer, planNode, conjuncts);
+    }
+
+    @Override
+    public List<SlotId> getOutputSlotIds(DescriptorTable descriptorTable) {
+        final List<Expr> groupingExprs = aggInfo.getGroupingExprs();
+        final List<FunctionCallExpr> aggExprs = aggInfo.getMaterializedAggregateExprs();
+        int numGroupingExprs = groupingExprs != null ? groupingExprs.size() : 0;
+        int numAggExprs = aggExprs != null ? aggExprs.size() : 0;
+        TupleId tupleId = needsFinalize ? aggInfo.getOutputTupleId() : aggInfo.getIntermediateTupleId();
+        return descriptorTable.getTupleDesc(tupleId).getSlots().subList(0, numGroupingExprs + numAggExprs)
+                .stream().map(SlotDescriptor::getId).collect(Collectors.toList());
     }
 }

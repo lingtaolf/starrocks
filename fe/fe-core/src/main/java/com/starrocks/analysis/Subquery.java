@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/analysis/Subquery.java
 
@@ -21,23 +34,16 @@
 
 package com.starrocks.analysis;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
-import com.starrocks.catalog.ArrayType;
-import com.starrocks.catalog.StructField;
-import com.starrocks.catalog.StructType;
+import com.google.common.base.Objects;
 import com.starrocks.common.AnalysisException;
-import com.starrocks.common.UserException;
-import com.starrocks.sql.analyzer.ExprVisitor;
+import com.starrocks.sql.analyzer.AstToStringBuilder;
 import com.starrocks.sql.analyzer.SemanticException;
-import com.starrocks.sql.analyzer.relation.QueryRelation;
+import com.starrocks.sql.ast.AstVisitor;
+import com.starrocks.sql.ast.QueryStatement;
+import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.thrift.TExprNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.util.ArrayList;
-import java.util.List;
 
 /**
  * Class representing a subquery. A Subquery consists of a QueryStmt and has
@@ -46,79 +52,31 @@ import java.util.List;
 public class Subquery extends Expr {
     private static final Logger LOG = LoggerFactory.getLogger(Subquery.class);
 
-    // The QueryStmt of the subquery.
-    protected QueryStmt stmt;
-    // A subquery has its own analysis context
-    protected Analyzer analyzer;
+    // mark work way
+    protected boolean useSemiAnti;
 
-    public Analyzer getAnalyzer() {
-        return analyzer;
+    private final QueryStatement queryStatement;
+
+
+    public boolean isUseSemiAnti() {
+        return useSemiAnti;
     }
 
-    public QueryStmt getStatement() {
-        return stmt;
+    public void setUseSemiAnti(boolean useSemiAnti) {
+        this.useSemiAnti = useSemiAnti;
     }
 
-    @Override
-    public String toSqlImpl() {
-        return "(" + stmt.toSql() + ")";
+    public Subquery(QueryStatement queryStatement) {
+        this(queryStatement, queryStatement.getPos());
     }
 
-    /**
-     * C'tor that initializes a Subquery from a QueryStmt.
-     */
-    public Subquery(QueryStmt queryStmt) {
-        super();
-        Preconditions.checkNotNull(queryStmt);
-        stmt = queryStmt;
-        stmt.setNeedToSql(true);
+    public Subquery(QueryStatement queryStatement, NodePosition pos) {
+        super(pos);
+        this.queryStatement = queryStatement;
     }
 
-    /**
-     * Copy c'tor.
-     */
-    public Subquery(Subquery other) {
-        super(other);
-        stmt = other.stmt.clone();
-        // needToSql will affect the toSQL result, so we must clone it
-        stmt.setNeedToSql(other.stmt.needToSql);
-        analyzer = other.analyzer;
-    }
-
-    /**
-     * Analyzes the subquery in a child analyzer.
-     */
-    @Override
-    public void analyzeImpl(Analyzer parentAnalyzer) throws AnalysisException {
-        if (!(stmt instanceof SelectStmt)) {
-            throw new AnalysisException("A subquery must contain a single select block: " +
-                    toSql());
-        }
-        // The subquery is analyzed with its own analyzer.
-        analyzer = new Analyzer(parentAnalyzer);
-        analyzer.setIsSubquery();
-        try {
-            stmt.analyze(analyzer);
-        } catch (UserException e) {
-            throw new AnalysisException(e.getMessage());
-        }
-        // Check whether the stmt_ contains an illegal mix of un/correlated table refs.
-        stmt.getCorrelatedTupleIds(analyzer);
-
-        // Set the subquery type based on the types of the exprs in the
-        // result list of the associated SelectStmt.
-        ArrayList<Expr> stmtResultExprs = stmt.getResultExprs();
-        if (stmtResultExprs.size() == 1) {
-            type = stmtResultExprs.get(0).getType();
-            Preconditions.checkState(!type.isComplexType());
-        } else {
-            type = createStructTypeFromExprList();
-        }
-
-        // If the subquery returns many rows, set its type to ArrayType.
-        if (!((SelectStmt) stmt).returnsSingleRow()) {
-            type = new ArrayType(type, true);
-        }
+    public QueryStatement getQueryStatement() {
+        return queryStatement;
     }
 
     @Override
@@ -126,90 +84,27 @@ public class Subquery extends Expr {
         return false;
     }
 
-    /**
-     * Check if the subquery's SelectStmt returns a single column of scalar type.
-     */
-    public boolean returnsScalarColumn() {
-        ArrayList<Expr> stmtResultExprs = stmt.getResultExprs();
-        if (stmtResultExprs.size() == 1 && stmtResultExprs.get(0).getType().isScalarType()) {
-            return true;
-        }
-        return false;
-    }
-
-    /**
-     * Create a StrucType from the result expr list of a subquery's SelectStmt.
-     */
-    private StructType createStructTypeFromExprList() {
-        List<Expr> stmtResultExprs = stmt.getResultExprs();
-        ArrayList<StructField> structFields = Lists.newArrayList();
-        // Check if we have unique labels
-        List<String> labels = stmt.getColLabels();
-        boolean hasUniqueLabels = true;
-        if (Sets.newHashSet(labels).size() != labels.size()) {
-            hasUniqueLabels = false;
-        }
-
-        // Construct a StructField from each expr in the select list
-        for (int i = 0; i < stmtResultExprs.size(); ++i) {
-            Expr expr = stmtResultExprs.get(i);
-            String fieldName = null;
-            // Check if the label meets the Metastore's requirements.
-            // TODO(zc)
-            // if (MetastoreShim.validateName(labels.get(i))) {
-            if (false) {
-                fieldName = labels.get(i);
-                // Make sure the field names are unique.
-                if (!hasUniqueLabels) {
-                    fieldName = "_" + Integer.toString(i) + "_" + fieldName;
-                }
-            } else {
-                // Use the expr ordinal to construct a StructField.
-                fieldName = "_" + Integer.toString(i);
-            }
-            Preconditions.checkNotNull(fieldName);
-            structFields.add(new StructField(fieldName, expr.getType(), null));
-        }
-        Preconditions.checkState(structFields.size() != 0);
-        return new StructType(structFields);
-    }
-
     @Override
-    public boolean isCorrelatedPredicate(List<TupleId> tupleIdList) {
-        List<TupleId> tupleIdFromSubquery = stmt.collectTupleIds();
-        for (TupleId tupleId : tupleIdList) {
-            if (tupleIdFromSubquery.contains(tupleId)) {
-                return true;
-            }
-        }
-        return false;
+    public int hashCode() {
+        return Objects.hashCode(super.hashCode(), queryStatement);
     }
 
-    /**
-     * Returns true if the toSql() of the Subqueries is identical. May return false for
-     * equivalent statements even due to minor syntactic differences like parenthesis.
-     * TODO: Switch to a less restrictive implementation.
-     */
     @Override
     public boolean equals(Object o) {
         if (!super.equals(o)) {
             return false;
         }
 
-        if (queryBlock != null) {
-            if (((Subquery) o).getQueryBlock() == null) {
-                return false;
-            } else {
-                return o.equals(queryBlock);
-            }
+        if (((Subquery) o).getQueryStatement() == null) {
+            return false;
+        } else {
+            return o.equals(queryStatement);
         }
-
-        return stmt.toSql().equals(((Subquery) o).stmt.toSql());
     }
 
     @Override
     public Subquery clone() {
-        Subquery ret = new Subquery(this);
+        Subquery ret = new Subquery(queryStatement);
         LOG.debug("SUBQUERY clone old={} new={}",
                 System.identityHashCode(this),
                 System.identityHashCode(ret));
@@ -217,28 +112,21 @@ public class Subquery extends Expr {
     }
 
     @Override
+    protected void analyzeImpl(Analyzer analyzer) throws AnalysisException {
+
+    }
+
+    @Override
+    public String toSqlImpl() {
+        return "(" + AstToStringBuilder.toString(queryStatement) + ")";
+    }
+
+    @Override
     protected void toThrift(TExprNode msg) {
     }
 
-    /**
-     * Below function is added by new analyzer
-     */
     @Override
-    public <R, C> R accept(ExprVisitor<R, C> visitor, C context) throws SemanticException {
+    public <R, C> R accept(AstVisitor<R, C> visitor, C context) throws SemanticException {
         return visitor.visitSubquery(this, context);
     }
-
-    /**
-     * Analyzed subquery is store as QueryBlock
-     */
-    private QueryRelation queryBlock;
-
-    public void setQueryBlock(QueryRelation queryBlock) {
-        this.queryBlock = queryBlock;
-    }
-
-    public QueryRelation getQueryBlock() {
-        return queryBlock;
-    }
 }
-

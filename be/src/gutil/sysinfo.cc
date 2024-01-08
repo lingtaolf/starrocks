@@ -32,9 +32,10 @@
 #define PLATFORM_WINDOWS 1
 #endif
 
-#include <ctype.h>
 #include <fcntl.h>  // for open()
 #include <unistd.h> // for read()
+
+#include <cctype>
 
 #if defined __MACH__    // Mac OS X, almost certainly
 #include <sys/sysctl.h> // how we figure out numcpu's on OS X
@@ -53,7 +54,6 @@
 
 #include <algorithm>
 #include <cerrno>  // for errno
-#include <cstdio>  // for snprintf(), sscanf()
 #include <cstdlib> // for getenv()
 #include <cstring> // for memmove(), memchr(), etc.
 #include <ctime>
@@ -108,7 +108,7 @@ static int64 EstimateCyclesPerSecond(const int estimate_time_ms) {
 
     const int64 start_ticks = CycleClock::Now();
     SleepForMilliseconds(estimate_time_ms);
-    const int64 guess = int64(multiplier * (CycleClock::Now() - start_ticks));
+    const auto guess = int64(multiplier * (CycleClock::Now() - start_ticks));
     return guess;
 }
 
@@ -292,7 +292,7 @@ static void InitializeSystemInfo() {
             memmove(line, line + oldlinelen + 1, sizeof(line) - (oldlinelen + 1));
         // Terminate the new line, reading more if we can't find the newline
         char* newline = strchr(line, '\n');
-        if (newline == NULL) {
+        if (newline == nullptr) {
             const int linelen = strlen(line);
             const int bytes_to_read = sizeof(line) - 1 - linelen;
             CHECK(bytes_to_read > 0); // because the memmove recovered >=1 bytes
@@ -300,7 +300,7 @@ static void InitializeSystemInfo() {
             line[linelen + chars_read] = '\0';
             newline = strchr(line, '\n');
         }
-        if (newline != NULL) *newline = '\0';
+        if (newline != nullptr) *newline = '\0';
 
 #if defined(__powerpc__) || defined(__ppc__)
         // PowerPC cpus report the frequency in "clock" line
@@ -442,19 +442,9 @@ static void InitializeSystemInfo() {
     }
 }
 
-double CyclesPerSecond(void) {
+double CyclesPerSecond() {
     InitializeSystemInfo();
     return cpuinfo_cycles_per_second;
-}
-
-int NumCPUs(void) {
-    InitializeSystemInfo();
-    return cpuinfo_num_cpus;
-}
-
-int MaxCPUIndex(void) {
-    InitializeSystemInfo();
-    return cpuinfo_max_cpu_index;
 }
 
 } // namespace base

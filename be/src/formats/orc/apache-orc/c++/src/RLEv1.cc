@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/RLEv1.cc
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -24,8 +20,8 @@
 
 #include <algorithm>
 
-#include "Adaptor.hh"
 #include "Compression.hh"
+#include "Utils.hh"
 #include "orc/Exceptions.hh"
 
 namespace orc {
@@ -62,7 +58,7 @@ void RleEncoderV1::writeValues() {
                 writeVulong(literals[0]);
             }
         } else {
-            writeByte(static_cast<char>(-numLiterals));
+            writeByte(static_cast<char>(-static_cast<int64_t>(numLiterals)));
             for (size_t i = 0; i < numLiterals; ++i) {
                 if (isSigned) {
                     writeVslong(literals[i]);
@@ -140,6 +136,7 @@ void RleEncoderV1::write(int64_t value) {
 }
 
 signed char RleDecoderV1::readByte() {
+    SCOPED_MINUS_STOPWATCH(metrics, DecodingLatencyUs);
     if (bufferStart == bufferEnd) {
         int bufferLength;
         const void* bufferPointer;
@@ -190,23 +187,25 @@ void RleDecoderV1::readHeader() {
     }
 }
 
-RleDecoderV1::RleDecoderV1(std::unique_ptr<SeekableInputStream> input, bool hasSigned)
-        : inputStream(std::move(input)),
-          isSigned(hasSigned),
-          remainingValues(0),
-          value(0),
-          bufferStart(nullptr),
-          bufferEnd(bufferStart),
-          delta(0),
-          repeating(false) {}
+void RleDecoderV1::reset() {
+    remainingValues = 0;
+    value = 0;
+    bufferStart = nullptr;
+    bufferEnd = nullptr;
+    delta = 0;
+    repeating = false;
+}
+
+RleDecoderV1::RleDecoderV1(std::unique_ptr<SeekableInputStream> input, bool hasSigned, ReaderMetrics* _metrics)
+        : RleDecoder(_metrics), inputStream(std::move(input)), isSigned(hasSigned) {
+    reset();
+}
 
 void RleDecoderV1::seek(PositionProvider& location) {
     // move the input stream
     inputStream->seek(location);
-    // force a re-read from the stream
-    bufferEnd = bufferStart;
-    // read a new header
-    readHeader();
+    // reset the decoder status and lazily call readHeader()
+    reset();
     // skip ahead the given number of records
     skip(location.next());
 }
@@ -228,6 +227,7 @@ void RleDecoderV1::skip(uint64_t numValues) {
 }
 
 void RleDecoderV1::next(int64_t* const data, const uint64_t numValues, const char* const notNull) {
+    SCOPED_STOPWATCH(metrics, DecodingLatencyUs, DecodingCall);
     uint64_t position = 0;
     // skipNulls()
     if (notNull) {

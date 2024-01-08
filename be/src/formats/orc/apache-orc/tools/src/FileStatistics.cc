@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-// https://github.com/apache/orc/tree/main/tools/src/FileStatistics.cc
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -32,8 +28,7 @@
 void printStatistics(const char* filename, bool withIndex) {
     orc::ReaderOptions opts;
     std::unique_ptr<orc::Reader> reader;
-    reader = orc::createReader(orc::readFile(std::string(filename)), opts);
-
+    reader = orc::createReader(orc::readFile(std::string(filename), opts.getReaderMetrics()), opts);
     // print out all selected columns statistics.
     std::unique_ptr<orc::Statistics> colStats = reader->getStatistics();
     std::cout << "File " << filename << " has " << colStats->getNumberOfColumns() << " columns" << std::endl;

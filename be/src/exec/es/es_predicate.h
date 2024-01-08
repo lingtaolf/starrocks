@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/exec/es/es_predicate.h
 
@@ -19,55 +32,48 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef BE_EXEC_ES_PREDICATE_H
-#define BE_EXEC_ES_PREDICATE_H
+#pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "exprs/slot_ref.h"
+#include "cctz/time_zone.h"
+#include "column/vectorized_fwd.h"
 #include "gen_cpp/Exprs_types.h"
 #include "gen_cpp/Opcodes_types.h"
 #include "runtime/descriptors.h"
-#include "runtime/primitive_type.h"
-#include "runtime/tuple.h"
+#include "types/date_value.h"
+#include "types/logical_type.h"
+#include "util/timezone_utils.h"
 
 namespace starrocks {
 
 class Status;
 class ExprContext;
-class ExtBinaryPredicate;
 class EsPredicate;
 
 class ExtLiteral {
 public:
-    ExtLiteral(PrimitiveType type, void* value) : _type(type), _value(value) { _str = value_to_string(); }
-    ~ExtLiteral();
-    const std::string& to_string() const { return _str; }
+    virtual const std::string& to_string() const = 0;
+    virtual ~ExtLiteral() = default;
+};
+
+// for vectorized call
+class VExtLiteral : public ExtLiteral {
+public:
+    VExtLiteral(LogicalType type, ColumnPtr column, const std::string& timezone = TimezoneUtils::default_time_zone);
+
+    VExtLiteral() = default;
+    const std::string& to_string() const override { return _value; }
 
 private:
-    int8_t get_byte();
-    int16_t get_short();
-    int32_t get_int();
-    int64_t get_long();
-    float get_float();
-    double get_double();
-    std::string get_string();
-    std::string get_date_string();
-    bool get_bool();
-    std::string get_decimal_string();
-    std::string get_decimalv2_string();
-    std::string get_largeint_string();
-
-    std::string value_to_string();
-
-    PrimitiveType _type;
-    void* _value;
-    std::string _str;
+    static std::string _value_to_string(ColumnPtr& column);
+    std::string _value;
 };
 
 struct ExtColumnDesc {
-    ExtColumnDesc(const std::string& name, const TypeDescriptor& type) : name(name), type(type) {}
+    ExtColumnDesc(std::string name, TypeDescriptor type) : name(std::move(name)), type(std::move(type)) {}
 
     std::string name;
     TypeDescriptor type;
@@ -75,7 +81,7 @@ struct ExtColumnDesc {
 
 struct ExtPredicate {
     ExtPredicate(TExprNodeType::type node_type) : node_type(node_type) {}
-    virtual ~ExtPredicate() {}
+    virtual ~ExtPredicate() = default;
 
     TExprNodeType::type node_type;
 };
@@ -83,8 +89,8 @@ struct ExtPredicate {
 // this used for placeholder for compound_predicate
 // reserved for compound_not
 struct ExtCompPredicates : public ExtPredicate {
-    ExtCompPredicates(TExprOpcode::type expr_op, const std::vector<EsPredicate*>& es_predicates)
-            : ExtPredicate(TExprNodeType::COMPOUND_PRED), op(expr_op), conjuncts(es_predicates) {}
+    ExtCompPredicates(TExprOpcode::type expr_op, std::vector<EsPredicate*> es_predicates)
+            : ExtPredicate(TExprNodeType::COMPOUND_PRED), op(expr_op), conjuncts(std::move(es_predicates)) {}
 
     TExprOpcode::type op;
     std::vector<EsPredicate*> conjuncts;
@@ -92,31 +98,31 @@ struct ExtCompPredicates : public ExtPredicate {
 
 struct ExtBinaryPredicate : public ExtPredicate {
     ExtBinaryPredicate(TExprNodeType::type node_type, const std::string& name, const TypeDescriptor& type,
-                       TExprOpcode::type op, const ExtLiteral& value)
+                       TExprOpcode::type op, const ExtLiteral* value)
             : ExtPredicate(node_type), col(name, type), op(op), value(value) {}
 
     ExtColumnDesc col;
     TExprOpcode::type op;
-    ExtLiteral value;
+    const ExtLiteral* value;
 };
 
 struct ExtInPredicate : public ExtPredicate {
     ExtInPredicate(TExprNodeType::type node_type, bool is_not_in, const std::string& name, const TypeDescriptor& type,
-                   const std::vector<ExtLiteral>& values)
-            : ExtPredicate(node_type), is_not_in(is_not_in), col(name, type), values(values) {}
+                   std::vector<ExtLiteral*> values)
+            : ExtPredicate(node_type), is_not_in(is_not_in), col(name, type), values(std::move(values)) {}
 
     bool is_not_in;
     ExtColumnDesc col;
-    std::vector<ExtLiteral> values;
+    std::vector<ExtLiteral*> values;
 };
 
 struct ExtLikePredicate : public ExtPredicate {
     ExtLikePredicate(TExprNodeType::type node_type, const std::string& name, const TypeDescriptor& type,
-                     ExtLiteral value)
+                     const ExtLiteral* value)
             : ExtPredicate(node_type), col(name, type), value(value) {}
 
     ExtColumnDesc col;
-    ExtLiteral value;
+    const ExtLiteral* value;
 };
 
 struct ExtIsNullPredicate : public ExtPredicate {
@@ -129,18 +135,21 @@ struct ExtIsNullPredicate : public ExtPredicate {
 };
 
 struct ExtFunction : public ExtPredicate {
-    ExtFunction(TExprNodeType::type node_type, const std::string& func_name, std::vector<ExtColumnDesc> cols,
-                std::vector<ExtLiteral> values)
-            : ExtPredicate(node_type), func_name(func_name), cols(cols), values(values) {}
+    ExtFunction(TExprNodeType::type node_type, std::string func_name, std::vector<ExtColumnDesc> cols,
+                std::vector<ExtLiteral*> values)
+            : ExtPredicate(node_type),
+              func_name(std::move(func_name)),
+              cols(std::move(cols)),
+              values(std::move(values)) {}
 
     const std::string func_name;
     std::vector<ExtColumnDesc> cols;
-    const std::vector<ExtLiteral> values;
+    std::vector<ExtLiteral*> values;
 };
 
 class EsPredicate {
 public:
-    EsPredicate(ExprContext* context, const TupleDescriptor* tuple_desc, ObjectPool* pool);
+    EsPredicate(ExprContext* context, const TupleDescriptor* tuple_desc, std::string timezone, ObjectPool* pool);
     ~EsPredicate();
     const std::vector<ExtPredicate*>& get_predicate_list();
     Status build_disjuncts_list();
@@ -152,18 +161,22 @@ public:
     void set_field_context(const std::map<std::string, std::string>& field_context) { _field_context = field_context; }
 
 private:
-    Status build_disjuncts_list(const Expr* conjunct);
-    const SlotDescriptor* get_slot_desc(const SlotRef* slotRef);
+    Status _vec_build_disjuncts_list(const Expr* conjunct);
+    // used in vectorized mode
+    Status _build_binary_predicate(const Expr* conjunct, bool* handled);
+    Status _build_functioncall_predicate(const Expr* conjunct, bool* handled);
+    Status _build_in_predicate(const Expr* conjunct, bool* handled);
+    Status _build_compound_predicate(const Expr* conjunct, bool* handled);
+
+    const SlotDescriptor* get_slot_desc(SlotId slot_id);
 
     ExprContext* _context = nullptr;
-    int _disjuncts_num = 0;
     const TupleDescriptor* _tuple_desc = nullptr;
     std::vector<ExtPredicate*> _disjuncts;
     Status _es_query_status;
+    const std::string _timezone;
     ObjectPool* _pool = nullptr;
     std::map<std::string, std::string> _field_context;
 };
 
 } // namespace starrocks
-
-#endif

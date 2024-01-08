@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/http/rest/GetSmallFileAction.java
 
@@ -22,13 +35,13 @@
 package com.starrocks.http.rest;
 
 import com.google.common.base.Strings;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.common.util.SmallFileMgr;
 import com.starrocks.common.util.SmallFileMgr.SmallFile;
 import com.starrocks.http.ActionController;
 import com.starrocks.http.BaseRequest;
 import com.starrocks.http.BaseResponse;
 import com.starrocks.http.IllegalArgException;
+import com.starrocks.server.GlobalStateMgr;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import org.apache.logging.log4j.LogManager;
@@ -58,7 +71,7 @@ public class GetSmallFileAction extends RestBaseAction {
         }
 
         // check token
-        if (!token.equals(Catalog.getCurrentCatalog().getToken())) {
+        if (!token.equals(GlobalStateMgr.getCurrentState().getToken())) {
             response.appendContent("Invalid token");
             writeResponse(request, response, HttpResponseStatus.BAD_REQUEST);
             return;
@@ -73,7 +86,7 @@ public class GetSmallFileAction extends RestBaseAction {
             return;
         }
 
-        SmallFileMgr fileMgr = Catalog.getCurrentCatalog().getSmallFileMgr();
+        SmallFileMgr fileMgr = GlobalStateMgr.getCurrentState().getSmallFileMgr();
         SmallFile smallFile = fileMgr.getSmallFile(fileId);
         if (smallFile == null || !smallFile.isContent) {
             response.appendContent("File not found or is not content");

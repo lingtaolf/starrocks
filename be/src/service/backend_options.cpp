@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/service/backend_options.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -36,6 +32,7 @@ static const std::string PRIORITY_CIDR_SEPARATOR = ";";
 
 std::string BackendOptions::_s_localhost;
 std::vector<CIDR> BackendOptions::_s_priority_cidrs;
+TBackend BackendOptions::_backend;
 
 bool BackendOptions::init() {
     if (!analyze_priority_cidrs()) {
@@ -45,7 +42,7 @@ bool BackendOptions::init() {
     Status status = get_hosts_v4(&hosts);
 
     if (!status.ok()) {
-        LOG(FATAL) << status.get_error_msg();
+        LOG(FATAL) << status.message();
         return false;
     }
 
@@ -55,7 +52,7 @@ bool BackendOptions::init() {
     }
 
     std::string loopback;
-    std::vector<InetAddress>::iterator addr_it = hosts.begin();
+    auto addr_it = hosts.begin();
     for (; addr_it != hosts.end(); ++addr_it) {
         if ((*addr_it).is_address_v4()) {
             VLOG(2) << "check ip=" << addr_it->get_host_address_v4();
@@ -77,12 +74,23 @@ bool BackendOptions::init() {
         LOG(INFO) << "fail to find one valid non-loopback address, use loopback address.";
         _s_localhost = loopback;
     }
-    LOG(INFO) << "local host ip=" << _s_localhost;
+    LOG(INFO) << "localhost " << _s_localhost;
     return true;
 }
 
 std::string BackendOptions::get_localhost() {
     return _s_localhost;
+}
+
+TBackend BackendOptions::get_localBackend() {
+    _backend.__set_host(_s_localhost);
+    _backend.__set_be_port(config::be_port);
+    _backend.__set_http_port(config::be_http_port);
+    return _backend;
+}
+
+void BackendOptions::set_localhost(const std::string& host) {
+    _s_localhost = host;
 }
 
 bool BackendOptions::analyze_priority_cidrs() {

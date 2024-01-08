@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/MaterializedIndex.java
 
@@ -21,11 +34,16 @@
 
 package com.starrocks.catalog;
 
+import com.google.common.base.Objects;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.gson.annotations.SerializedName;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
+import com.starrocks.lake.LakeTablet;
 import com.starrocks.persist.gson.GsonPostProcessable;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.thrift.TIndexState;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -34,11 +52,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
+import javax.annotation.Nullable;
 
-/**
- * The OlapTraditional table is a materialized table which stored as rowcolumnar file or columnar file
- */
 public class MaterializedIndex extends MetaObject implements Writable, GsonPostProcessable {
     public enum IndexState {
         NORMAL,
@@ -50,6 +65,28 @@ public class MaterializedIndex extends MetaObject implements Writable, GsonPostP
 
         public boolean isVisible() {
             return this == IndexState.NORMAL || this == IndexState.SCHEMA_CHANGE;
+        }
+
+        public TIndexState toThrift() {
+            switch (this) {
+                case NORMAL:
+                    return TIndexState.NORMAL;
+                case SHADOW:
+                    return TIndexState.SHADOW;
+                default:
+                    return null;
+            }
+        }
+
+        public static IndexState fromThrift(TIndexState tState) {
+            switch (tState) {
+                case NORMAL:
+                    return IndexState.NORMAL;
+                case SHADOW:
+                    return IndexState.SHADOW;
+                default:
+                    return null;
+            }
         }
     }
 
@@ -71,33 +108,65 @@ public class MaterializedIndex extends MetaObject implements Writable, GsonPostP
     // this is for keeping tablet order
     private List<Tablet> tablets;
 
-    // for push after rollup index finished
-    @SerializedName(value = "rollupIndexId")
-    private long rollupIndexId;
-    @SerializedName(value = "rollupFinishedVersion")
-    private long rollupFinishedVersion;
+    // If this is an index of LakeTable and the index state is SHADOW, all transactions
+    // whose txn id is less than 'visibleTxnId' will ignore this index when sending
+    // PublishVersionRequest requests to BE nodes.
+    private long visibleTxnId;
 
     public MaterializedIndex() {
-        this.state = IndexState.NORMAL;
-        this.idToTablets = new HashMap<>();
-        this.tablets = new ArrayList<>();
+        this(0, IndexState.NORMAL);
     }
 
-    public MaterializedIndex(long id, IndexState state) {
+    public MaterializedIndex(long id) {
+        this(id, IndexState.NORMAL);
+    }
+
+    public MaterializedIndex(long id, @Nullable IndexState state) {
+        this(id, state, 0);
+    }
+
+    /**
+     * Construct a new instance of {@link MaterializedIndex}.
+     * <p>
+     * {@code visibleTxnId} will be ignored if {@code state} is not {@code IndexState.SHADOW}
+     *
+     * @param id           the id of the index
+     * @param state        the state of the index
+     * @param visibleTxnId the minimum transaction id that can see this index.
+     */
+    public MaterializedIndex(long id, @Nullable IndexState state, long visibleTxnId) {
         this.id = id;
-
-        this.state = state;
-        if (this.state == null) {
-            this.state = IndexState.NORMAL;
-        }
-
+        this.state = state == null ? IndexState.NORMAL : state;
         this.idToTablets = new HashMap<>();
         this.tablets = new ArrayList<>();
-
         this.rowCount = 0;
+        this.visibleTxnId = (this.state == IndexState.SHADOW) ? visibleTxnId : 0;
+    }
 
-        this.rollupIndexId = -1L;
-        this.rollupFinishedVersion = -1L;
+    /**
+     * Checks whether {@code this} {@link MaterializedIndex} is visible to a transaction.
+     * <p>
+     * If this {@link MaterializedIndex} is not visible to a transaction,
+     * {@link com.starrocks.transaction.PublishVersionDaemon} will not send {@link com.starrocks.proto.PublishVersionRequest}
+     * to tablets of this index.
+     * <p>
+     * Only used for {@link com.starrocks.lake.LakeTable} now.
+     *
+     * @param txnId the id of a transaction created by {@link com.starrocks.transaction.DatabaseTransactionMgr}
+     * @return true iff this index is visible to the transaction, false otherwise.
+     */
+    public boolean visibleForTransaction(long txnId) {
+        return state == IndexState.NORMAL || visibleTxnId <= txnId;
+    }
+
+    /**
+     * Update the value of visibleTxnId.
+     *
+     * @param visibleTxnId the new value of visibleTxnId.
+     */
+    public void setVisibleTxnId(long visibleTxnId) {
+        Preconditions.checkState(state == IndexState.SHADOW);
+        this.visibleTxnId = visibleTxnId;
     }
 
     public List<Tablet> getTablets() {
@@ -122,14 +191,14 @@ public class MaterializedIndex extends MetaObject implements Writable, GsonPostP
     }
 
     public void addTablet(Tablet tablet, TabletMeta tabletMeta) {
-        addTablet(tablet, tabletMeta, false);
+        addTablet(tablet, tabletMeta, true);
     }
 
-    public void addTablet(Tablet tablet, TabletMeta tabletMeta, boolean isRestore) {
+    public void addTablet(Tablet tablet, TabletMeta tabletMeta, boolean updateInvertedIndex) {
         idToTablets.put(tablet.getId(), tablet);
         tablets.add(tablet);
-        if (!isRestore) {
-            Catalog.getCurrentInvertedIndex().addTablet(tablet.getId(), tabletMeta);
+        if (updateInvertedIndex) {
+            GlobalStateMgr.getCurrentInvertedIndex().addTablet(tablet.getId(), tabletMeta);
         }
     }
 
@@ -157,24 +226,6 @@ public class MaterializedIndex extends MetaObject implements Writable, GsonPostP
         this.rowCount = rowCount;
     }
 
-    public void setRollupIndexInfo(long rollupIndexId, long rollupFinishedVersion) {
-        this.rollupIndexId = rollupIndexId;
-        this.rollupFinishedVersion = rollupFinishedVersion;
-    }
-
-    public long getRollupIndexId() {
-        return rollupIndexId;
-    }
-
-    public long getRollupFinishedVersion() {
-        return rollupFinishedVersion;
-    }
-
-    public void clearRollupIndexInfo() {
-        this.rollupIndexId = -1L;
-        this.rollupFinishedVersion = -1L;
-    }
-
     public long getDataSize() {
         long dataSize = 0;
         for (Tablet tablet : getTablets()) {
@@ -183,12 +234,31 @@ public class MaterializedIndex extends MetaObject implements Writable, GsonPostP
         return dataSize;
     }
 
-    public long getReplicaCount() {
-        long replicaCount = 0;
+    public long getTabletMaxDataSize() {
+        long maxDataSize = 0;
         for (Tablet tablet : getTablets()) {
-            replicaCount += tablet.getReplicas().size();
+            maxDataSize = Math.max(maxDataSize, tablet.getDataSize(true));
         }
-        return replicaCount;
+        return maxDataSize;
+    }
+
+    public long getReplicaCount() {
+        if (tablets.isEmpty()) {
+            return 0L;
+        }
+
+        Tablet t = tablets.get(0);
+        if (t instanceof LakeTablet) {
+            return tablets.size();
+        } else {
+            Preconditions.checkState(t instanceof LocalTablet);
+            long replicaCount = 0;
+            for (Tablet tablet : getTablets()) {
+                LocalTablet localTablet = (LocalTablet) tablet;
+                replicaCount += localTablet.getImmutableReplicas().size();
+            }
+            return replicaCount;
+        }
     }
 
     public int getTabletOrderIdx(long tabletId) {
@@ -217,8 +287,8 @@ public class MaterializedIndex extends MetaObject implements Writable, GsonPostP
             tablet.write(out);
         }
 
-        out.writeLong(rollupIndexId);
-        out.writeLong(rollupFinishedVersion);
+        out.writeLong(-1L); // For rollback compatibility of field rollupIndexId
+        out.writeLong(-1L); // For rollback compatibility of field rollupFinishedVersion
     }
 
     public void readFields(DataInput in) throws IOException {
@@ -231,19 +301,25 @@ public class MaterializedIndex extends MetaObject implements Writable, GsonPostP
 
         int tabletCount = in.readInt();
         for (int i = 0; i < tabletCount; ++i) {
-            Tablet tablet = Tablet.read(in);
+            // LakeTablet uses json serialization.
+            Tablet tablet = LocalTablet.read(in);
             tablets.add(tablet);
             idToTablets.put(tablet.getId(), tablet);
         }
 
-        rollupIndexId = in.readLong();
-        rollupFinishedVersion = in.readLong();
+        in.readLong(); // For backward compatibility of field rollupIndexId
+        in.readLong(); // For backward compatibility of field rollupFinishedVersion
     }
 
     public static MaterializedIndex read(DataInput in) throws IOException {
         MaterializedIndex materializedIndex = new MaterializedIndex();
         materializedIndex.readFields(in);
         return materializedIndex;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hashCode(idToTablets);
     }
 
     @Override
@@ -254,28 +330,9 @@ public class MaterializedIndex extends MetaObject implements Writable, GsonPostP
         if (!(obj instanceof MaterializedIndex)) {
             return false;
         }
-
-        MaterializedIndex table = (MaterializedIndex) obj;
-
-        // Check idToTablets
-        if (table.idToTablets == null) {
-            return false;
-        }
-        if (idToTablets.size() != table.idToTablets.size()) {
-            return false;
-        }
-        for (Entry<Long, Tablet> entry : idToTablets.entrySet()) {
-            long key = entry.getKey();
-            if (!table.idToTablets.containsKey(key)) {
-                return false;
-            }
-            if (!entry.getValue().equals(table.idToTablets.get(key))) {
-                return false;
-            }
-        }
-
-        return (state.equals(table.state))
-                && (rowCount == table.rowCount);
+        MaterializedIndex other = (MaterializedIndex) obj;
+        return idToTablets.equals(other.idToTablets) && state.equals(other.state) && (rowCount == other.rowCount) &&
+                (visibleTxnId == other.visibleTxnId);
     }
 
     @Override
@@ -286,15 +343,12 @@ public class MaterializedIndex extends MetaObject implements Writable, GsonPostP
 
         buffer.append("row count: ").append(rowCount).append("; ");
         buffer.append("tablets size: ").append(tablets.size()).append("; ");
-        //
+        buffer.append("visibleTxnId: ").append(visibleTxnId).append("; ");
         buffer.append("tablets: [");
         for (Tablet tablet : tablets) {
             buffer.append("tablet: ").append(tablet.toString()).append(", ");
         }
         buffer.append("]; ");
-
-        buffer.append("rollup index id: ").append(rollupIndexId).append("; ");
-        buffer.append("rollup finished version: ").append(rollupFinishedVersion).append("; ");
 
         return buffer.toString();
     }

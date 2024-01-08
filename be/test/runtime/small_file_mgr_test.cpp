@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/test/runtime/small_file_mgr_test.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -26,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "agent/master_info.h"
 #include "common/logging.h"
 #include "gen_cpp/HeartbeatService_types.h"
 #include "http/ev_http_server.h"
@@ -85,8 +82,8 @@ static int real_port = 0;
 
 class SmallFileMgrTest : public testing::Test {
 public:
-    SmallFileMgrTest() {}
-    virtual ~SmallFileMgrTest() {}
+    SmallFileMgrTest() = default;
+    ~SmallFileMgrTest() override = default;
 
     static void SetUpTestCase() {
         s_server = new EvHttpServer(0);
@@ -97,6 +94,8 @@ public:
     }
 
     static void TearDownTestCase() {
+        s_server->stop();
+        s_server->join();
         delete s_server;
         std::stringstream ss;
         ss << g_download_path << "/" << g_file_12345 << "." << g_md5_12345;
@@ -112,8 +111,8 @@ TEST_F(SmallFileMgrTest, test_get_file) {
     TMasterInfo info;
     info.__set_network_address(addr);
     info.__set_http_port(real_port);
+    ASSERT_TRUE(update_master_info(info));
     ExecEnv* env = ExecEnv::GetInstance();
-    env->_master_info = &info;
     SmallFileMgr mgr(env, g_download_path);
     Status st = mgr.init();
     ASSERT_TRUE(st.ok());
@@ -141,8 +140,3 @@ TEST_F(SmallFileMgrTest, test_get_file) {
 }
 
 } // namespace starrocks
-
-int main(int argc, char* argv[]) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/load/routineload/KafkaRoutineLoadJob.java
 
@@ -21,6 +34,7 @@
 
 package com.starrocks.load.routineload;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
@@ -28,18 +42,16 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import com.starrocks.analysis.AlterRoutineLoadStmt;
-import com.starrocks.analysis.CreateRoutineLoadStmt;
+import com.google.gson.annotations.SerializedName;
 import com.starrocks.analysis.RoutineLoadDataSourceProperties;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Database;
+import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReport;
-import com.starrocks.common.FeMetaVersion;
 import com.starrocks.common.InternalErrorCode;
 import com.starrocks.common.LoadException;
 import com.starrocks.common.MetaNotFoundException;
@@ -52,10 +64,19 @@ import com.starrocks.common.util.LogBuilder;
 import com.starrocks.common.util.LogKey;
 import com.starrocks.common.util.SmallFileMgr;
 import com.starrocks.common.util.SmallFileMgr.SmallFile;
-import com.starrocks.persist.AlterRoutineLoadJobOperationLog;
+import com.starrocks.load.Load;
+import com.starrocks.load.RoutineLoadDesc;
+import com.starrocks.meta.lock.LockType;
+import com.starrocks.meta.lock.Locker;
+import com.starrocks.qe.OriginStatement;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.RunMode;
+import com.starrocks.sql.ast.CreateRoutineLoadStmt;
+import com.starrocks.system.ComputeNode;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.transaction.TransactionState;
 import com.starrocks.transaction.TransactionStatus;
+import com.starrocks.warehouse.Warehouse;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -64,9 +85,12 @@ import java.io.DataOutput;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * KafkaRoutineLoadJob is a kind of RoutineLoadJob which fetch data from kafka.
@@ -77,29 +101,55 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
 
     public static final String KAFKA_FILE_CATALOG = "kafka";
 
+    private static final String PROPERTY_KAFKA_GROUP_ID = "group.id";
+
+    @SerializedName("bkl")
     private String brokerList;
+    @SerializedName("tpc")
     private String topic;
+
     // optional, user want to load partitions.
+    @SerializedName("ckp")
     private List<Integer> customKafkaPartitions = Lists.newArrayList();
     // current kafka partitions is the actually partition which will be fetched
+    @SerializedName("ctkp")
     private List<Integer> currentKafkaPartitions = Lists.newArrayList();
     // optional, user want to set default offset when new partition add or offset not set.
     private Long kafkaDefaultOffSet = null;
     // kafka properties, property prefix will be mapped to kafka custom parameters, which can be extended in the future
+    @SerializedName("cpr")
     private Map<String, String> customProperties = Maps.newHashMap();
     private Map<String, String> convertedCustomProperties = Maps.newHashMap();
+    @SerializedName("csru")
+    private String confluentSchemaRegistryUrl = null;
+    @SerializedName("ckpo")
+    private List<Pair<Integer, Long>> customeKafkaPartitionOffsets = null;
+    boolean useDefaultGroupId = true;
+
+    private Map<Integer, Long> latestPartitionOffsets = Maps.newHashMap();
 
     public KafkaRoutineLoadJob() {
         // for serialization, id is dummy
         super(-1, LoadDataSourceType.KAFKA);
+        this.progress = new KafkaProgress();
+        this.timestampProgress = new KafkaProgress();
     }
 
-    public KafkaRoutineLoadJob(Long id, String name, String clusterName,
+    public KafkaRoutineLoadJob(Long id, String name,
                                long dbId, long tableId, String brokerList, String topic) {
-        super(id, name, clusterName, dbId, tableId, LoadDataSourceType.KAFKA);
+        super(id, name, dbId, tableId, LoadDataSourceType.KAFKA);
         this.brokerList = brokerList;
         this.topic = topic;
         this.progress = new KafkaProgress();
+        this.timestampProgress = new KafkaProgress();
+    }
+
+    public String getConfluentSchemaRegistryUrl() {
+        return confluentSchemaRegistryUrl;
+    }
+
+    public void setConfluentSchemaRegistryUrl(String confluentSchemaRegistryUrl) {
+        this.confluentSchemaRegistryUrl = confluentSchemaRegistryUrl;
     }
 
     public String getTopic() {
@@ -115,8 +165,29 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
     }
 
     @Override
+    protected String getSourceProgressString() {
+        // To be compatible with progress format, we convert the Map<Integer, Long> to Map<String, String>
+        Map<String, String> partitionOffsets = Maps.newHashMap();
+        for (Map.Entry<Integer, Long> entry : latestPartitionOffsets.entrySet()) {
+            partitionOffsets.put(entry.getKey().toString(), entry.getValue().toString());
+        }
+
+        Gson gson = new Gson();
+        return gson.toJson(partitionOffsets);
+    }
+
+    public void setPartitionOffset(int partition, long offset) {
+        latestPartitionOffsets.put(Integer.valueOf(partition), Long.valueOf(offset));
+    }
+
+    public Long getPartitionOffset(int partition) {
+        return latestPartitionOffsets.get(Integer.valueOf(partition));
+    }
+
+    @Override
     public void prepare() throws UserException {
         super.prepare();
+        checkCustomPartition(customKafkaPartitions);
         // should reset converted properties each time the job being prepared.
         // because the file info can be changed anytime.
         convertCustomProperties(true);
@@ -124,7 +195,7 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
         ((KafkaProgress) progress).convertOffset(brokerList, topic, convertedCustomProperties);
     }
 
-    private void convertCustomProperties(boolean rebuild) throws DdlException {
+    public synchronized void convertCustomProperties(boolean rebuild) throws DdlException {
         if (customProperties.isEmpty()) {
             return;
         }
@@ -137,7 +208,7 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
             convertedCustomProperties.clear();
         }
 
-        SmallFileMgr smallFileMgr = Catalog.getCurrentCatalog().getSmallFileMgr();
+        SmallFileMgr smallFileMgr = GlobalStateMgr.getCurrentState().getSmallFileMgr();
         for (Map.Entry<String, String> entry : customProperties.entrySet()) {
             if (entry.getValue().startsWith("FILE:")) {
                 // convert FILE:file_name -> FILE:file_id:md5
@@ -175,9 +246,9 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
                         }
                     }
                     long timeToExecuteMs = System.currentTimeMillis() + taskSchedIntervalS * 1000;
-                    KafkaTaskInfo kafkaTaskInfo = new KafkaTaskInfo(UUID.randomUUID(), id, clusterName,
+                    KafkaTaskInfo kafkaTaskInfo = new KafkaTaskInfo(UUID.randomUUID(), id,
                             taskSchedIntervalS * 1000,
-                            timeToExecuteMs, taskKafkaProgress);
+                            timeToExecuteMs, taskKafkaProgress, taskTimeoutSecond * 1000);
                     routineLoadTaskInfoList.add(kafkaTaskInfo);
                     result.add(kafkaTaskInfo);
                 }
@@ -189,7 +260,7 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
                 LOG.debug("Ignore to divide routine load job while job state {}", state);
             }
             // save task into queue of needScheduleTasks
-            Catalog.getCurrentCatalog().getRoutineLoadTaskScheduler().addTasksInQueue(result);
+            GlobalStateMgr.getCurrentState().getRoutineLoadTaskScheduler().addTasksInQueue(result);
         } finally {
             writeUnlock();
         }
@@ -197,17 +268,41 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
 
     @Override
     public int calculateCurrentConcurrentTaskNum() throws MetaNotFoundException {
-        SystemInfoService systemInfoService = Catalog.getCurrentSystemInfo();
-        int aliveBeNum = systemInfoService.getClusterBackendIds(clusterName, true).size();
+        SystemInfoService systemInfoService = GlobalStateMgr.getCurrentSystemInfo();
+        // TODO: need to refactor after be split into cn + dn
+        int aliveNodeNum = systemInfoService.getAliveBackendNumber();
+        if (RunMode.isSharedDataMode()) {
+            Warehouse warehouse = GlobalStateMgr.getCurrentWarehouseMgr().getDefaultWarehouse();
+            aliveNodeNum = 0;
+            for (long nodeId : warehouse.getAnyAvailableCluster().getComputeNodeIds()) {
+                ComputeNode node = GlobalStateMgr.getCurrentSystemInfo().getBackendOrComputeNode(nodeId);
+                if (node != null && node.isAlive()) {
+                    ++aliveNodeNum;
+                }
+            }
+        }
         int partitionNum = currentKafkaPartitions.size();
+        if (partitionNum == 0) {
+            // In non-stop states (NEED_SCHEDULE/RUNNING), having `partitionNum` as 0 is equivalent 
+            // to `currentKafkaPartitions` being uninitialized. When `currentKafkaPartitions` is 
+            // uninitialized, it indicates that the job has just been created and hasn't been scheduled yet. 
+            // At this point, the user-specified number of partitions is used.
+            partitionNum = customKafkaPartitions.size();
+            if (partitionNum == 0) {
+                // If the user hasn't specified partition information, then we no longer take the `partition` 
+                // variable into account when calculating concurrency.
+                partitionNum = Integer.MAX_VALUE;
+            }
+        }
+
         if (desireTaskConcurrentNum == 0) {
             desireTaskConcurrentNum = Config.max_routine_load_task_concurrent_num;
         }
 
         LOG.debug("current concurrent task number is min"
                         + "(partition num: {}, desire task concurrent num: {}, alive be num: {}, config: {})",
-                partitionNum, desireTaskConcurrentNum, aliveBeNum, Config.max_routine_load_task_concurrent_num);
-        currentTaskConcurrentNum = Math.min(Math.min(partitionNum, Math.min(desireTaskConcurrentNum, aliveBeNum)),
+                partitionNum, desireTaskConcurrentNum, aliveNodeNum, Config.max_routine_load_task_concurrent_num);
+        currentTaskConcurrentNum = Math.min(Math.min(partitionNum, Math.min(desireTaskConcurrentNum, aliveNodeNum)),
                 Config.max_routine_load_task_concurrent_num);
         return currentTaskConcurrentNum;
     }
@@ -222,6 +317,8 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
             return true;
         }
 
+        // For compatible reason, the default behavior of empty load is still returning "all partitions have no load data" and abort transaction.
+        // In this situation, we also need update commit info.
         if (txnStatusChangeReason != null &&
                 txnStatusChangeReason == TransactionState.TxnStatusChangeReason.NO_PARTITIONS) {
             // Because the max_filter_ratio of routine load task is always 1.
@@ -246,13 +343,14 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
     @Override
     protected void updateProgress(RLTaskTxnCommitAttachment attachment) throws UserException {
         super.updateProgress(attachment);
-        this.progress.update(attachment);
+        this.progress.update(attachment.getProgress());
+        this.timestampProgress.update(attachment.getTimestampProgress());
     }
 
     @Override
     protected void replayUpdateProgress(RLTaskTxnCommitAttachment attachment) {
         super.replayUpdateProgress(attachment);
-        this.progress.update(attachment);
+        this.progress.update(attachment.getProgress());
     }
 
     @Override
@@ -260,7 +358,8 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
         KafkaTaskInfo oldKafkaTaskInfo = (KafkaTaskInfo) routineLoadTaskInfo;
         // add new task
         KafkaTaskInfo kafkaTaskInfo = new KafkaTaskInfo(timeToExecuteMs, oldKafkaTaskInfo,
-                ((KafkaProgress) progress).getPartitionIdToOffset(oldKafkaTaskInfo.getPartitions()));
+                ((KafkaProgress) progress).getPartitionIdToOffset(oldKafkaTaskInfo.getPartitions()),
+                ((KafkaTaskInfo) routineLoadTaskInfo).getLatestOffset());
         // remove old task
         routineLoadTaskInfoList.remove(routineLoadTaskInfo);
         // add new task
@@ -364,34 +463,34 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
 
     public static KafkaRoutineLoadJob fromCreateStmt(CreateRoutineLoadStmt stmt) throws UserException {
         // check db and table
-        Database db = Catalog.getCurrentCatalog().getDb(stmt.getDBName());
+        Database db = GlobalStateMgr.getCurrentState().getDb(stmt.getDBName());
         if (db == null) {
             ErrorReport.reportDdlException(ErrorCode.ERR_BAD_DB_ERROR, stmt.getDBName());
         }
 
         long tableId = -1L;
-        db.readLock();
+        Locker locker = new Locker();
+        locker.lockDatabase(db, LockType.READ);
         try {
             unprotectedCheckMeta(db, stmt.getTableName(), stmt.getRoutineLoadDesc());
             Table table = db.getTable(stmt.getTableName());
+            Load.checkMergeCondition(stmt.getMergeConditionStr(), (OlapTable) table, table.getFullSchema(), false);
             tableId = table.getId();
         } finally {
-            db.readUnlock();
+            locker.unLockDatabase(db, LockType.READ);
         }
 
         // init kafka routine load job
-        long id = Catalog.getCurrentCatalog().getNextId();
+        long id = GlobalStateMgr.getCurrentState().getNextId();
         KafkaRoutineLoadJob kafkaRoutineLoadJob = new KafkaRoutineLoadJob(id, stmt.getName(),
-                db.getClusterName(), db.getId(), tableId,
-                stmt.getKafkaBrokerList(), stmt.getKafkaTopic());
+                db.getId(), tableId, stmt.getKafkaBrokerList(), stmt.getKafkaTopic());
         kafkaRoutineLoadJob.setOptional(stmt);
         kafkaRoutineLoadJob.checkCustomProperties();
-        kafkaRoutineLoadJob.checkCustomPartition();
 
         return kafkaRoutineLoadJob;
     }
 
-    private void checkCustomPartition() throws UserException {
+    private void checkCustomPartition(List<Integer> customKafkaPartitions) throws UserException {
         if (customKafkaPartitions.isEmpty()) {
             return;
         }
@@ -405,14 +504,14 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
     }
 
     private void checkCustomProperties() throws DdlException {
-        SmallFileMgr smallFileMgr = Catalog.getCurrentCatalog().getSmallFileMgr();
+        SmallFileMgr smallFileMgr = GlobalStateMgr.getCurrentState().getSmallFileMgr();
         for (Map.Entry<String, String> entry : customProperties.entrySet()) {
             if (entry.getValue().startsWith("FILE:")) {
                 String file = entry.getValue().substring(entry.getValue().indexOf(":") + 1);
                 // check file
                 if (!smallFileMgr.containsFile(dbId, KAFKA_FILE_CATALOG, file)) {
                     throw new DdlException("File " + file + " does not exist in db "
-                            + dbId + " with catalog: " + KAFKA_FILE_CATALOG);
+                            + dbId + " with globalStateMgr: " + KAFKA_FILE_CATALOG);
                 }
             }
         }
@@ -445,10 +544,19 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
         if (!stmt.getCustomKafkaProperties().isEmpty()) {
             setCustomKafkaProperties(stmt.getCustomKafkaProperties());
         }
+
+        if (stmt.getConfluentSchemaRegistryUrl() != null) {
+            setConfluentSchemaRegistryUrl(stmt.getConfluentSchemaRegistryUrl());
+        }
+
+        setDefaultKafkaGroupID();
     }
 
     // this is a unprotected method which is called in the initialization function
     private void setCustomKafkaPartitions(List<Pair<Integer, Long>> kafkaPartitionOffsets) throws LoadException {
+        if (kafkaPartitionOffsets != null) {
+            customeKafkaPartitionOffsets = kafkaPartitionOffsets;
+        }
         for (Pair<Integer, Long> partitionOffset : kafkaPartitionOffsets) {
             this.customKafkaPartitions.add(partitionOffset.first);
             ((KafkaProgress) progress).addPartitionOffset(partitionOffset);
@@ -459,11 +567,126 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
         this.customProperties = kafkaProperties;
     }
 
+    private void setDefaultKafkaGroupID() {
+        if (this.customProperties.containsKey(PROPERTY_KAFKA_GROUP_ID)) {
+            useDefaultGroupId = false;
+            return;
+        }
+        this.customProperties.put(PROPERTY_KAFKA_GROUP_ID, name + "_" + UUID.randomUUID());
+    }
+
+    @Override
+    public String dataSourcePropertiesToSql() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("(\n");
+        sb.append("\"").append(CreateRoutineLoadStmt.KAFKA_BROKER_LIST_PROPERTY).append("\"=\"");
+        sb.append(brokerList).append("\",\n");
+
+        sb.append("\"").append(CreateRoutineLoadStmt.KAFKA_TOPIC_PROPERTY).append("\"=\"");
+        sb.append(topic).append("\",\n");
+
+        sb.append("\"").append(CreateRoutineLoadStmt.KAFKA_PARTITIONS_PROPERTY).append("\"=\"");
+        if (customeKafkaPartitionOffsets == null) {
+            List<Integer> sortedPartitions = Lists.newArrayList(currentKafkaPartitions);
+            Collections.sort(sortedPartitions);
+            sb.append(Joiner.on(",").join(sortedPartitions)).append("\",\n");
+        } else {
+            class PairComparator implements Comparator<Pair<Integer, Long>> {
+                @Override
+                public int compare(Pair<Integer, Long> p1, Pair<Integer, Long> p2) {
+                    return Integer.compare(p1.first, p2.first);
+                }
+            }
+            Collections.sort(customeKafkaPartitionOffsets, new PairComparator());
+            List<Integer> customeKafkaPartitions = new ArrayList<>();
+            List<Long> customeKakfaOffsets = new ArrayList<>();
+            for (Pair<Integer, Long> partitionOffset : customeKafkaPartitionOffsets) {
+                customeKafkaPartitions.add(partitionOffset.first);
+                customeKakfaOffsets.add(partitionOffset.second);
+            }
+            sb.append(Joiner.on(",").join(customeKafkaPartitions)).append("\",\n");
+
+            sb.append("\"").append(CreateRoutineLoadStmt.KAFKA_OFFSETS_PROPERTY).append("\"=\"");
+            for (int i = 0; i < customeKakfaOffsets.size(); i++) {
+                if (customeKakfaOffsets.get(i) == KafkaProgress.OFFSET_BEGINNING_VAL) {
+                    sb.append("OFFSET_BEGINNING");
+                } else if (customeKakfaOffsets.get(i) == KafkaProgress.OFFSET_END_VAL) {
+                    sb.append("OFFSET_END");
+                } else {
+                    sb.append(Long.toString(customeKakfaOffsets.get(i)));
+                }
+                if (i != customeKakfaOffsets.size() - 1) {
+                    sb.append(",");
+                }
+            }
+            sb.append("\",\n");
+        }
+        if (confluentSchemaRegistryUrl != null) {
+            sb.append("\"").append(CreateRoutineLoadStmt.CONFLUENT_SCHEMA_REGISTRY_URL).append("\"=\"");
+            sb.append(getPrintableConfluentSchemaRegistryUrl()).append("\",\n");
+        }
+
+        Map<String, String> maskedProperties = getMaskedCustomProperties();
+        if (useDefaultGroupId) {
+            maskedProperties.remove(PROPERTY_KAFKA_GROUP_ID);
+        }
+        Iterator<Map.Entry<String, String>> iterator = maskedProperties.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, String> entry = iterator.next();
+            String key = entry.getKey();
+            String value = entry.getValue();
+            sb.append("\"").append("property.").append(key).append("\"=\"");
+            sb.append(value).append("\",\n");
+        }
+        if (sb.length() >= 2) {
+            sb.delete(sb.length() - 2, sb.length());
+            sb.append("\n");
+        }
+        sb.append(")");
+        return sb.toString();
+    }
+
+    private String getPrintableConfluentSchemaRegistryUrl() {
+        String confluentSchemaRegistryUrl = getConfluentSchemaRegistryUrl();
+        if (confluentSchemaRegistryUrl != null) {
+            // confluentSchemaRegistryUrl have three patterns:
+            // 1. https or http://key:password@addr
+            // 2. https://key:password@addr
+            // 3. http://key:password@addr
+            // https://IAP4CQUET7L243C7:QEiI9CwV1szDViwIaBXiow2zXicQ1MY5/PLrmaaJE/FolDCCFmf2KPUkvv+UJozo@psrc-0kywq.us-east-2.aws.confluent.cloud
+            String[] fragments = confluentSchemaRegistryUrl.split("@");
+            if (fragments.length != 2) {
+                // case 1
+                return confluentSchemaRegistryUrl;
+            } else {
+                if (fragments[0].length() < 5) {
+                    return confluentSchemaRegistryUrl;
+                } else {
+                    // case 2
+                    String addr;
+                    if ("https".equals(fragments[0].substring(0, 5))) {
+                        addr = "https://" + fragments[1];
+                    } else {
+                        addr = "http://" + fragments[1];
+                    }
+                    return addr;
+                }
+            }
+        } else {
+            return null;
+        }
+    }
+
+    @VisibleForTesting
     @Override
     protected String dataSourcePropertiesJsonToString() {
         Map<String, String> dataSourceProperties = Maps.newHashMap();
         dataSourceProperties.put("brokerList", brokerList);
         dataSourceProperties.put("topic", topic);
+        String confluentSchemaRegistryUrl = getConfluentSchemaRegistryUrl();
+        if (confluentSchemaRegistryUrl != null) {
+            dataSourceProperties.put("confluent.schema.registry.url", getPrintableConfluentSchemaRegistryUrl());
+        }
         List<Integer> sortedPartitions = Lists.newArrayList(currentKafkaPartitions);
         Collections.sort(sortedPartitions);
         dataSourceProperties.put("currentKafkaPartitions", Joiner.on(",").join(sortedPartitions));
@@ -471,10 +694,23 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
         return gson.toJson(dataSourceProperties);
     }
 
+    protected Map<String, String> getMaskedCustomProperties() {
+        Map<String, String> maskedProperties = Maps.newHashMap();
+        for (Map.Entry<String, String> entry : customProperties.entrySet()) {
+            if (entry.getKey().contains("password") || entry.getKey().contains("secret")) {
+                maskedProperties.put(entry.getKey(), "******");
+            } else {
+                maskedProperties.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return maskedProperties;
+    }
+
     @Override
     protected String customPropertiesJsonToString() {
         Gson gson = new GsonBuilder().disableHtmlEscaping().create();
-        return gson.toJson(customProperties);
+        Map<String, String> maskedProperties = getMaskedCustomProperties();
+        return gson.toJson(maskedProperties);
     }
 
     @Override
@@ -504,43 +740,47 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
             customKafkaPartitions.add(in.readInt());
         }
 
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_51) {
-            int count = in.readInt();
-            for (int i = 0; i < count; i++) {
-                String propertyKey = Text.readString(in);
-                String propertyValue = Text.readString(in);
-                if (propertyKey.startsWith("property.")) {
-                    this.customProperties.put(propertyKey.substring(propertyKey.indexOf(".") + 1), propertyValue);
+        int count = in.readInt();
+        for (int i = 0; i < count; i++) {
+            String propertyKey = Text.readString(in);
+            String propertyValue = Text.readString(in);
+            if (propertyKey.startsWith("property.")) {
+                this.customProperties.put(propertyKey.substring(propertyKey.indexOf(".") + 1), propertyValue);
+            }
+        }
+    }
+
+    /**
+     * add extra parameter check for changing kafka offset
+     * 1. if customKafkaParition is specified, only the specific partitions can be modified
+     * 2. otherwise, will check if partition is validated by actually reading kafka meta from kafka proxy
+     */
+    @Override
+    public void modifyJob(RoutineLoadDesc routineLoadDesc, Map<String, String> jobProperties,
+                          RoutineLoadDataSourceProperties dataSourceProperties, OriginStatement originStatement,
+                          boolean isReplay) throws DdlException {
+        if (!isReplay && dataSourceProperties != null && dataSourceProperties.hasAnalyzedProperties()) {
+            List<Pair<Integer, Long>> kafkaPartitionOffsets = dataSourceProperties.getKafkaPartitionOffsets();
+            if (customKafkaPartitions != null && customKafkaPartitions.size() != 0) {
+                for (Pair<Integer, Long> pair : kafkaPartitionOffsets) {
+                    if (!customKafkaPartitions.contains(pair.first)) {
+                        throw new DdlException("The specified partition " + pair.first + " is not in the custom partitions");
+                    }
+                }
+            } else {
+                // check if partition is validate
+                try {
+                    checkCustomPartition(kafkaPartitionOffsets.stream().map(k -> k.first).collect(Collectors.toList()));
+                } catch (UserException e) {
+                    throw new DdlException("The specified partition is not in the consumed partitions ", e);
                 }
             }
         }
+        super.modifyJob(routineLoadDesc, jobProperties, dataSourceProperties, originStatement, isReplay);
     }
 
     @Override
-    public void modifyProperties(AlterRoutineLoadStmt stmt) throws DdlException {
-        Map<String, String> jobProperties = stmt.getAnalyzedJobProperties();
-        RoutineLoadDataSourceProperties dataSourceProperties = stmt.getDataSourceProperties();
-
-        writeLock();
-        try {
-            if (getState() != JobState.PAUSED) {
-                throw new DdlException("Only supports modification of PAUSED jobs");
-            }
-
-            modifyPropertiesInternal(jobProperties, dataSourceProperties);
-
-            AlterRoutineLoadJobOperationLog log = new AlterRoutineLoadJobOperationLog(this.id,
-                    jobProperties, dataSourceProperties);
-            Catalog.getCurrentCatalog().getEditLog().logAlterRoutineLoadJob(log);
-        } finally {
-            writeUnlock();
-        }
-    }
-
-    private void modifyPropertiesInternal(Map<String, String> jobProperties,
-                                          RoutineLoadDataSourceProperties dataSourceProperties)
-            throws DdlException {
-
+    public void modifyDataSourceProperties(RoutineLoadDataSourceProperties dataSourceProperties) throws DdlException {
         List<Pair<Integer, Long>> kafkaPartitionOffsets = Lists.newArrayList();
         Map<String, String> customKafkaProperties = Maps.newHashMap();
 
@@ -555,28 +795,37 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
             ((KafkaProgress) progress).modifyOffset(kafkaPartitionOffsets);
         }
 
-        if (!jobProperties.isEmpty()) {
-            Map<String, String> copiedJobProperties = Maps.newHashMap(jobProperties);
-            modifyCommonJobProperties(copiedJobProperties);
-            this.jobProperties.putAll(copiedJobProperties);
-        }
-
         if (!customKafkaProperties.isEmpty()) {
             this.customProperties.putAll(customKafkaProperties);
             convertCustomProperties(true);
         }
 
-        LOG.info("modify the properties of kafka routine load job: {}, jobProperties: {}, datasource properties: {}",
-                this.id, jobProperties, dataSourceProperties);
+        if (dataSourceProperties.getConfluentSchemaRegistryUrl() != null) {
+            confluentSchemaRegistryUrl = dataSourceProperties.getConfluentSchemaRegistryUrl();
+        }
+
+        LOG.info("modify the data source properties of kafka routine load job: {}, datasource properties: {}",
+                this.id, dataSourceProperties);
     }
 
+    // update substate according to the lag.
     @Override
-    public void replayModifyProperties(AlterRoutineLoadJobOperationLog log) {
-        try {
-            modifyPropertiesInternal(log.getJobProperties(), log.getDataSourceProperties());
-        } catch (DdlException e) {
-            // should not happen
-            LOG.error("failed to replay modify kafka routine load job: {}", id, e);
+    public void updateSubstate() throws UserException {
+        KafkaProgress progress = (KafkaProgress) getTimestampProgress();
+        Map<Integer, Long> partitionTimestamps = progress.getPartitionIdToOffset();
+        long now = System.currentTimeMillis();
+
+        for (Map.Entry<Integer, Long> entry : partitionTimestamps.entrySet()) {
+            int partition = entry.getKey();
+            long lag = (now - entry.getValue().longValue()) / 1000;
+            if (lag > Config.routine_load_unstable_threshold_second) {
+                updateSubstate(JobSubstate.UNSTABLE, new ErrorReason(InternalErrorCode.SLOW_RUNNING_ERR,
+                        String.format("The lag [%d] of partition [%d] exceeds " +
+                                        "Config.routine_load_unstable_threshold_second [%d]",
+                                lag,  partition, Config.routine_load_unstable_threshold_second)));
+                return;
+            }
         }
+        updateSubstate(JobSubstate.STABLE, null);
     }
 }

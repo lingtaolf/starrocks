@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/http/rest/MetricsAction.java
 
@@ -22,7 +35,6 @@
 package com.starrocks.http.rest;
 
 import com.google.common.base.Strings;
-import com.starrocks.analysis.UserIdentity;
 import com.starrocks.common.DdlException;
 import com.starrocks.http.ActionController;
 import com.starrocks.http.BaseRequest;
@@ -33,10 +45,11 @@ import com.starrocks.metric.MetricRepo;
 import com.starrocks.metric.MetricVisitor;
 import com.starrocks.metric.PrometheusMetricVisitor;
 import com.starrocks.metric.SimpleCoreMetricVisitor;
-import com.starrocks.mysql.privilege.PrivPredicate;
+import com.starrocks.privilege.AccessDeniedException;
+import com.starrocks.sql.ast.UserIdentity;
 import io.netty.handler.codec.http.HttpMethod;
-import org.apache.log4j.LogManager;
-import org.apache.log4j.Logger;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 //fehost:port/metrics
 //fehost:port/metrics?type=core
@@ -48,12 +61,48 @@ public class MetricsAction extends RestBaseAction {
     // `with_table_metrics=minified` : without tables that have empty values
     // `with_table_metrics=all` : with all table metrics
     protected static final String WITH_TABLE_METRICS_PARAM = "with_table_metrics";
-    protected static final String WITH_TABLE_METRICS_MINIFIED = "minified";
-    protected static final String WITH_TABLE_METRICS_ALL = "all";
+    protected static final String WITH_MATERIALIZED_VIEW_METRICS_PARAM = "with_materialized_view_metrics";
+    protected static final String COLLECT_MODE_METRICS_MINIFIED = "minified";
+    protected static final String COLLECT_MODE_METRICS_ALL = "all";
     public static final String API_PATH = "/metrics";
 
     public MetricsAction(ActionController controller) {
         super(controller);
+    }
+
+    public static final class RequestParams {
+        // Whether to collect per table metrics
+        private final boolean collectTableMetrics;
+        // Whether to collect per table metrics in minified mode, Ignore some heavy metrics if true
+        private final boolean minifyTableMetrics;
+        // Whether to collect per materialized view metrics
+        private final boolean collectMVMetrics;
+        // Whether to collect per materialized view metrics in minified mode, Ignore some heavy metrics if true
+        private final boolean minifyMVMetrics;
+
+        public RequestParams(boolean collectTableMetrics, boolean minifyTableMetrics,
+                      boolean collectMVMetrics, boolean minifyMVMetrics) {
+            this.collectTableMetrics = collectTableMetrics;
+            this.minifyTableMetrics = minifyTableMetrics;
+            this.collectMVMetrics = collectMVMetrics;
+            this.minifyMVMetrics = minifyMVMetrics;
+        }
+
+        public boolean isCollectTableMetrics() {
+            return collectTableMetrics;
+        }
+
+        public boolean isMinifyTableMetrics() {
+            return minifyTableMetrics;
+        }
+
+        public boolean isCollectMVMetrics() {
+            return collectMVMetrics;
+        }
+
+        public boolean isMinifyMVMetrics() {
+            return minifyMVMetrics;
+        }
     }
 
     public static void registerAction(ActionController controller) throws IllegalArgException {
@@ -62,6 +111,7 @@ public class MetricsAction extends RestBaseAction {
 
     @Override
     public void execute(BaseRequest request, BaseResponse response) throws DdlException {
+        // parse visitor type
         String type = request.getSingleParameter(TYPE_PARAM);
         MetricVisitor visitor = null;
         if (!Strings.isNullOrEmpty(type) && type.equalsIgnoreCase("core")) {
@@ -71,26 +121,45 @@ public class MetricsAction extends RestBaseAction {
         } else {
             visitor = new PrometheusMetricVisitor("starrocks_fe");
         }
-        boolean collectTableMetrics = false;
-        boolean minifyTableMetrics = true;
+
+        // parse request params
+        RequestParams requestParams = parseRequestParams(request);
+
+        response.setContentType("text/plain");
+        response.getContent().append(MetricRepo.getMetric(visitor, requestParams));
+        sendResult(request, response);
+    }
+
+    protected RequestParams parseRequestParams(BaseRequest request) {
         String withTableMetrics = request.getSingleParameter(WITH_TABLE_METRICS_PARAM);
-        if (WITH_TABLE_METRICS_MINIFIED.equalsIgnoreCase(withTableMetrics) ||
-                WITH_TABLE_METRICS_ALL.equalsIgnoreCase(withTableMetrics)) {
+        String withMaterializedViewsMetrics = request.getSingleParameter(WITH_MATERIALIZED_VIEW_METRICS_PARAM);
+        /*
+         * Collect tableMetrics and MVMetrics in minified way by default.
+         * Full metrics collection is only enabled when the following conditions are all satisfied
+         * - explicitly has `?with_table_metrics=all` or `?with_materialized_view_metrics=all`
+         * - the user must have sufficient privileges by checking the request auth info
+         */
+        boolean collectTableMetrics = COLLECT_MODE_METRICS_ALL.equalsIgnoreCase(withTableMetrics);
+        boolean collectMVMetrics = COLLECT_MODE_METRICS_ALL.equalsIgnoreCase(withMaterializedViewsMetrics);
+
+        // check request authorization
+        if (collectTableMetrics || collectMVMetrics) {
+            UserIdentity currentUser = null;
             try {
-                // Right now the table-level metrics could only be viewed by users with `admin_priv`.
                 ActionAuthorizationInfo authInfo = getAuthorizationInfo(request);
-                UserIdentity currentUser = checkPassword(authInfo);
-                checkGlobalAuth(currentUser, PrivPredicate.ADMIN);
-                collectTableMetrics = true;
-                if (WITH_TABLE_METRICS_ALL.equalsIgnoreCase(withTableMetrics)) {
-                    minifyTableMetrics = false;
-                }
-            } catch (Exception ex) {
-                LOG.warn("`Admin_priv` is needed to view the table-level metrics.");
+                currentUser = checkPassword(authInfo);
+                checkUserOwnsAdminRole(currentUser);
+            } catch (AccessDeniedException e) {
+                // disable Table related metrics collection due to AccessDenied
+                collectTableMetrics = false;
+                collectMVMetrics = false;
+                LOG.warn("Auth failure when getting table level metrics, current user: {}, error msg: {}",
+                        currentUser, e.getMessage());
             }
         }
-        response.setContentType("text/plain");
-        response.getContent().append(MetricRepo.getMetric(visitor, collectTableMetrics, minifyTableMetrics));
-        sendResult(request, response);
+
+        boolean minifyMVMetrics = !collectMVMetrics;
+        boolean minifyTableMetrics = !collectTableMetrics;
+        return new RequestParams(collectTableMetrics, minifyTableMetrics, collectMVMetrics, minifyMVMetrics);
     }
 }

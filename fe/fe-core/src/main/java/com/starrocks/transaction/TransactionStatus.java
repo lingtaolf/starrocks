@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/transaction/TransactionStatus.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -26,7 +22,8 @@ public enum TransactionStatus {
     PREPARE(1),
     COMMITTED(2),
     VISIBLE(3),
-    ABORTED(4);
+    ABORTED(4),
+    PREPARED(5);
 
     private final int flag;
 
@@ -50,9 +47,15 @@ public enum TransactionStatus {
                 return VISIBLE;
             case 4:
                 return ABORTED;
+            case 5:
+                return PREPARED;
             default:
-                return null;
+                return UNKNOWN;
         }
+    }
+
+    public boolean isFailed() {
+        return this == UNKNOWN || this == ABORTED;
     }
 
     public boolean isFinalStatus() {
@@ -72,6 +75,8 @@ public enum TransactionStatus {
                 return "VISIBLE";
             case ABORTED:
                 return "ABORTED";
+            case PREPARED:
+                return "PREPARED";
             default:
                 return "UNKNOWN";
         }

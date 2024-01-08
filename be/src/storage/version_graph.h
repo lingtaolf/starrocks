@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/olap/version_graph.h
 
@@ -19,8 +32,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_OLAP_VERSION_GRAPH_H
-#define STARROCKS_BE_SRC_OLAP_VERSION_GRAPH_H
+#pragma once
 
 #include <rapidjson/document.h>
 #include <rapidjson/prettywriter.h>
@@ -31,6 +43,17 @@
 #include "storage/rowset/rowset_meta.h"
 
 namespace starrocks {
+
+// It is used to represent Graph vertex.
+struct Vertex {
+    int64_t value = 0;
+    // one vertex to other vertex may have multi same edge
+    // this is just for compatibility with previous implementations.
+    std::list<Vertex*> edges;
+
+    Vertex(int64_t v) : value(v) {}
+};
+
 /// VersionGraph class which is implemented to build and maintain total versions of rowsets.
 /// This class use adjacency-matrix represent rowsets version and links. A vertex is a version
 /// and a link is the _version object of a rowset (from start version to end version + 1).
@@ -41,31 +64,53 @@ public:
     /// Use rs_metas to construct the graph including vertex and edges, and return the
     /// max_version in metas.
     void construct_version_graph(const std::vector<RowsetMetaSharedPtr>& rs_metas, int64_t* max_version);
-    /// Reconstruct the graph, begin construction the vertex vec and edges list will be cleared.
-    void reconstruct_version_graph(const std::vector<RowsetMetaSharedPtr>& rs_metas, int64_t* max_version);
-    /// Add a version to this graph, graph will add the vesion and edge in version.
+    /// Add a version to this graph, graph will add the version and edge in version.
     void add_version_to_graph(const Version& version);
     /// Delete a version from graph. Notice that this del operation only remove this edges and
     /// remain the vertex.
-    OLAPStatus delete_version_from_graph(const Version& version);
+    /// NOTICE: we assume only redundant versions will be deleted, so deleting edge does not
+    /// move max_continuous_version backward
+    Status delete_version_from_graph(const Version& version);
     /// Given a spec_version, this method can find a version path which is the shortest path
     /// in the graph. The version paths are added to version_path as return info.
-    OLAPStatus capture_consistent_versions(const Version& spec_version, std::vector<Version>* version_path) const;
+    Status capture_consistent_versions(const Version& spec_version, std::vector<Version>* version_path) const;
+
+    // Get max continuous version from 0
+    int64_t max_continuous_version() const { return _max_continuous_version; }
+
+    void update_max_continuous_version();
+
+    int64_t min_readable_version() const { return _min_readable_version; }
 
 private:
     /// Private method add a version to graph.
-    void _add_vertex_to_graph(int64_t vertex_value);
+    std::unique_ptr<Vertex>& _add_vertex_to_graph(int64_t vertex_value);
+
+    int64_t _get_max_continuous_version_from(int64_t version);
+    void _add_version_to_graph(const Version& version);
 
     // OLAP version contains two parts, [start_version, end_version]. In order
     // to construct graph, the OLAP version has two corresponding vertex, one
     // vertex's value is version.start_version, the other is
     // version.end_version + 1.
     // Use adjacency list to describe version graph.
-    std::vector<Vertex> _version_graph;
+    std::unordered_map<int64_t, std::unique_ptr<Vertex>> _version_graph;
+    // max continuous version from -1
+    int64_t _max_continuous_version{-1};
+    // minReadableVersion should:
+    // >= compaction output's version.second if compaction's input rowsets are stale and removed from graph
+    // <= _max_continuous_version
+    // for example, suppose graph is:
+    // [0-5] 6 7 8 9 10 11 12
+    //       \-[6-10]-/
+    // minReadableVersion is 5
+    // and when 6, 7, 8, 9, 10 are stale and removed from graph by GC, graph became
+    // [0-5] [6-10] 11 12
+    // minReadableVersion will be updated to 10
+    int64_t _min_readable_version{-1};
 
-    // vertex value --> vertex_index of _version_graph
-    // It is easy to find vertex index according to vertex value.
-    std::unordered_map<int64_t, int64_t> _vertex_index_map;
+    // print log rate limit by tablet id
+    int64_t _tablet_id{0};
 };
 
 /// TimestampedVersion class which is implemented to maintain multi-version path of rowsets.
@@ -76,7 +121,7 @@ public:
     TimestampedVersion(const Version& version, int64_t create_time)
             : _version(version.first, version.second), _create_time(create_time) {}
 
-    ~TimestampedVersion() {}
+    ~TimestampedVersion() = default;
 
     /// Return the rowset version of TimestampedVersion record.
     Version version() const { return _version; }
@@ -104,22 +149,22 @@ using TimestampedVersionSharedPtr = std::shared_ptr<TimestampedVersion>;
 /// will compare with the version timestamp and be refreshed.
 class TimestampedVersionPathContainer {
 public:
-    /// TimestampedVersionPathContainer construction function, max_create_time is assgined to 0.
-    TimestampedVersionPathContainer() : _max_create_time(0) {}
+    /// TimestampedVersionPathContainer construction function, max_create_time is assigned to 0.
+    TimestampedVersionPathContainer() = default;
 
     /// Return the max create time in a path version.
     int64_t max_create_time() { return _max_create_time; }
 
     /// Add a timestamped version to timestamped_versions_container. Once a timestamped version is added,
     /// the max_create_time will compare with the version timestamp and be refreshed.
-    void add_timestamped_version(TimestampedVersionSharedPtr version);
+    void add_timestamped_version(const TimestampedVersionSharedPtr& version);
 
     /// Return the timestamped_versions_container as const type.
     std::vector<TimestampedVersionSharedPtr>& timestamped_versions();
 
 private:
     std::vector<TimestampedVersionSharedPtr> _timestamped_versions_container;
-    int64_t _max_create_time;
+    int64_t _max_create_time{0};
 };
 
 using PathVersionListSharedPtr = std::shared_ptr<TimestampedVersionPathContainer>;
@@ -132,10 +177,6 @@ public:
     /// Construct rowsets version tracker by rs_metas and stale version path map.
     void construct_versioned_tracker(const std::vector<RowsetMetaSharedPtr>& rs_metas);
 
-    /// Recover rowsets version tracker from stale version path map. When delete operation fails, the
-    /// tracker can be recovered from deleted stale_version_path_map.
-    void recover_versioned_tracker(const std::map<int64_t, PathVersionListSharedPtr>& stale_version_path_map);
-
     /// Add a version to tracker, this version is a new version rowset, not merged rowset.
     void add_version(const Version& version);
 
@@ -147,7 +188,7 @@ public:
     /// Given a spec_version, this method can find a version path which is the shortest path
     /// in the graph. The version paths are added to version_path as return info.
     /// If this version not in main version, version_path can be included expired rowset.
-    OLAPStatus capture_consistent_versions(const Version& spec_version, std::vector<Version>* version_path) const;
+    Status capture_consistent_versions(const Version& spec_version, std::vector<Version>* version_path) const;
 
     /// Capture all expired path version.
     /// When the last rowset createtime of a path greater than expired time  which can be expressed
@@ -169,6 +210,13 @@ public:
     /// list in the document. The parameter path arr is used as return variable.
     void get_stale_version_path_json_doc(rapidjson::Document& path_arr);
 
+    // Get max continuous version from 0
+    int64_t get_max_continuous_version() const;
+
+    void update_max_continuous_version();
+
+    int64_t get_min_readable_version() const;
+
 private:
     /// Construct rowsets version tracker with stale rowsets.
     void _construct_versioned_tracker(const std::vector<RowsetMetaSharedPtr>& rs_metas);
@@ -186,5 +234,3 @@ private:
 };
 
 } // namespace starrocks
-
-#endif // STARROCKS_BE_SRC_OLAP_OLAP_VERSION_GRAPH_H

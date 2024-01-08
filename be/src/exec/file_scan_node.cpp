@@ -1,74 +1,49 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/file_scan_node.cpp
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "exec/file_scan_node.h"
 
 #include <chrono>
 #include <sstream>
 
-#include "common/object_pool.h"
-#include "exec/broker_scanner.h"
+#include "column/chunk.h"
+#include "exec/avro_scanner.h"
+#include "exec/csv_scanner.h"
 #include "exec/json_scanner.h"
 #include "exec/orc_scanner.h"
 #include "exec/parquet_scanner.h"
 #include "exprs/expr.h"
-#include "runtime/dpp_sink_internal.h"
-#include "runtime/row_batch.h"
+#include "fs/fs.h"
+#include "runtime/current_thread.h"
 #include "runtime/runtime_state.h"
+#include "util/defer_op.h"
 #include "util/runtime_profile.h"
+#include "util/thread.h"
 
 namespace starrocks {
 
 FileScanNode::FileScanNode(ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl& descs)
-        : ScanNode(pool, tnode, descs),
-          _tuple_id(tnode.file_scan_node.tuple_id),
-          _runtime_state(nullptr),
-          _tuple_desc(nullptr),
-          _num_running_scanners(0),
-          _scan_finished(false),
-          _max_buffered_batches(32),
-          _wait_scanner_timer(nullptr) {}
+        : ScanNode(pool, tnode, descs), _tuple_id(tnode.file_scan_node.tuple_id) {}
 
-FileScanNode::~FileScanNode() {}
-
-// We use the ParttitionRange to compare here. It should not be a member function of PartitionInfo
-// class becaurce there are some other member in it.
-static bool compare_part_use_range(const PartitionInfo* v1, const PartitionInfo* v2) {
-    return v1->range() < v2->range();
+FileScanNode::~FileScanNode() {
+    if (runtime_state() != nullptr) {
+        close(runtime_state());
+    }
 }
 
 Status FileScanNode::init(const TPlanNode& tnode, RuntimeState* state) {
-    RETURN_IF_ERROR(ScanNode::init(tnode));
-    auto& file_scan_node = tnode.file_scan_node;
-    if (file_scan_node.__isset.partition_exprs) {
-        // ASSERT file_scan_node.__isset.partition_infos == true
-        RETURN_IF_ERROR(Expr::create_expr_trees(_pool, file_scan_node.partition_exprs, &_partition_expr_ctxs));
-        for (auto& t_partition_info : file_scan_node.partition_infos) {
-            PartitionInfo* info = _pool->add(new PartitionInfo());
-            RETURN_IF_ERROR(PartitionInfo::from_thrift(_pool, t_partition_info, info));
-            _partition_infos.emplace_back(info);
-        }
-        // partitions should be in ascending order
-        std::sort(_partition_infos.begin(), _partition_infos.end(), compare_part_use_range);
-    }
+    RETURN_IF_ERROR(ScanNode::init(tnode, state));
     return Status::OK();
 }
 
@@ -76,7 +51,6 @@ Status FileScanNode::prepare(RuntimeState* state) {
     VLOG_QUERY << "FileScanNode prepare";
     RETURN_IF_ERROR(ScanNode::prepare(state));
     // get tuple desc
-    _runtime_state = state;
     _tuple_desc = state->desc_tbl().get_tuple_descriptor(_tuple_id);
     if (_tuple_desc == nullptr) {
         std::stringstream ss;
@@ -84,26 +58,19 @@ Status FileScanNode::prepare(RuntimeState* state) {
         return Status::InternalError(ss.str());
     }
 
-    // Initialize slots map
-    for (auto slot : _tuple_desc->slots()) {
-        auto pair = _slots_map.emplace(slot->col_name(), slot);
-        if (!pair.second) {
-            std::stringstream ss;
-            ss << "Failed to insert slot, col_name=" << slot->col_name();
-            return Status::InternalError(ss.str());
-        }
-    }
-
-    // prepare partition
-    if (_partition_expr_ctxs.size() > 0) {
-        RETURN_IF_ERROR(Expr::prepare(_partition_expr_ctxs, state, row_desc(), expr_mem_tracker()));
-        for (auto iter : _partition_infos) {
-            RETURN_IF_ERROR(iter->prepare(state, row_desc(), expr_mem_tracker()));
-        }
-    }
-
     // Profile
     _wait_scanner_timer = ADD_TIMER(runtime_profile(), "WaitScannerTime");
+    _scanner_total_timer = ADD_TIMER(runtime_profile(), "ScannerTotalTime");
+
+    RuntimeProfile* p = runtime_profile()->create_child("FileScanner", true, true);
+
+    _scanner_fill_timer = ADD_TIMER(p, "FillTime");
+    _scanner_read_timer = ADD_TIMER(p, "ReadTime");
+    _scanner_cast_chunk_timer = ADD_TIMER(p, "CastChunkTime");
+    _scanner_materialize_timer = ADD_TIMER(p, "MaterializeTime");
+    _scanner_init_chunk_timer = ADD_TIMER(p, "CreateChunkTime");
+
+    _scanner_file_reader_timer = ADD_TIMER(p->create_child("FilePRead", true, true), "FileReadTime");
 
     return Status::OK();
 }
@@ -114,36 +81,31 @@ Status FileScanNode::open(RuntimeState* state) {
     RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::OPEN));
     RETURN_IF_CANCELLED(state);
 
-    // Open partition
-    if (_partition_expr_ctxs.size() > 0) {
-        RETURN_IF_ERROR(Expr::open(_partition_expr_ctxs, state));
-        for (auto iter : _partition_infos) {
-            RETURN_IF_ERROR(iter->open(state));
-        }
-    }
-
-    RETURN_IF_ERROR(start_scanners());
+    RETURN_IF_ERROR(_start_scanners());
 
     return Status::OK();
 }
 
-Status FileScanNode::start_scanners() {
+Status FileScanNode::_start_scanners() {
     {
-        std::unique_lock<std::mutex> l(_batch_queue_lock);
+        std::unique_lock<std::mutex> l(_chunk_queue_lock);
+
         _num_running_scanners = 1;
+        _scanner_threads.emplace_back(&FileScanNode::_scanner_worker, this, 0, _scan_ranges.size());
+        Thread::set_thread_name(_scanner_threads.back(), "file_scanner");
     }
-    _scanner_threads.emplace_back(&FileScanNode::scanner_worker, this, 0, _scan_ranges.size());
     return Status::OK();
 }
 
-Status FileScanNode::get_next(RuntimeState* state, RowBatch* row_batch, bool* eos) {
+Status FileScanNode::get_next(RuntimeState* state, ChunkPtr* chunk, bool* eos) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
     // check if CANCELLED.
     if (state->is_cancelled()) {
-        std::unique_lock<std::mutex> l(_batch_queue_lock);
-        if (update_status(Status::Cancelled("Cancelled FileScanNode::get_next"))) {
+        std::unique_lock<std::mutex> l(_chunk_queue_lock);
+        if (_update_status(Status::Cancelled("Cancelled FileScanNode::get_next"))) {
             // Notify all scanners
             _queue_writer_cond.notify_all();
+            return _process_status;
         }
     }
 
@@ -152,11 +114,11 @@ Status FileScanNode::get_next(RuntimeState* state, RowBatch* row_batch, bool* eo
         return Status::OK();
     }
 
-    std::shared_ptr<RowBatch> scanner_batch;
+    ChunkPtr temp_chunk;
     {
-        std::unique_lock<std::mutex> l(_batch_queue_lock);
-        while (_process_status.ok() && !_runtime_state->is_cancelled() && _num_running_scanners > 0 &&
-               _batch_queue.empty()) {
+        std::unique_lock<std::mutex> l(_chunk_queue_lock);
+        while (_process_status.ok() && !runtime_state()->is_cancelled() && _num_running_scanners > 0 &&
+               _chunk_queue.empty()) {
             SCOPED_TIMER(_wait_scanner_timer);
             _queue_reader_cond.wait_for(l, std::chrono::seconds(1));
         }
@@ -164,20 +126,21 @@ Status FileScanNode::get_next(RuntimeState* state, RowBatch* row_batch, bool* eo
             // Some scanner process failed.
             return _process_status;
         }
-        if (_runtime_state->is_cancelled()) {
-            if (update_status(Status::Cancelled("Cancelled FileScanNode::get_next"))) {
+        if (runtime_state()->is_cancelled()) {
+            if (_update_status(Status::Cancelled("Cancelled FileScanNode::get_next"))) {
                 _queue_writer_cond.notify_all();
             }
             return _process_status;
         }
-        if (!_batch_queue.empty()) {
-            scanner_batch = _batch_queue.front();
-            _batch_queue.pop_front();
+        if (!_chunk_queue.empty()) {
+            temp_chunk = _chunk_queue.front();
+            _cur_mem_usage -= temp_chunk->memory_usage();
+            _chunk_queue.pop_front();
         }
     }
 
     // All scanner has been finished, and all cached batch has been read
-    if (scanner_batch == nullptr) {
+    if (temp_chunk == nullptr) {
         _scan_finished.store(true);
         *eos = true;
         return Status::OK();
@@ -186,77 +149,51 @@ Status FileScanNode::get_next(RuntimeState* state, RowBatch* row_batch, bool* eo
     // notify one scanner
     _queue_writer_cond.notify_one();
 
-    // get scanner's batch memory
-    row_batch->acquire_state(scanner_batch.get());
-    _num_rows_returned += row_batch->num_rows();
+    *chunk = temp_chunk;
+    _num_rows_returned += temp_chunk->num_rows();
     COUNTER_SET(_rows_returned_counter, _num_rows_returned);
 
     // This is first time reach limit.
     // Only valid when query 'select * from table1 limit 20'
     if (reached_limit()) {
-        int num_rows_over = _num_rows_returned - _limit;
-        row_batch->set_num_rows(row_batch->num_rows() - num_rows_over);
+        int64_t num_rows_over = _num_rows_returned - _limit;
+        (*chunk)->set_num_rows((*chunk)->num_rows() - num_rows_over);
         _num_rows_returned -= num_rows_over;
         COUNTER_SET(_rows_returned_counter, _num_rows_returned);
 
         _scan_finished.store(true);
         _queue_writer_cond.notify_all();
-        *eos = true;
-    } else {
-        *eos = false;
     }
+    *eos = false;
 
-    if (VLOG_ROW_IS_ON) {
-        for (int i = 0; i < row_batch->num_rows(); ++i) {
-            TupleRow* row = row_batch->get_row(i);
-            VLOG_ROW << "FileScanNode output row: " << Tuple::to_string(row->get_tuple(0), *_tuple_desc);
-        }
-    }
-
+    DCHECK_CHUNK(*chunk);
     return Status::OK();
 }
 
-Status FileScanNode::close(RuntimeState* state) {
+void FileScanNode::close(RuntimeState* state) {
     if (is_closed()) {
-        return Status::OK();
+        return;
     }
-    RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::CLOSE));
+    (void)exec_debug_action(TExecNodePhase::CLOSE);
     SCOPED_TIMER(_runtime_profile->total_time_counter());
     _scan_finished.store(true);
     _queue_writer_cond.notify_all();
     _queue_reader_cond.notify_all();
-    for (int i = 0; i < _scanner_threads.size(); ++i) {
-        _scanner_threads[i].join();
+    for (auto& _scanner_thread : _scanner_threads) {
+        _scanner_thread.join();
     }
 
-    // Open partition
-    if (_partition_expr_ctxs.size() > 0) {
-        Expr::close(_partition_expr_ctxs, state);
-        for (auto iter : _partition_infos) {
-            iter->close(state);
-        }
+    while (!_chunk_queue.empty()) {
+        _chunk_queue.pop_front();
     }
+    _cur_mem_usage = 0;
 
-    // Close
-    _batch_queue.clear();
-
-    return ExecNode::close(state);
+    ExecNode::close(state);
 }
 
 // This function is called after plan node has been prepared.
 Status FileScanNode::set_scan_ranges(const std::vector<TScanRangeParams>& scan_ranges) {
     _scan_ranges = scan_ranges;
-
-    // Now we initialize partition information
-    if (_partition_expr_ctxs.size() > 0) {
-        for (auto& range : _scan_ranges) {
-            auto& params = range.scan_range.broker_scan_range.params;
-            if (params.__isset.partition_ids) {
-                std::sort(params.partition_ids.begin(), params.partition_ids.end());
-            }
-        }
-    }
-
     return Status::OK();
 }
 
@@ -264,94 +201,70 @@ void FileScanNode::debug_string(int ident_level, std::stringstream* out) const {
     (*out) << "FileScanNode";
 }
 
-std::unique_ptr<FileScanner> FileScanNode::create_scanner(const TBrokerScanRange& scan_range, ScannerCounter* counter) {
-    FileScanner* scan = nullptr;
-    switch (scan_range.ranges[0].format_type) {
-    case TFileFormatType::FORMAT_PARQUET:
-        scan = new ParquetScanner(_runtime_state, runtime_profile(), scan_range.params, scan_range.ranges,
-                                  scan_range.broker_addresses, counter);
-        break;
-    case TFileFormatType::FORMAT_ORC:
-        scan = new ORCScanner(_runtime_state, runtime_profile(), scan_range.params, scan_range.ranges,
-                              scan_range.broker_addresses, counter);
-        break;
-    case TFileFormatType::FORMAT_JSON:
-        scan = new JsonScanner(_runtime_state, runtime_profile(), scan_range.params, scan_range.ranges,
-                               scan_range.broker_addresses, counter);
-        break;
-    default:
-        scan = new BrokerScanner(_runtime_state, runtime_profile(), scan_range.params, scan_range.ranges,
-                                 scan_range.broker_addresses, counter);
+std::unique_ptr<FileScanner> FileScanNode::_create_scanner(const TBrokerScanRange& scan_range,
+                                                           ScannerCounter* counter) {
+    if (scan_range.ranges[0].format_type == TFileFormatType::FORMAT_ORC) {
+        return std::make_unique<ORCScanner>(runtime_state(), runtime_profile(), scan_range, counter);
+    } else if (scan_range.ranges[0].format_type == TFileFormatType::FORMAT_PARQUET) {
+        return std::make_unique<ParquetScanner>(runtime_state(), runtime_profile(), scan_range, counter);
+    } else if (scan_range.ranges[0].format_type == TFileFormatType::FORMAT_JSON) {
+        return std::make_unique<JsonScanner>(runtime_state(), runtime_profile(), scan_range, counter);
+    } else if (scan_range.ranges[0].format_type == TFileFormatType::FORMAT_AVRO) {
+        return std::make_unique<AvroScanner>(runtime_state(), runtime_profile(), scan_range, counter);
+    } else {
+        return std::make_unique<CSVScanner>(runtime_state(), runtime_profile(), scan_range, counter);
     }
-    std::unique_ptr<FileScanner> scanner(scan);
-    return scanner;
 }
 
-Status FileScanNode::scanner_scan(const TBrokerScanRange& scan_range, const std::vector<ExprContext*>& conjunct_ctxs,
-                                  const std::vector<ExprContext*>& partition_expr_ctxs, ScannerCounter* counter) {
+Status FileScanNode::_scanner_scan(const TBrokerScanRange& scan_range, const std::vector<ExprContext*>& conjunct_ctxs,
+                                   ScannerCounter* counter) {
+    if (scan_range.ranges.empty()) {
+        return Status::EndOfFile("scan range is empty");
+    }
+    if (runtime_state()->enable_log_rejected_record() &&
+        scan_range.ranges[0].format_type != TFileFormatType::FORMAT_CSV_PLAIN &&
+        scan_range.ranges[0].format_type != TFileFormatType::FORMAT_JSON) {
+        return Status::InternalError("only support csv/json format to log rejected record");
+    }
     //create scanner object and open
-    std::unique_ptr<FileScanner> scanner = create_scanner(scan_range, counter);
+    std::unique_ptr<FileScanner> scanner = _create_scanner(scan_range, counter);
+    if (scanner == nullptr) {
+        return Status::InternalError("Failed to create scanner");
+    }
+    DeferOp scanner_close([&scanner] { return scanner->close(); });
     RETURN_IF_ERROR(scanner->open());
-    bool scanner_eof = false;
 
-    while (!scanner_eof) {
-        // Fill one row batch
-        std::shared_ptr<RowBatch> row_batch(new RowBatch(row_desc(), _runtime_state->batch_size(), mem_tracker()));
-
-        // create new tuple buffer for row_batch
-        MemPool* tuple_pool = row_batch->tuple_data_pool();
-        int tuple_buffer_size = row_batch->capacity() * _tuple_desc->byte_size();
-        void* tuple_buffer = tuple_pool->allocate(tuple_buffer_size);
-        if (tuple_buffer == nullptr) {
-            return Status::InternalError("Allocate memory for row batch failed.");
+    while (true) {
+        RETURN_IF_CANCELLED(runtime_state());
+        // If we have finished all works
+        if (_scan_finished.load()) {
+            return Status::OK();
         }
 
-        Tuple* tuple = reinterpret_cast<Tuple*>(tuple_buffer);
-        while (!scanner_eof) {
-            RETURN_IF_CANCELLED(_runtime_state);
-            // If we have finished all works
-            if (_scan_finished.load()) {
-                return Status::OK();
-            }
-
-            // This row batch has been filled up, and break this
-            if (row_batch->is_full()) {
-                break;
-            }
-
-            int row_idx = row_batch->add_row();
-            TupleRow* row = row_batch->get_row(row_idx);
-            // scan node is the first tuple of tuple row
-            row->set_tuple(0, tuple);
-            memset(tuple, 0, _tuple_desc->num_null_bytes());
-
-            // Get from scanner
-            RETURN_IF_ERROR(scanner->get_next(tuple, tuple_pool, &scanner_eof));
-            if (scanner_eof) {
-                continue;
-            }
-
-            // eval conjuncts of this row.
-            if (eval_conjuncts(&conjunct_ctxs[0], conjunct_ctxs.size(), row)) {
-                row_batch->commit_last_row();
-                char* new_tuple = reinterpret_cast<char*>(tuple);
-                new_tuple += _tuple_desc->byte_size();
-                tuple = reinterpret_cast<Tuple*>(new_tuple);
-                // counter->num_rows_returned++;
-            } else {
-                counter->num_rows_unselected++;
-            }
+        auto res = scanner->get_next();
+        if (!res.ok()) {
+            return res.status();
         }
+        ChunkPtr temp_chunk = std::move(res.value());
+
+        size_t before_rows = temp_chunk->num_rows();
+
+        runtime_state()->update_num_rows_load_from_source(before_rows);
+        runtime_state()->update_num_bytes_load_from_source(temp_chunk->bytes_usage());
+
+        // eval conjuncts
+        RETURN_IF_ERROR(eval_conjuncts(conjunct_ctxs, temp_chunk.get()));
+        counter->num_rows_unselected += (before_rows - temp_chunk->num_rows());
 
         // Row batch has been filled, push this to the queue
-        if (row_batch->num_rows() > 0) {
-            std::unique_lock<std::mutex> l(_batch_queue_lock);
-            while (_process_status.ok() && !_scan_finished.load() && !_runtime_state->is_cancelled() &&
+        if (temp_chunk->num_rows() > 0) {
+            std::unique_lock<std::mutex> l(_chunk_queue_lock);
+            while (_process_status.ok() && !_scan_finished.load() && !runtime_state()->is_cancelled() &&
                    // stop pushing more batch if
                    // 1. too many batches in queue, or
                    // 2. at least one batch in queue and memory exceed limit.
-                   (_batch_queue.size() >= _max_buffered_batches ||
-                    (mem_tracker()->any_limit_exceeded() && !_batch_queue.empty()))) {
+                   (_chunk_queue.size() >= _max_queue_size ||
+                    (_cur_mem_usage >= _max_mem_usage && !_chunk_queue.empty()))) {
                 _queue_writer_cond.wait_for(l, std::chrono::seconds(1));
             }
             // Process already set failed, so we just return OK
@@ -363,11 +276,12 @@ Status FileScanNode::scanner_scan(const TBrokerScanRange& scan_range, const std:
                 return Status::OK();
             }
             // Runtime state is canceled, just return cancel
-            if (_runtime_state->is_cancelled()) {
+            if (runtime_state()->is_cancelled()) {
                 return Status::Cancelled("Cancelled FileScanNode::scanner_scan");
             }
-            // Queue size Must be smaller than _max_buffered_batches
-            _batch_queue.push_back(row_batch);
+            // Queue size Must be smaller than _max_queue_size
+            _cur_mem_usage += temp_chunk->memory_usage();
+            _chunk_queue.push_back(std::move(temp_chunk));
 
             // Notify reader to
             _queue_reader_cond.notify_one();
@@ -377,86 +291,69 @@ Status FileScanNode::scanner_scan(const TBrokerScanRange& scan_range, const std:
     return Status::OK();
 }
 
-void FileScanNode::scanner_worker(int start_idx, int length) {
+void FileScanNode::_scanner_worker(int start_idx, int length) {
+    SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(runtime_state()->instance_mem_tracker());
+
     // Clone expr context
     std::vector<ExprContext*> scanner_expr_ctxs;
-    auto status = Expr::clone_if_not_exists(_conjunct_ctxs, _runtime_state, &scanner_expr_ctxs);
+    DeferOp close_exprs([this, &scanner_expr_ctxs] { Expr::close(scanner_expr_ctxs, runtime_state()); });
+    auto status = Expr::clone_if_not_exists(runtime_state(), _pool, _conjunct_ctxs, &scanner_expr_ctxs);
+
     if (!status.ok()) {
         LOG(WARNING) << "Clone conjuncts failed.";
-    }
-    std::vector<ExprContext*> partition_expr_ctxs;
-    if (status.ok()) {
-        status = Expr::clone_if_not_exists(_partition_expr_ctxs, _runtime_state, &partition_expr_ctxs);
-        if (!status.ok()) {
-            LOG(WARNING) << "Clone conjuncts failed.";
-        }
-    }
-    ScannerCounter counter;
-    for (int i = 0; i < length && status.ok(); ++i) {
-        const TBrokerScanRange& scan_range = _scan_ranges[start_idx + i].scan_range.broker_scan_range;
-        status = scanner_scan(scan_range, scanner_expr_ctxs, partition_expr_ctxs, &counter);
-        if (!status.ok()) {
-            LOG(WARNING) << "FileScanner[" << start_idx + i << "] process failed. status=" << status.get_error_msg();
-        }
-    }
+    } else {
+        ScannerCounter counter;
+        for (int i = 0; i < length; ++i) {
+            const TBrokerScanRange& scan_range = _scan_ranges[start_idx + i].scan_range.broker_scan_range;
 
-    // Update stats
-    _runtime_state->update_num_rows_load_filtered(counter.num_rows_filtered);
-    _runtime_state->update_num_rows_load_unselected(counter.num_rows_unselected);
+            // remove range desc with empty file
+            TBrokerScanRange new_scan_range(scan_range);
+            new_scan_range.ranges.clear();
+            for (const TBrokerRangeDesc& range_desc : scan_range.ranges) {
+                // file_size is optional, and is not set in stream load and routine load,
+                // so we should check file size is set firstly.
+                if (range_desc.__isset.file_size && range_desc.file_size == 0) {
+                    continue;
+                }
+                new_scan_range.ranges.emplace_back(range_desc);
+            }
+            status = _scanner_scan(new_scan_range, scanner_expr_ctxs, &counter);
+
+            // todo: break if failed ?
+            if (!status.ok() && !status.is_end_of_file()) {
+                LOG(WARNING) << "FileScanner[" << start_idx + i << "] process failed. status=" << status.message();
+                break;
+            }
+        }
+
+        // Update stats
+        runtime_state()->update_num_rows_load_filtered(counter.num_rows_filtered);
+        runtime_state()->update_num_rows_load_unselected(counter.num_rows_unselected);
+
+        COUNTER_UPDATE(_scanner_total_timer, counter.total_ns);
+        COUNTER_UPDATE(_scanner_fill_timer, counter.fill_ns);
+        COUNTER_UPDATE(_scanner_read_timer, counter.read_batch_ns);
+        COUNTER_UPDATE(_scanner_cast_chunk_timer, counter.cast_chunk_ns);
+        COUNTER_UPDATE(_scanner_materialize_timer, counter.materialize_ns);
+        COUNTER_UPDATE(_scanner_init_chunk_timer, counter.init_chunk_ns);
+
+        COUNTER_UPDATE(_scanner_file_reader_timer, counter.file_read_ns);
+    }
 
     // scanner is going to finish
     {
-        std::lock_guard<std::mutex> l(_batch_queue_lock);
-        if (!status.ok()) {
-            update_status(status);
+        std::lock_guard<std::mutex> l(_chunk_queue_lock);
+        if (!status.ok() && !status.is_end_of_file()) {
+            _update_status(status);
         }
         // This scanner will finish
         _num_running_scanners--;
     }
     _queue_reader_cond.notify_all();
     // If one scanner failed, others don't need scan any more
-    if (!status.ok()) {
+    if (!status.ok() && !status.is_end_of_file()) {
         _queue_writer_cond.notify_all();
     }
-    Expr::close(scanner_expr_ctxs, _runtime_state);
-    Expr::close(partition_expr_ctxs, _runtime_state);
-}
-
-int64_t FileScanNode::binary_find_partition_id(const PartRangeKey& key) const {
-    int low = 0;
-    int high = _partition_infos.size() - 1;
-
-    while (low <= high) {
-        int mid = low + (high - low) / 2;
-        int cmp = _partition_infos[mid]->range().compare_key(key);
-        if (cmp == 0) {
-            return _partition_infos[mid]->id();
-        } else if (cmp < 0) { // current < partition[mid]
-            low = mid + 1;
-        } else {
-            high = mid - 1;
-        }
-    }
-
-    return -1;
-}
-
-int64_t FileScanNode::get_partition_id(const std::vector<ExprContext*>& partition_expr_ctxs, TupleRow* row) const {
-    if (_partition_infos.size() == 0) {
-        return -1;
-    }
-    // construct a PartRangeKey
-    PartRangeKey part_key;
-    // use binary search to get the right partition.
-    ExprContext* ctx = partition_expr_ctxs[0];
-    void* partition_val = ctx->get_value(row);
-    if (partition_val != nullptr) {
-        PartRangeKey::from_value(ctx->root()->type().type, partition_val, &part_key);
-    } else {
-        part_key = PartRangeKey::neg_infinite();
-    }
-
-    return binary_find_partition_id(part_key);
 }
 
 } // namespace starrocks

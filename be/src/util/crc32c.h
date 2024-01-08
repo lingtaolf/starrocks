@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/util/crc32c.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -22,18 +18,15 @@
 // the following code are modified from RocksDB:
 // https://github.com/facebook/rocksdb/blob/master/util/crc32c.h
 
-#ifndef STARROCKS_BE_SRC_UTIL_CRC32C_H
-#define STARROCKS_BE_SRC_UTIL_CRC32C_H
+#pragma once
 
-#include <stddef.h>
-#include <stdint.h>
-
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include "util/slice.h"
 
-namespace starrocks {
-namespace crc32c {
+namespace starrocks::crc32c {
 
 // Return the crc32c of concat(A, data[0,n-1]) where init_crc is the
 // crc32c of some string A.  Extend() is often used to maintain the
@@ -54,7 +47,4 @@ inline uint32_t Value(const std::vector<Slice>& slices) {
     return crc;
 }
 
-} // namespace crc32c
-} // namespace starrocks
-
-#endif //STARROCKS_BE_SRC_UTIL_CRC32C_H
+} // namespace starrocks::crc32c

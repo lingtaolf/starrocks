@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/aes_util.cpp
 
@@ -21,16 +34,10 @@
 
 #include "aes_util.h"
 
-#include <openssl/aes.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 
 #include <cstring>
-#include <iostream>
-#include <memory>
-#include <string>
-
-#include "exprs/base64.h"
 
 namespace starrocks {
 
@@ -51,7 +58,7 @@ const EVP_CIPHER* get_evp_type(const AesMode mode) {
     case AES_256_CBC:
         return EVP_aes_256_cbc();
     default:
-        return NULL;
+        return nullptr;
     }
 }
 
@@ -104,7 +111,6 @@ static int do_encrypt(EVP_CIPHER_CTX* aes_ctx, const EVP_CIPHER* cipher, const u
 
 int AesUtil::encrypt(AesMode mode, const unsigned char* source, uint32_t source_length, const unsigned char* key,
                      uint32_t key_length, const unsigned char* iv, bool padding, unsigned char* encrypt) {
-    EVP_CIPHER_CTX aes_ctx;
     const EVP_CIPHER* cipher = get_evp_type(mode);
     /* The encrypt key to be used for encryption */
     unsigned char encrypt_key[AES_MAX_KEY_LENGTH / 8];
@@ -113,10 +119,11 @@ int AesUtil::encrypt(AesMode mode, const unsigned char* source, uint32_t source_
     if (cipher == nullptr || (EVP_CIPHER_iv_length(cipher) > 0 && !iv)) {
         return AES_BAD_DATA;
     }
-    EVP_CIPHER_CTX_init(&aes_ctx);
+
+    EVP_CIPHER_CTX* aes_ctx = EVP_CIPHER_CTX_new();
     int length = 0;
-    int ret = do_encrypt(&aes_ctx, cipher, source, source_length, encrypt_key, iv, padding, encrypt, &length);
-    EVP_CIPHER_CTX_cleanup(&aes_ctx);
+    int ret = do_encrypt(aes_ctx, cipher, source, source_length, encrypt_key, iv, padding, encrypt, &length);
+    EVP_CIPHER_CTX_free(aes_ctx);
     if (ret == 0) {
         ERR_clear_error();
         return AES_BAD_DATA;
@@ -149,7 +156,6 @@ static int do_decrypt(EVP_CIPHER_CTX* aes_ctx, const EVP_CIPHER* cipher, const u
 
 int AesUtil::decrypt(AesMode mode, const unsigned char* encrypt, uint32_t encrypt_length, const unsigned char* key,
                      uint32_t key_length, const unsigned char* iv, bool padding, unsigned char* decrypt_content) {
-    EVP_CIPHER_CTX aes_ctx;
     const EVP_CIPHER* cipher = get_evp_type(mode);
 
     /* The encrypt key to be used for decryption */
@@ -160,10 +166,10 @@ int AesUtil::decrypt(AesMode mode, const unsigned char* encrypt, uint32_t encryp
         return AES_BAD_DATA;
     }
 
-    EVP_CIPHER_CTX_init(&aes_ctx);
+    EVP_CIPHER_CTX* aes_ctx = EVP_CIPHER_CTX_new();
     int length = 0;
-    int ret = do_decrypt(&aes_ctx, cipher, encrypt, encrypt_length, encrypt_key, iv, padding, decrypt_content, &length);
-    EVP_CIPHER_CTX_cleanup(&aes_ctx);
+    int ret = do_decrypt(aes_ctx, cipher, encrypt, encrypt_length, encrypt_key, iv, padding, decrypt_content, &length);
+    EVP_CIPHER_CTX_free(aes_ctx);
     if (ret > 0) {
         return length;
     } else {

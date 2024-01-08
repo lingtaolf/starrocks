@@ -1,153 +1,163 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/json_scanner.h
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #pragma once
 
+#include <string_view>
+
+#include "column/nullable_column.h"
 #include "common/compiler_util.h"
-DIAGNOSTIC_PUSH
-DIAGNOSTIC_IGNORE("-Wclass-memaccess")
-#include <rapidjson/document.h>
-DIAGNOSTIC_POP
-
-#include <rapidjson/error/en.h>
-#include <rapidjson/stringbuffer.h>
-#include <rapidjson/writer.h>
-
-#include <map>
-#include <memory>
-#include <sstream>
-#include <string>
-#include <vector>
-
-#include "common/status.h"
 #include "exec/file_scanner.h"
-#include "gen_cpp/PlanNodes_types.h"
-#include "gen_cpp/Types_types.h"
-#include "runtime/descriptors.h"
-#include "runtime/mem_pool.h"
-#include "runtime/small_file_mgr.h"
+#include "exprs/json_functions.h"
+#include "fs/fs.h"
 #include "runtime/stream_load/load_stream_mgr.h"
-#include "runtime/tuple.h"
-#include "util/runtime_profile.h"
+#include "simdjson.h"
+#include "util/raw_container.h"
 #include "util/slice.h"
 
 namespace starrocks {
-class Tuple;
-class SlotDescriptor;
-class RuntimeState;
-class TupleDescriptor;
-class MemTracker;
-class JsonReader;
 
+struct SimpleJsonPath;
+class JsonReader;
+class JsonParser;
 class JsonScanner : public FileScanner {
 public:
-    JsonScanner(RuntimeState* state, RuntimeProfile* profile, const TBrokerScanRangeParams& params,
-                const std::vector<TBrokerRangeDesc>& ranges, const std::vector<TNetworkAddress>& broker_addresses,
+    JsonScanner(RuntimeState* state, RuntimeProfile* profile, const TBrokerScanRange& scan_range,
                 ScannerCounter* counter);
-    ~JsonScanner();
+    ~JsonScanner() override;
 
     // Open this scanner, will initialize information needed
     Status open() override;
 
-    // Get next tuple
-    Status get_next(Tuple* tuple, MemPool* tuple_pool, bool* eof) override;
+    StatusOr<ChunkPtr> get_next() override;
 
     // Close this scanner
     void close() override;
+    static Status parse_json_paths(const std::string& jsonpath, std::vector<std::vector<SimpleJsonPath>>* path_vecs);
 
 private:
-    Status open_next_reader();
+    Status _construct_json_types();
+    Status _construct_cast_exprs();
+    Status _create_src_chunk(ChunkPtr* chunk);
+    Status _open_next_reader();
+    StatusOr<ChunkPtr> _cast_chunk(const ChunkPtr& src_chunk);
+    void _materialize_src_chunk_adaptive_nullable_column(ChunkPtr& chunk);
 
-private:
-    const std::vector<TBrokerRangeDesc>& _ranges;
-    const std::vector<TNetworkAddress>& _broker_addresses;
+    friend class JsonReader;
 
-    std::string _jsonpath;
-    std::string _jsonpath_file;
+    const TBrokerScanRange& _scan_range;
+    int _next_range;
+    const uint64_t _max_chunk_size;
 
     // used to hold current StreamLoadPipe
-    std::shared_ptr<StreamLoadPipe> _stream_load_pipe;
-    // Reader
-    JsonReader* _cur_file_reader;
-    int _next_range;
-    bool _cur_file_eof; // is read over?
-    bool _scanner_eof;
+    std::unique_ptr<JsonReader> _cur_file_reader;
+    bool _cur_file_eof; // indicate the current file is eof
+
+    std::vector<std::shared_ptr<SequentialFile>> _files;
+
+    std::vector<TypeDescriptor> _json_types;
+    std::vector<Expr*> _cast_exprs;
+    ObjectPool _pool;
+
+    std::vector<std::vector<SimpleJsonPath>> _json_paths;
+    std::vector<SimpleJsonPath> _root_paths;
+    bool _strip_outer_array = false;
 };
 
-struct JsonPath;
 // Reader to parse the json.
 // For most of its methods which return type is Status,
 // return Status::OK() if process succeed or encounter data quality error.
 // return other error Status if encounter other errors.
 class JsonReader {
 public:
-    JsonReader(RuntimeState* state, ScannerCounter* counter, RuntimeProfile* profile, FileReader* file_reader,
-               bool strip_outer_array);
+    JsonReader(RuntimeState* state, ScannerCounter* counter, JsonScanner* scanner, std::shared_ptr<SequentialFile> file,
+               bool strict_mode, std::vector<SlotDescriptor*> slot_descs);
+
     ~JsonReader();
 
-    Status init(const std::string& jsonpath, const std::string& json_root); // must call before use
+    Status open();
 
-    Status read(Tuple* tuple, const std::vector<SlotDescriptor*>& slot_descs, MemPool* tuple_pool, bool* eof);
+    Status read_chunk(Chunk* chunk, int32_t rows_to_read);
 
-private:
-    Status (JsonReader::*_handle_json_callback)(Tuple* tuple, const std::vector<SlotDescriptor*>& slot_descs,
-                                                MemPool* tuple_pool, bool* eof);
-    Status _handle_simple_json(Tuple* tuple, const std::vector<SlotDescriptor*>& slot_descs, MemPool* tuple_pool,
-                               bool* eof);
-    Status _handle_flat_array_complex_json(Tuple* tuple, const std::vector<SlotDescriptor*>& slot_descs,
-                                           MemPool* tuple_pool, bool* eof);
-    Status _handle_nested_complex_json(Tuple* tuple, const std::vector<SlotDescriptor*>& slot_descs,
-                                       MemPool* tuple_pool, bool* eof);
+    Status close();
 
-    void _fill_slot(Tuple* tuple, SlotDescriptor* slot_desc, MemPool* mem_pool, const uint8_t* value, int32_t len);
-    Status _parse_json_doc(bool* eof);
-    void _set_tuple_value(rapidjson::Value& objectValue, Tuple* tuple, const std::vector<SlotDescriptor*>& slot_descs,
-                          MemPool* tuple_pool, bool* valid);
-    void _write_data_to_tuple(rapidjson::Value::ConstValueIterator value, SlotDescriptor* desc, Tuple* tuple,
-                              MemPool* tuple_pool, bool* valid);
-    bool _write_values_by_jsonpath(rapidjson::Value& objectValue, MemPool* tuple_pool, Tuple* tuple,
-                                   const std::vector<SlotDescriptor*>& slot_descs);
-    std::string _print_json_value(const rapidjson::Value& value);
-    std::string _print_jsonpath(const std::vector<JsonPath>& path);
+    struct PreviousParsedItem {
+        PreviousParsedItem(const std::string_view& key) : key(key), column_index(-1) {}
+        PreviousParsedItem(const std::string_view& key, int column_index, const TypeDescriptor& type)
+                : key(key), type(type), column_index(column_index) {}
 
-    void _close();
-    Status _generate_json_paths(const std::string& jsonpath, std::vector<std::vector<JsonPath>>* vect);
+        std::string key;
+        TypeDescriptor type;
+        int column_index;
+    };
 
 private:
-    int _next_line;
-    int _total_lines;
-    RuntimeState* _state;
-    ScannerCounter* _counter;
-    RuntimeProfile* _profile;
-    FileReader* _file_reader;
-    bool _closed;
-    bool _strip_outer_array;
-    RuntimeProfile::Counter* _bytes_read_counter;
-    RuntimeProfile::Counter* _read_timer;
+    template <typename ParserType>
+    Status _read_rows(Chunk* chunk, int32_t rows_to_read, int32_t* rows_read);
 
-    std::vector<std::vector<JsonPath>> _parsed_jsonpaths;
-    std::vector<JsonPath> _parsed_json_root;
+    Status _read_and_parse_json();
+    Status _read_file_stream();
+    Status _read_file_broker();
+    Status _parse_payload();
 
-    rapidjson::Document _origin_json_doc; // origin json document object from parsed json string
-    rapidjson::Value* _json_doc;          // _json_doc equals _final_json_doc iff not set `json_root`
+    Status _construct_row(simdjson::ondemand::object* row, Chunk* chunk);
+
+    Status _construct_row_without_jsonpath(simdjson::ondemand::object* row, Chunk* chunk);
+    Status _construct_row_with_jsonpath(simdjson::ondemand::object* row, Chunk* chunk);
+
+    Status _construct_column(simdjson::ondemand::value& value, Column* column, const TypeDescriptor& type_desc,
+                             const std::string& col_name);
+
+    Status _check_ndjson();
+
+private:
+    RuntimeState* _state = nullptr;
+    ScannerCounter* _counter = nullptr;
+    JsonScanner* _scanner = nullptr;
+    bool _strict_mode = false;
+
+    std::shared_ptr<SequentialFile> _file;
+    bool _closed = false;
+    std::vector<SlotDescriptor*> _slot_descs;
+    //Attention: _slot_desc_dict's key is the string_view of the column of _slot_descs,
+    // so the lifecycle of _slot_descs should be longer than _slot_desc_dict;
+    std::unordered_map<std::string_view, SlotDescriptor*> _slot_desc_dict;
+
+    // For performance reason, the simdjson parser should be reused over several files.
+    //https://github.com/simdjson/simdjson/blob/master/doc/performance.md
+    simdjson::ondemand::parser _simdjson_parser;
+    bool _is_ndjson = false;
+
+    std::unique_ptr<JsonParser> _parser;
+    bool _empty_parser = true;
+
+    // record the chunk column position for previous parsed json object
+    std::vector<PreviousParsedItem> _prev_parsed_position;
+    // record the parsed column index for current json object
+    std::vector<uint8_t> _parsed_columns;
+    // record the "__op" column's index
+    int _op_col_index;
+
+    ByteBufferPtr _file_stream_buffer;
+
+    std::unique_ptr<char[]> _file_broker_buffer = nullptr;
+    size_t _file_broker_buffer_size = 0;
+    size_t _file_broker_buffer_capacity = 0;
+
+    char* _payload = nullptr;
+    size_t _payload_size = 0;
+    size_t _payload_capacity = 0;
 };
 
 } // namespace starrocks

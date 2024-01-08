@@ -1,11 +1,22 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "exec/schema_scanner/schema_views_scanner.h"
 
 #include "exec/schema_scanner/schema_helper.h"
-#include "runtime/primitive_type.h"
+#include "runtime/runtime_state.h"
 #include "runtime/string_value.h"
-//#include "runtime/datetime_value.h"
 
 namespace starrocks {
 
@@ -25,153 +36,148 @@ SchemaScanner::ColumnDesc SchemaViewsScanner::_s_tbls_columns[] = {
 
 SchemaViewsScanner::SchemaViewsScanner()
         : SchemaScanner(_s_tbls_columns, sizeof(_s_tbls_columns) / sizeof(SchemaScanner::ColumnDesc)),
-          _db_index(0),
-          _table_index(0) {}
+          _timeout_ms(config::thrift_rpc_timeout_ms) {}
 
-SchemaViewsScanner::~SchemaViewsScanner() {}
+SchemaViewsScanner::~SchemaViewsScanner() = default;
 
 Status SchemaViewsScanner::start(RuntimeState* state) {
     if (!_is_init) {
         return Status::InternalError("used before initialized.");
     }
     TGetDbsParams db_params;
-    if (NULL != _param->db) {
+    if (nullptr != _param->db) {
         db_params.__set_pattern(*(_param->db));
     }
-    if (NULL != _param->current_user_ident) {
+    if (nullptr != _param->current_user_ident) {
         db_params.__set_current_user_ident(*(_param->current_user_ident));
     } else {
-        if (NULL != _param->user) {
+        if (nullptr != _param->user) {
             db_params.__set_user(*(_param->user));
         }
-        if (NULL != _param->user_ip) {
+        if (nullptr != _param->user_ip) {
             db_params.__set_user_ip(*(_param->user_ip));
         }
     }
 
-    if (NULL != _param->ip && 0 != _param->port) {
-        RETURN_IF_ERROR(SchemaHelper::get_db_names(*(_param->ip), _param->port, db_params, &_db_result));
+    _timeout_ms = state->query_options().query_timeout * 1000;
+    if (nullptr != _param->ip && 0 != _param->port) {
+        RETURN_IF_ERROR(SchemaHelper::get_db_names(*(_param->ip), _param->port, db_params, &_db_result, _timeout_ms));
     } else {
         return Status::InternalError("IP or port doesn't exists");
     }
     return Status::OK();
 }
 
-Status SchemaViewsScanner::fill_one_row(Tuple* tuple, MemPool* pool) {
-    // set all bit to not null
-    memset((void*)tuple, 0, _tuple_desc->num_null_bytes());
+Status SchemaViewsScanner::fill_chunk(ChunkPtr* chunk) {
     const TTableStatus& tbl_status = _table_result.tables[_table_index];
-    // TABLE_CATALOG
-    { tuple->set_null(_tuple_desc->slots()[0]->null_indicator_offset()); }
-    // TABLE_SCHEMA
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[1]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        std::string db_name = SchemaHelper::extract_db_name(_db_result.dbs[_db_index - 1]);
-        str_slot->ptr = (char*)pool->allocate(db_name.size());
-        if (UNLIKELY(str_slot->ptr == nullptr)) {
-            return Status::InternalError("Mem usage has exceed the limit of BE");
+    const auto& slot_id_to_index_map = (*chunk)->get_slot_id_to_index_map();
+    for (const auto& [slot_id, index] : slot_id_to_index_map) {
+        switch (slot_id) {
+        case 1: {
+            // TABLE_CATALOG
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(1);
+                const char* str = "def";
+                Slice value(str, strlen(str));
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
         }
-        str_slot->len = db_name.size();
-        memcpy(str_slot->ptr, db_name.c_str(), str_slot->len);
-    }
-    // TABLE_NAME
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[2]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        const std::string* src = &tbl_status.name;
-        str_slot->len = src->length();
-        str_slot->ptr = (char*)pool->allocate(str_slot->len);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("Allocate memcpy failed.");
+        case 2: {
+            // TABLE_SCHEMA
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(2);
+                std::string db_name = SchemaHelper::extract_db_name(_db_result.dbs[_db_index - 1]);
+                Slice value(db_name.c_str(), db_name.length());
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
         }
-        memcpy(str_slot->ptr, src->c_str(), str_slot->len);
-    }
-    // VIEW_DEFINITION
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[3]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        const std::string* ddl_sql = &tbl_status.ddl_sql;
-        str_slot->len = ddl_sql->length();
-        str_slot->ptr = (char*)pool->allocate(str_slot->len);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("Allocate memcpy failed.");
+        case 3: {
+            // TABLE_NAME
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(3);
+                const std::string* str = &tbl_status.name;
+                Slice value(str->c_str(), str->length());
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
         }
-        memcpy(str_slot->ptr, ddl_sql->c_str(), str_slot->len);
-    }
-    // CHECK_OPTION
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[4]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        const std::string check_option = "NONE";
-        str_slot->len = check_option.length();
-        str_slot->ptr = (char*)pool->allocate(str_slot->len);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("Allocate memcpy failed.");
+        case 4: {
+            // VIEW_DEFINITION
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(4);
+                const std::string* str = &tbl_status.ddl_sql;
+                Slice value(str->c_str(), str->length());
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
         }
-        memcpy(str_slot->ptr, check_option.c_str(), str_slot->len);
-    }
-    // IS_UPDATABLE
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[5]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        const std::string is_updatable = "NO";
-        str_slot->len = is_updatable.length();
-        str_slot->ptr = (char*)pool->allocate(str_slot->len);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("Allocate memcpy failed.");
+        case 5: {
+            // CHECK_OPTION
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(5);
+                const char* str = "NONE";
+                Slice value(str, strlen(str));
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
         }
-        memcpy(str_slot->ptr, is_updatable.c_str(), str_slot->len);
-    }
-    // DEFINER
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[6]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        // since we did not record the creater of a certain `view` or `table` , just leave this column empty at this stage.
-        const std::string definer = "";
-        str_slot->len = definer.length();
-        str_slot->ptr = (char*)pool->allocate(str_slot->len);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("Allocate memcpy failed.");
+        case 6: {
+            // IS_UPDATABLE
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(6);
+                const char* str = "NO";
+                Slice value(str, strlen(str));
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
         }
-        memcpy(str_slot->ptr, definer.c_str(), str_slot->len);
-    }
-    // SECURITY_TYPE
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[7]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        // since we did not record the creater of a certain `view` or `table` , just leave this column empty at this stage.
-        const std::string security_type = "";
-        str_slot->len = security_type.length();
-        str_slot->ptr = (char*)pool->allocate(str_slot->len);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("Allocate memcpy failed.");
+        case 7: {
+            // DEFINER
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(7);
+                // since we did not record the creater of a certain `view` or `table` , just leave this column empty at this stage.
+                const char* str = "";
+                Slice value(str, strlen(str));
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
         }
-        memcpy(str_slot->ptr, security_type.c_str(), str_slot->len);
-    }
-    // CHARACTER_SET_CLIENT
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[8]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        const std::string encoding = "utf8";
-        str_slot->len = encoding.length();
-        str_slot->ptr = (char*)pool->allocate(str_slot->len);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("Allocate memcpy failed.");
+        case 8: {
+            // SECURITY_TYPE
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(8);
+                // since we did not record the creater of a certain `view` or `table` , just leave this column empty at this stage.
+                const char* str = "";
+                Slice value(str, strlen(str));
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
         }
-        memcpy(str_slot->ptr, encoding.c_str(), str_slot->len);
-    }
-    // COLLATION_CONNECTION
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[9]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        const std::string collation = "utf8_general_ci";
-        str_slot->len = collation.length();
-        str_slot->ptr = (char*)pool->allocate(str_slot->len);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("Allocate memcpy failed.");
+        case 9: {
+            // CHARACTER_SET_CLIENT
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(9);
+                const char* str = "utf8";
+                Slice value(str, strlen(str));
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
         }
-        memcpy(str_slot->ptr, collation.c_str(), str_slot->len);
+        case 10: {
+            // COLLATION_CONNECTION
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(10);
+                const char* str = "utf8_general_ci";
+                Slice value(str, strlen(str));
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
+        }
+        default:
+            break;
+        }
     }
     _table_index++;
     return Status::OK();
@@ -180,23 +186,24 @@ Status SchemaViewsScanner::fill_one_row(Tuple* tuple, MemPool* pool) {
 Status SchemaViewsScanner::get_new_table() {
     TGetTablesParams table_params;
     table_params.__set_db(_db_result.dbs[_db_index++]);
-    if (NULL != _param->wild) {
+    if (nullptr != _param->wild) {
         table_params.__set_pattern(*(_param->wild));
     }
-    if (NULL != _param->current_user_ident) {
+    if (nullptr != _param->current_user_ident) {
         table_params.__set_current_user_ident(*(_param->current_user_ident));
     } else {
-        if (NULL != _param->user) {
+        if (nullptr != _param->user) {
             table_params.__set_user(*(_param->user));
         }
-        if (NULL != _param->user_ip) {
+        if (nullptr != _param->user_ip) {
             table_params.__set_user_ip(*(_param->user_ip));
         }
     }
     table_params.__set_type(TTableType::VIEW);
 
-    if (NULL != _param->ip && 0 != _param->port) {
-        RETURN_IF_ERROR(SchemaHelper::list_table_status(*(_param->ip), _param->port, table_params, &_table_result));
+    if (nullptr != _param->ip && 0 != _param->port) {
+        RETURN_IF_ERROR(SchemaHelper::list_table_status(*(_param->ip), _param->port, table_params, &_table_result,
+                                                        _timeout_ms));
     } else {
         return Status::InternalError("IP or port doesn't exists");
     }
@@ -204,12 +211,12 @@ Status SchemaViewsScanner::get_new_table() {
     return Status::OK();
 }
 
-Status SchemaViewsScanner::get_next_row(Tuple* tuple, MemPool* pool, bool* eos) {
+Status SchemaViewsScanner::get_next(ChunkPtr* chunk, bool* eos) {
     if (!_is_init) {
         return Status::InternalError("Used before initialized.");
     }
-    if (NULL == tuple || NULL == pool || NULL == eos) {
-        return Status::InternalError("input pointer is NULL.");
+    if (nullptr == chunk || nullptr == eos) {
+        return Status::InternalError("input pointer is nullptr.");
     }
     while (_table_index >= _table_result.tables.size()) {
         if (_db_index < _db_result.dbs.size()) {
@@ -220,7 +227,7 @@ Status SchemaViewsScanner::get_next_row(Tuple* tuple, MemPool* pool, bool* eos) 
         }
     }
     *eos = false;
-    return fill_one_row(tuple, pool);
+    return fill_chunk(chunk);
 }
 
 } // namespace starrocks

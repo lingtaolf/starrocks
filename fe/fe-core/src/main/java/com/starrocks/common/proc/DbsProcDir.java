@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/proc/DbsProcDir.java
 
@@ -24,13 +37,15 @@ package com.starrocks.common.proc;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Database;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Pair;
 import com.starrocks.common.util.DebugUtil;
 import com.starrocks.common.util.ListComparator;
 import com.starrocks.common.util.TimeUtils;
+import com.starrocks.meta.lock.LockType;
+import com.starrocks.meta.lock.Locker;
+import com.starrocks.server.GlobalStateMgr;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -46,10 +61,10 @@ public class DbsProcDir implements ProcDirInterface {
             .add("LastConsistencyCheckTime").add("ReplicaQuota")
             .build();
 
-    private Catalog catalog;
+    private final GlobalStateMgr globalStateMgr;
 
-    public DbsProcDir(Catalog catalog) {
-        this.catalog = catalog;
+    public DbsProcDir(GlobalStateMgr globalStateMgr) {
+        this.globalStateMgr = globalStateMgr;
     }
 
     @Override
@@ -58,21 +73,23 @@ public class DbsProcDir implements ProcDirInterface {
     }
 
     @Override
-    public ProcNodeInterface lookup(String dbIdStr) throws AnalysisException {
-        if (catalog == null || Strings.isNullOrEmpty(dbIdStr)) {
-            throw new AnalysisException("Db id is null");
+    public ProcNodeInterface lookup(String dbIdOrName) throws AnalysisException {
+        if (globalStateMgr == null) {
+            throw new AnalysisException("globalStateMgr is null");
+        }
+        if (Strings.isNullOrEmpty(dbIdOrName)) {
+            throw new AnalysisException("database id or name is null or empty");
         }
 
-        long dbId = -1L;
+        Database db;
         try {
-            dbId = Long.valueOf(dbIdStr);
+            db = globalStateMgr.getDb(Long.parseLong(dbIdOrName));
         } catch (NumberFormatException e) {
-            throw new AnalysisException("Invalid db id format: " + dbIdStr);
+            db = globalStateMgr.getDb(dbIdOrName);
         }
 
-        Database db = catalog.getDb(dbId);
         if (db == null) {
-            throw new AnalysisException("Database[" + dbId + "] does not exist.");
+            throw new AnalysisException("Unknown database id or name \"" + dbIdOrName + "\"");
         }
 
         return new TablesProcDir(db);
@@ -80,11 +97,11 @@ public class DbsProcDir implements ProcDirInterface {
 
     @Override
     public ProcResult fetchResult() throws AnalysisException {
-        Preconditions.checkNotNull(catalog);
+        Preconditions.checkNotNull(globalStateMgr);
         BaseProcResult result = new BaseProcResult();
         result.setNames(TITLE_NAMES);
 
-        List<String> dbNames = catalog.getDbNames();
+        List<String> dbNames = globalStateMgr.getDbNames();
         if (dbNames == null || dbNames.isEmpty()) {
             // empty
             return result;
@@ -93,12 +110,13 @@ public class DbsProcDir implements ProcDirInterface {
         // get info
         List<List<Comparable>> dbInfos = new ArrayList<List<Comparable>>();
         for (String dbName : dbNames) {
-            Database db = catalog.getDb(dbName);
+            Database db = globalStateMgr.getDb(dbName);
             if (db == null) {
                 continue;
             }
             List<Comparable> dbInfo = new ArrayList<Comparable>();
-            db.readLock();
+            Locker locker = new Locker();
+            locker.lockDatabase(db, LockType.READ);
             try {
                 int tableNum = db.getTables().size();
                 dbInfo.add(db.getId());
@@ -117,7 +135,7 @@ public class DbsProcDir implements ProcDirInterface {
                 dbInfo.add(replicaQuota);
 
             } finally {
-                db.readUnlock();
+                locker.unLockDatabase(db, LockType.READ);
             }
             dbInfos.add(dbInfo);
         }

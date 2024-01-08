@@ -1,13 +1,31 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package com.starrocks.analysis;
 
 import com.google.common.collect.ImmutableSortedSet;
-import com.starrocks.common.AnalysisException;
+import com.starrocks.sql.parser.NodePosition;
+import com.starrocks.sql.parser.ParsingException;
 
 import java.util.Set;
 
-public class OdbcScalarFunctionCall {
+import static com.starrocks.sql.common.ErrorMsgProxy.PARSER_ERROR_MSG;
+
+public class OdbcScalarFunctionCall implements ParseNode {
     private final Expr function;
+
+    private final NodePosition pos;
 
     private static final Set<String> ODBC_SCALAR_STRING_FUNCTIONS =
             new ImmutableSortedSet.Builder<>(String.CASE_INSENSITIVE_ORDER)
@@ -43,19 +61,20 @@ public class OdbcScalarFunctionCall {
                     .add("user").add("database").add("current_user").build();
 
     public OdbcScalarFunctionCall(Expr function) {
+        this.pos = function.getPos();
         this.function = function;
     }
 
-    public Expr mappingFunction() throws AnalysisException {
+    public Expr mappingFunction() {
         if (!(function instanceof FunctionCallExpr)) {
-            throw new AnalysisException("unsupported odbc expr.");
+            throw new ParsingException(PARSER_ERROR_MSG.invalidOdbcFunc(function.toSql()), function.getPos());
         }
         FunctionCallExpr functionCallExpr = (FunctionCallExpr) function;
         String fnName = functionCallExpr.getFnName().getFunction();
 
         // for information function
         if (ODBC_SCALAR_INFORMATION_FUNCTIONS.contains(fnName)) {
-            return new InformationFunction(fnName);
+            return new InformationFunction(fnName, function.getPos());
         }
 
         if (ODBC_SCALAR_STRING_FUNCTIONS.contains(fnName) || ODBC_SCALAR_NUMERIC_FUNCTIONS.contains(fnName) ||
@@ -63,7 +82,11 @@ public class OdbcScalarFunctionCall {
             return function;
         }
 
-        throw new AnalysisException("invalid odbc scalar function:" + fnName);
+        throw new ParsingException(PARSER_ERROR_MSG.invalidOdbcFunc(function.toSql()), function.getPos());
     }
 
+    @Override
+    public NodePosition getPos() {
+        return pos;
+    }
 }

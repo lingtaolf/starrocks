@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/mysql/MysqlAuthPacket.java
 
@@ -66,6 +79,14 @@ public class MysqlAuthPacket extends MysqlPacket {
         return pluginName;
     }
 
+    public boolean isSSLConnRequest() {
+        return capability.isSSL();
+    }
+
+    public Map<String, String> getConnectAttributes() {
+        return connectAttributes;
+    }
+
     @Override
     public boolean readFrom(ByteBuffer buffer) {
         // read capability four byte, which CLIENT_PROTOCOL_41 must be set
@@ -79,6 +100,11 @@ public class MysqlAuthPacket extends MysqlPacket {
         characterSet = MysqlProto.readInt1(buffer);
         // reserved 23 bytes
         buffer.position(buffer.position() + 23);
+
+        // if the request is a ssl request, the package is truncated here.
+        if (buffer.remaining() <= 0 && capability.isSSL()) {
+            return true;
+        }
         // user name
         userName = new String(MysqlProto.readNulTerminateString(buffer));
         if (capability.isPluginAuthDataLengthEncoded()) {
@@ -97,7 +123,7 @@ public class MysqlAuthPacket extends MysqlPacket {
         if (buffer.remaining() > 0 && capability.isPluginAuth()) {
             pluginName = new String(MysqlProto.readNulTerminateString(buffer));
         }
-        // connect attrs, no use now.
+        // connect attrs
         if (buffer.remaining() > 0 && capability.isConnectAttrs()) {
             connectAttributes = parseConnectAttrs(buffer);
         }
@@ -110,7 +136,8 @@ public class MysqlAuthPacket extends MysqlPacket {
     }
 
     private Map<String, String> parseConnectAttrs(ByteBuffer buffer) {
-        String key = "", value = "";
+        String key = "";
+        String value = "";
         connectAttributes = Maps.newHashMap();
         try {
             long allAttrLength = MysqlProto.readVInt(buffer);

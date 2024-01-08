@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/qe/VariableVarConverters.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -32,16 +28,18 @@ import java.util.Map;
 // with specified name.
 public class VariableVarConverters {
 
-    public static final Map<String, VariableVarConverterI> converters = Maps.newHashMap();
+    public static final Map<String, VariableVarConverterI> CONVERTERS = Maps.newHashMap();
 
     static {
         SqlModeConverter sqlModeConverter = new SqlModeConverter();
-        converters.put(SessionVariable.SQL_MODE, sqlModeConverter);
+        CONVERTERS.put(SessionVariable.SQL_MODE, sqlModeConverter);
+        PartialUpdateModeConverter partialUpdateModeConverter = new PartialUpdateModeConverter();
+        CONVERTERS.put(SessionVariable.PARTIAL_UPDATE_MODE, partialUpdateModeConverter);
     }
 
     public static String convert(String varName, String value) throws DdlException {
-        if (converters.containsKey(varName)) {
-            return converters.get(varName).convert(value);
+        if (CONVERTERS.containsKey(varName)) {
+            return CONVERTERS.get(varName).convert(value);
         }
         return value;
     }
@@ -53,6 +51,18 @@ public class VariableVarConverters {
         @Override
         public String convert(String value) throws DdlException {
             return SqlModeHelper.encode(value).toString();
+        }
+    }
+
+    // Converter to convert and check var `partial_update_mode`
+    public static class PartialUpdateModeConverter implements VariableVarConverterI {
+        @Override
+        public String convert(String value) throws DdlException {
+            if (value.equals("auto") || value.equals("row") || value.equals("column")) {
+                return value;
+            } else {
+                throw new DdlException("partial_update_mode only support auto|row|column");
+            }
         }
     }
 }

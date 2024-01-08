@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/DiskInfo.java
 
@@ -21,8 +34,8 @@
 
 package com.starrocks.catalog;
 
+import com.google.gson.annotations.SerializedName;
 import com.starrocks.common.Config;
-import com.starrocks.common.FeMetaVersion;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.thrift.TStorageMedium;
@@ -34,19 +47,30 @@ import java.io.DataOutput;
 import java.io.IOException;
 
 public class DiskInfo implements Writable {
-    private static final Logger LOG = LogManager.getLogger(DiskInfo.class);
-
     public enum DiskState {
         ONLINE,
-        OFFLINE
+        // Reported from BE, if disk is detected as unavailable, state will be OFFLINE.
+        // Tablets on OFFLINE disk will be dropped.
+        OFFLINE,
+        // Set by user, tablets on DISABLED disk will be dropped.
+        DISABLED,
+        // Set by user, tablets on DECOMMISSIONED disk will be cloned to other backends.
+        // Before the decommission finish, the disk is still usable, i.e. can provide read and write capability.
+        DECOMMISSIONED
     }
 
+    private static final Logger LOG = LogManager.getLogger(DiskInfo.class);
     private static final long DEFAULT_CAPACITY_B = 1024 * 1024 * 1024 * 1024L; // 1T
 
+    @SerializedName(value = "r")
     private String rootPath;
+    @SerializedName(value = "t")
     private long totalCapacityB;
+    @SerializedName(value = "u")
     private long dataUsedCapacityB;
+    @SerializedName(value = "a")
     private long diskAvailableCapacityB;
+    @SerializedName(value = "s")
     private DiskState state;
 
     // path hash and storage medium are reported from Backend and no need to persist
@@ -61,7 +85,7 @@ public class DiskInfo implements Writable {
         this.rootPath = rootPath;
         this.totalCapacityB = DEFAULT_CAPACITY_B;
         this.dataUsedCapacityB = 0;
-        this.diskAvailableCapacityB = DEFAULT_CAPACITY_B;
+        this.diskAvailableCapacityB = totalCapacityB;
         this.state = DiskState.ONLINE;
         this.pathHash = 0;
         this.storageMedium = TStorageMedium.HDD;
@@ -77,6 +101,15 @@ public class DiskInfo implements Writable {
 
     public void setTotalCapacityB(long totalCapacityB) {
         this.totalCapacityB = totalCapacityB;
+    }
+
+    /**
+     * OtherUsed (totalCapacityB - diskAvailableCapacityB - dataUsedCapacityB) may hold a lot of disk space,
+     * disk usage percent = DataUsedCapacityB / TotalCapacityB in balance,
+     * using dataUsedCapacityB + diskAvailableCapacityB as total capacity is more reasonable.
+     */
+    public long getDataTotalCapacityB() {
+        return dataUsedCapacityB + diskAvailableCapacityB;
     }
 
     public long getDataUsedCapacityB() {
@@ -101,6 +134,14 @@ public class DiskInfo implements Writable {
 
     public DiskState getState() {
         return state;
+    }
+
+    public boolean canReadWrite() {
+        return state == DiskState.ONLINE || state == DiskState.DECOMMISSIONED;
+    }
+
+    public boolean canCreateTablet() {
+        return state == DiskState.ONLINE;
     }
 
     // return true if changed
@@ -134,28 +175,32 @@ public class DiskInfo implements Writable {
 
     /*
      * Check if this disk's capacity reach the limit. Return true if yes.
-     * if floodStage is true, use floodStage threshold to check.
-     *      floodStage threshold means a loosely limit, and we use 'AND' to give a more loosely limit.
+     * If usingHardLimit is true, use usingHardLimit threshold to check.
      */
-    public boolean exceedLimit(boolean floodStage) {
-        LOG.debug("flood stage: {}, diskAvailableCapacityB: {}, totalCapacityB: {}",
-                floodStage, diskAvailableCapacityB, totalCapacityB);
-        if (floodStage) {
-            return diskAvailableCapacityB < Config.storage_flood_stage_left_capacity_bytes &&
-                    (double) (totalCapacityB - diskAvailableCapacityB) / totalCapacityB >
-                            (Config.storage_flood_stage_usage_percent / 100.0);
+    public static boolean exceedLimit(long currentAvailCapacityB, long totalCapacityB, boolean usingHardLimit) {
+        if (usingHardLimit) {
+            return currentAvailCapacityB < Config.storage_usage_hard_limit_reserve_bytes &&
+                    (double) (totalCapacityB - currentAvailCapacityB) / totalCapacityB >
+                            (Config.storage_usage_hard_limit_percent / 100.0);
         } else {
-            return diskAvailableCapacityB < Config.storage_min_left_capacity_bytes ||
-                    (double) (totalCapacityB - diskAvailableCapacityB) / totalCapacityB >
-                            (Config.storage_high_watermark_usage_percent / 100.0);
+            return currentAvailCapacityB < Config.storage_usage_soft_limit_reserve_bytes &&
+                    (double) (totalCapacityB - currentAvailCapacityB) / totalCapacityB >
+                            (Config.storage_usage_soft_limit_percent / 100.0);
         }
+    }
+
+    public boolean exceedLimit(boolean usingHardLimit) {
+        LOG.debug("using hard limit: {}, diskAvailableCapacityB: {}, totalCapacityB: {}",
+                usingHardLimit, diskAvailableCapacityB, totalCapacityB);
+        return DiskInfo.exceedLimit(diskAvailableCapacityB, totalCapacityB, usingHardLimit);
     }
 
     @Override
     public String toString() {
         return "DiskInfo [rootPath=" + rootPath + "(" + pathHash + "), totalCapacityB=" + totalCapacityB
-                + ", dataUsedCapacityB=" + dataUsedCapacityB + ", diskAvailableCapacityB="
-                + diskAvailableCapacityB + ", state=" + state + ", medium: " + storageMedium + "]";
+                + ", dataTotalCapacityB=" + getDataTotalCapacityB() + ", dataUsedCapacityB=" + dataUsedCapacityB
+                + ", diskAvailableCapacityB=" + diskAvailableCapacityB + ", state=" + state
+                + ", medium: " + storageMedium + "]";
     }
 
     @Override
@@ -170,14 +215,8 @@ public class DiskInfo implements Writable {
     public void readFields(DataInput in) throws IOException {
         this.rootPath = Text.readString(in);
         this.totalCapacityB = in.readLong();
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_36) {
-            this.dataUsedCapacityB = in.readLong();
-            this.diskAvailableCapacityB = in.readLong();
-        } else {
-            long availableCapacityB = in.readLong();
-            this.dataUsedCapacityB = this.totalCapacityB - availableCapacityB;
-            this.diskAvailableCapacityB = availableCapacityB;
-        }
+        this.dataUsedCapacityB = in.readLong();
+        this.diskAvailableCapacityB = in.readLong();
         this.state = DiskState.valueOf(Text.readString(in));
     }
 

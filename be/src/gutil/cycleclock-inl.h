@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/gutil/cycleclock-inl.h
-
 // Copyright (C) 1999-2007 Google, Inc.
 //
 // Licensed to the Apache Software Foundation (ASF) under one
@@ -35,8 +31,7 @@
 // with modifications by m3b.  See also
 //    https://setisvn.ssl.berkeley.edu/svn/lib/fftw-3.0.1/kernel/cycle.h
 
-#ifndef GUTIL_CYCLECLOCK_INL_H_
-#define GUTIL_CYCLECLOCK_INL_H_
+#pragma once
 
 #include <sys/time.h>
 
@@ -212,5 +207,3 @@ inline int64 CycleClock::Now() {
 // available.
 #error You need to define CycleTimer for your O/S and CPU
 #endif
-
-#endif // GUTIL_CYCLECLOCK_INL_H_

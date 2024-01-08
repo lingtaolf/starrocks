@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/persist/gson/GsonSerializationTest.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -30,6 +26,9 @@ import com.google.common.collect.Multimap;
 import com.google.common.collect.Sets;
 import com.google.common.collect.Table;
 import com.google.gson.annotations.SerializedName;
+import com.starrocks.catalog.Column;
+import com.starrocks.catalog.MaterializedIndexMeta;
+import com.starrocks.common.io.FastByteArrayOutputStream;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.persist.gson.GsonSerializationTest.Key.MyEnum;
@@ -49,6 +48,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+
+import static com.starrocks.catalog.KeysType.PRIMARY_KEYS;
+import static com.starrocks.thrift.TStorageType.COLUMN;
 
 /*
  * This unit test provides examples about how to make a class serializable.
@@ -431,5 +433,80 @@ public class GsonSerializationTest {
         MultiMapClassA readClassA = MultiMapClassA.read(in);
         Assert.assertEquals(Sets.newHashSet(new Key(MyEnum.TYPE_A, "key1"), new Key(MyEnum.TYPE_B, "key2")),
                 readClassA.map.keySet());
+    }
+
+    private static class GsonPrePostProcessTest implements Writable, GsonPreProcessable, GsonPostProcessable {
+        private int a;
+
+        @SerializedName(value = "b")
+        private String b = "";
+
+        public GsonPrePostProcessTest(int a) {
+            this.a = a;
+        }
+
+        @Override
+        public void gsonPreProcess() throws IOException {
+            b = String.valueOf(a);
+        }
+        
+        @Override
+        public void gsonPostProcess() throws IOException {
+            a = Integer.parseInt(b);
+        }
+
+        @Override
+        public void write(DataOutput out) throws IOException {
+            String json = GsonUtils.GSON.toJson(this);
+            System.out.println("write: " + json);
+            Text.writeString(out, json);
+        }
+
+        public static GsonPrePostProcessTest read(DataInput in) throws IOException {
+            String json = Text.readString(in);
+            System.out.println("read: " + json);
+            return GsonUtils.GSON.fromJson(json, GsonPrePostProcessTest.class);
+        }
+    }
+
+    @Test
+    public void testGsonPrePostProcess() throws IOException {
+        GsonPrePostProcessTest prePost = new GsonPrePostProcessTest(2);
+        Assert.assertEquals(2, prePost.a);
+        Assert.assertTrue(prePost.b.equals(""));
+
+        FastByteArrayOutputStream byteArrayOutputStream = new FastByteArrayOutputStream();
+        try (DataOutputStream out = new DataOutputStream(byteArrayOutputStream)) {
+            prePost.write(out);
+            out.flush();
+        }
+
+        GsonPrePostProcessTest newPrePost = null;
+        try (DataInputStream in = new DataInputStream(byteArrayOutputStream.getInputStream())) {
+            newPrePost = GsonPrePostProcessTest.read(in);
+        }
+        byteArrayOutputStream.close();
+
+        Assert.assertEquals(2, newPrePost.a);
+        Assert.assertTrue(newPrePost.b.equals("2"));
+    }
+
+    @Test
+    public void testMaterializedIndexMetaGsonProcess() throws Exception {
+        MaterializedIndexMeta indexMeta = new MaterializedIndexMeta(1, Lists.newArrayList(new Column()), 1, 1,
+                (short) 1, COLUMN, PRIMARY_KEYS, null);
+        FastByteArrayOutputStream byteArrayOutputStream = new FastByteArrayOutputStream();
+        try (DataOutputStream out = new DataOutputStream(byteArrayOutputStream)) {
+            indexMeta.write(out);
+            out.flush();
+        }
+
+        MaterializedIndexMeta copied = null;
+        try (DataInputStream in = new DataInputStream(byteArrayOutputStream.getInputStream())) {
+            copied = MaterializedIndexMeta.read(in);
+        }
+        byteArrayOutputStream.close();
+        Assert.assertTrue(copied.sortKeyIdxes == null);
+        Assert.assertTrue(copied.sortKeyUniqueIds == null);
     }
 }

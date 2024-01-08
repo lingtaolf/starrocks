@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/olap/olap_common.h
 
@@ -19,8 +32,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_OLAP_OLAP_COMMON_H
-#define STARROCKS_BE_SRC_OLAP_OLAP_COMMON_H
+#pragma once
 
 #include <netinet/in.h>
 
@@ -31,6 +43,7 @@
 #include <ostream>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <typeinfo>
 #include <unordered_map>
 #include <unordered_set>
@@ -49,29 +62,44 @@ namespace starrocks {
 static const int64_t MAX_ROWSET_ID = 1L << 56;
 
 typedef int32_t SchemaHash;
-typedef int64_t VersionHash;
 typedef __int128 int128_t;
 typedef unsigned __int128 uint128_t;
 
 typedef UniqueId TabletUid;
 
-enum CompactionType { BASE_COMPACTION = 1, CUMULATIVE_COMPACTION = 2, UPDATE_COMPACTION = 3 };
+enum CompactionType { BASE_COMPACTION = 1, CUMULATIVE_COMPACTION = 2, UPDATE_COMPACTION = 3, INVALID_COMPACTION };
+
+inline std::string to_string(CompactionType type) {
+    switch (type) {
+    case BASE_COMPACTION:
+        return "base";
+    case CUMULATIVE_COMPACTION:
+        return "cumulative";
+    case UPDATE_COMPACTION:
+        return "update";
+    case INVALID_COMPACTION:
+        return "invalid";
+    default:
+        return "unknown";
+    }
+}
 
 struct DataDirInfo {
-    DataDirInfo() : path_hash(0), disk_capacity(1), available(0), data_used_capacity(0), is_used(false) {}
+    DataDirInfo() = default;
 
     std::string path;
-    size_t path_hash;
-    int64_t disk_capacity; // actual disk capacity
-    int64_t available;
-    int64_t data_used_capacity;
-    bool is_used;
+    size_t path_hash{0};
+    int64_t disk_capacity{1}; // actual disk capacity
+    int64_t available{0};
+    int64_t data_used_capacity{0};
+    bool is_used{false};
     TStorageMedium::type storage_medium; // storage medium: SSD|HDD
 };
 
 struct TabletInfo {
-    TabletInfo(TTabletId in_tablet_id, TSchemaHash in_schema_hash, UniqueId in_uid)
+    TabletInfo(TTabletId in_tablet_id, TSchemaHash in_schema_hash, const UniqueId& in_uid)
             : tablet_id(in_tablet_id), schema_hash(in_schema_hash), tablet_uid(in_uid) {}
+    TabletInfo(const TabletInfo& other) = default;
 
     bool operator<(const TabletInfo& right) const {
         if (tablet_id != right.tablet_id) {
@@ -101,207 +129,12 @@ enum RangeCondition {
     LE = 3, // less or equal
 };
 
-enum FieldType {
-    OLAP_FIELD_TYPE_UNKNOWN = 0, // UNKNOW Type
-    OLAP_FIELD_TYPE_TINYINT = 1, // MYSQL_TYPE_TINY
-    OLAP_FIELD_TYPE_UNSIGNED_TINYINT = 2,
-    OLAP_FIELD_TYPE_SMALLINT = 3, // MYSQL_TYPE_SHORT
-    OLAP_FIELD_TYPE_UNSIGNED_SMALLINT = 4,
-    OLAP_FIELD_TYPE_INT = 5, // MYSQL_TYPE_LONG
-    OLAP_FIELD_TYPE_UNSIGNED_INT = 6,
-    OLAP_FIELD_TYPE_BIGINT = 7, // MYSQL_TYPE_LONGLONG
-    OLAP_FIELD_TYPE_UNSIGNED_BIGINT = 8,
-    OLAP_FIELD_TYPE_LARGEINT = 9,
-    OLAP_FIELD_TYPE_FLOAT = 10,  // MYSQL_TYPE_FLOAT
-    OLAP_FIELD_TYPE_DOUBLE = 11, // MYSQL_TYPE_DOUBLE
-    OLAP_FIELD_TYPE_DISCRETE_DOUBLE = 12,
-    OLAP_FIELD_TYPE_CHAR = 13,     // MYSQL_TYPE_STRING
-    OLAP_FIELD_TYPE_DATE = 14,     // MySQL_TYPE_NEWDATE
-    OLAP_FIELD_TYPE_DATETIME = 15, // MySQL_TYPE_DATETIME
-    OLAP_FIELD_TYPE_DECIMAL = 16,  // DECIMAL, using different store format against MySQL
-    OLAP_FIELD_TYPE_VARCHAR = 17,
-
-    OLAP_FIELD_TYPE_STRUCT = 18, // Struct
-    OLAP_FIELD_TYPE_ARRAY = 19,  // ARRAY
-    OLAP_FIELD_TYPE_MAP = 20,    // Map
-    OLAP_FIELD_TYPE_NONE = 22,
-    OLAP_FIELD_TYPE_HLL = 23,
-    OLAP_FIELD_TYPE_BOOL = 24,
-    OLAP_FIELD_TYPE_OBJECT = 25,
-
-    // Added by StarRocks
-    // Reserved some field for commutiy version
-
-    // decimal v3 type
-    OLAP_FIELD_TYPE_DECIMAL32 = 47,
-    OLAP_FIELD_TYPE_DECIMAL64 = 48,
-    OLAP_FIELD_TYPE_DECIMAL128 = 49,
-    OLAP_FIELD_TYPE_DATE_V2 = 50,
-    OLAP_FIELD_TYPE_TIMESTAMP = 51,
-    OLAP_FIELD_TYPE_DECIMAL_V2 = 52,
-    OLAP_FIELD_TYPE_PERCENTILE = 53,
-
-    // max value of FieldType, newly-added type should not exceed this value.
-    // used to create a fixed-size hash map.
-    OLAP_FIELD_TYPE_MAX_VALUE = 54
-};
-
-inline const char* field_type_to_string(FieldType type) {
-    switch (type) {
-    case OLAP_FIELD_TYPE_TINYINT:
-        return "TINYINT";
-    case OLAP_FIELD_TYPE_UNSIGNED_TINYINT:
-        return "UNSIGNED TINYINT";
-    case OLAP_FIELD_TYPE_SMALLINT:
-        return "SMALLINT";
-    case OLAP_FIELD_TYPE_UNSIGNED_SMALLINT:
-        return "UNSIGNED SMALLINT";
-    case OLAP_FIELD_TYPE_INT:
-        return "INT";
-    case OLAP_FIELD_TYPE_UNSIGNED_INT:
-        return "UNSIGNED INT";
-    case OLAP_FIELD_TYPE_BIGINT:
-        return "BIGINT";
-    case OLAP_FIELD_TYPE_UNSIGNED_BIGINT:
-        return "UNSIGNED BIGINT";
-    case OLAP_FIELD_TYPE_LARGEINT:
-        return "LARGEINT";
-    case OLAP_FIELD_TYPE_FLOAT:
-        return "FLOAT";
-    case OLAP_FIELD_TYPE_DOUBLE:
-        return "DOUBLE";
-    case OLAP_FIELD_TYPE_DISCRETE_DOUBLE:
-        return "DISCRETE DOUBLE";
-    case OLAP_FIELD_TYPE_CHAR:
-        return "CHAR";
-    case OLAP_FIELD_TYPE_DATE:
-        return "DATE";
-    case OLAP_FIELD_TYPE_DATETIME:
-        return "DATETIME";
-    case OLAP_FIELD_TYPE_DECIMAL:
-        return "DECIMAL";
-    case OLAP_FIELD_TYPE_VARCHAR:
-        return "VARCHAR";
-    case OLAP_FIELD_TYPE_STRUCT:
-        return "STRUCT";
-    case OLAP_FIELD_TYPE_ARRAY:
-        return "ARRAY";
-    case OLAP_FIELD_TYPE_MAP:
-        return "MAP";
-    case OLAP_FIELD_TYPE_UNKNOWN:
-        return "UNKNOWN";
-    case OLAP_FIELD_TYPE_NONE:
-        return "NONE";
-    case OLAP_FIELD_TYPE_HLL:
-        return "HLL";
-    case OLAP_FIELD_TYPE_BOOL:
-        return "BOOL";
-    case OLAP_FIELD_TYPE_OBJECT:
-        return "OBJECT";
-    case OLAP_FIELD_TYPE_DECIMAL32:
-        return "DECIMAL32";
-    case OLAP_FIELD_TYPE_DECIMAL64:
-        return "DECIMAL64";
-    case OLAP_FIELD_TYPE_DECIMAL128:
-        return "DECIMAL128";
-    case OLAP_FIELD_TYPE_DATE_V2:
-        return "DATE V2";
-    case OLAP_FIELD_TYPE_TIMESTAMP:
-        return "TIMESTAMP";
-    case OLAP_FIELD_TYPE_DECIMAL_V2:
-        return "DECIMAL V2";
-    case OLAP_FIELD_TYPE_PERCENTILE:
-        return "PERCENTILE";
-    case OLAP_FIELD_TYPE_MAX_VALUE:
-        return "MAX VALUE";
-    }
-    return "";
-}
-
-inline std::ostream& operator<<(std::ostream& os, FieldType type) {
-    os << field_type_to_string(type);
-    return os;
-}
-
-enum FieldAggregationMethod {
-    OLAP_FIELD_AGGREGATION_NONE = 0,
-    OLAP_FIELD_AGGREGATION_SUM = 1,
-    OLAP_FIELD_AGGREGATION_MIN = 2,
-    OLAP_FIELD_AGGREGATION_MAX = 3,
-    OLAP_FIELD_AGGREGATION_REPLACE = 4,
-    OLAP_FIELD_AGGREGATION_HLL_UNION = 5,
-    OLAP_FIELD_AGGREGATION_UNKNOWN = 6,
-    OLAP_FIELD_AGGREGATION_BITMAP_UNION = 7,
-    // Replace if and only if added value is not null
-    OLAP_FIELD_AGGREGATION_REPLACE_IF_NOT_NULL = 8,
-    OLAP_FIELD_AGGREGATION_PERCENTILE_UNION = 9
-};
-
-inline const char* aggregation_method_to_string(FieldAggregationMethod method) {
-    switch (method) {
-    case OLAP_FIELD_AGGREGATION_NONE:
-        return "NONE";
-    case OLAP_FIELD_AGGREGATION_SUM:
-        return "SUM";
-    case OLAP_FIELD_AGGREGATION_MIN:
-        return "MIN";
-    case OLAP_FIELD_AGGREGATION_MAX:
-        return "MAX";
-    case OLAP_FIELD_AGGREGATION_REPLACE:
-        return "REPLACE";
-    case OLAP_FIELD_AGGREGATION_HLL_UNION:
-        return "HLL_UNION";
-    case OLAP_FIELD_AGGREGATION_UNKNOWN:
-        return "UNKNOWN";
-    case OLAP_FIELD_AGGREGATION_BITMAP_UNION:
-        return "BITMAP_UNION";
-    case OLAP_FIELD_AGGREGATION_REPLACE_IF_NOT_NULL:
-        return "REPLACE_IF_NOT_NULL";
-    case OLAP_FIELD_AGGREGATION_PERCENTILE_UNION:
-        return "PERCENTILE_UNION";
-    }
-    return "";
-}
-
-template <FieldType TYPE>
-inline constexpr FieldType DelegateType = TYPE;
-template <>
-inline constexpr FieldType DelegateType<OLAP_FIELD_TYPE_DECIMAL32> = OLAP_FIELD_TYPE_INT;
-template <>
-inline constexpr FieldType DelegateType<OLAP_FIELD_TYPE_DECIMAL64> = OLAP_FIELD_TYPE_BIGINT;
-template <>
-inline constexpr FieldType DelegateType<OLAP_FIELD_TYPE_DECIMAL128> = OLAP_FIELD_TYPE_LARGEINT;
-
-inline FieldType delegate_type(FieldType type) {
-    switch (type) {
-    case OLAP_FIELD_TYPE_DECIMAL32:
-        return OLAP_FIELD_TYPE_INT;
-    case OLAP_FIELD_TYPE_DECIMAL64:
-        return OLAP_FIELD_TYPE_BIGINT;
-    case OLAP_FIELD_TYPE_DECIMAL128:
-        return OLAP_FIELD_TYPE_LARGEINT;
-    default:
-        return type;
-    }
-}
-
-inline bool is_string_type(FieldType type) {
-    return type == FieldType::OLAP_FIELD_TYPE_CHAR || type == FieldType::OLAP_FIELD_TYPE_VARCHAR;
-}
-
-inline bool is_decimalv3_field_type(FieldType type) {
-    return type == OLAP_FIELD_TYPE_DECIMAL32 || type == OLAP_FIELD_TYPE_DECIMAL64 || type == OLAP_FIELD_TYPE_DECIMAL128;
-}
-
-inline std::ostream& operator<<(std::ostream& os, FieldAggregationMethod method) {
-    os << aggregation_method_to_string(method);
-    return os;
-}
-
-enum OLAPCompressionType {
-    OLAP_COMP_TRANSPORT = 1,
-    OLAP_COMP_STORAGE = 2,
-    OLAP_COMP_LZ4 = 3,
+enum MaterializeType {
+    OLAP_MATERIALIZE_TYPE_UNKNOWN = 0,
+    OLAP_MATERIALIZE_TYPE_PERCENTILE = 1,
+    OLAP_MATERIALIZE_TYPE_HLL = 2,
+    OLAP_MATERIALIZE_TYPE_BITMAP = 3,
+    OLAP_MATERIALIZE_TYPE_COUNT = 4
 };
 
 enum PushType {
@@ -329,11 +162,13 @@ inline bool is_compaction(ReaderType reader_type) {
 //using Version = std::pair<TupleVersion, TupleVersion>;
 
 struct Version {
-    int64_t first;
-    int64_t second;
+    int64_t first{0};
+    int64_t second{0};
 
     Version(int64_t first_, int64_t second_) : first(first_), second(second_) {}
-    Version() : first(0), second(0) {}
+    Version() = default;
+
+    Version& operator=(const Version& version) = default;
 
     friend std::ostream& operator<<(std::ostream& os, const Version& version);
 
@@ -342,6 +177,18 @@ struct Version {
     bool operator==(const Version& rhs) const { return first == rhs.first && second == rhs.second; }
 
     bool contains(const Version& other) const { return first <= other.first && second >= other.second; }
+
+    bool operator<(const Version& rhs) const {
+        if (second < rhs.second) {
+            return true;
+        } else if (second > rhs.second) {
+            return false;
+        } else {
+            // version with bigger first will be smaller.
+            // design this for fast search in _contains_version() in tablet.cpp.
+            return first > rhs.first;
+        }
+    }
 };
 
 typedef std::vector<Version> Versions;
@@ -360,21 +207,9 @@ struct HashOfVersion {
     }
 };
 
-// It is used to represent Graph vertex.
-struct Vertex {
-    int64_t value = 0;
-    std::list<int64_t> edges;
-
-    Vertex(int64_t v) : value(v) {}
-};
-
-class Field;
-class WrapperField;
-using KeyRange = std::pair<WrapperField*, WrapperField*>;
-
 // ReaderStatistics used to collect statistics when scan data from storage
 struct OlapReaderStatistics {
-    int64_t capture_rowset_ns = 0;
+    int64_t create_segment_iter_ns = 0;
     int64_t io_ns = 0;
     int64_t compressed_bytes_read = 0;
 
@@ -389,7 +224,6 @@ struct OlapReaderStatistics {
     int64_t block_fetch_ns = 0; // time of rowset reader's `next_batch()` call
     int64_t block_seek_num = 0;
     int64_t block_seek_ns = 0;
-    int64_t block_convert_ns = 0;
 
     int64_t decode_dict_ns = 0;
     int64_t late_materialize_ns = 0;
@@ -400,17 +234,27 @@ struct OlapReaderStatistics {
     int64_t vec_cond_ns = 0;
     int64_t vec_cond_evaluate_ns = 0;
     int64_t vec_cond_chunk_copy_ns = 0;
+    int64_t branchless_cond_evaluate_ns = 0;
+    int64_t expr_cond_evaluate_ns = 0;
 
+    int64_t get_rowsets_ns = 0;
+    int64_t get_delvec_ns = 0;
+    int64_t get_delta_column_group_ns = 0;
     int64_t segment_init_ns = 0;
-    int64_t segment_create_chunk_ns = 0;
+    int64_t column_iterator_init_ns = 0;
+    int64_t bitmap_index_iterator_init_ns = 0;
+    int64_t zone_map_filter_ns = 0;
+    int64_t rows_key_range_filter_ns = 0;
+    int64_t bf_filter_ns = 0;
 
+    int64_t segment_stats_filtered = 0;
     int64_t rows_key_range_filtered = 0;
+    int64_t rows_after_key_range = 0;
+    int64_t rows_key_range_num = 0;
     int64_t rows_stats_filtered = 0;
     int64_t rows_bf_filtered = 0;
     int64_t rows_del_filtered = 0;
     int64_t del_filter_ns = 0;
-
-    int64_t index_load_ns = 0;
 
     int64_t total_pages_num = 0;
     int64_t cached_pages_num = 0;
@@ -419,9 +263,49 @@ struct OlapReaderStatistics {
     int64_t bitmap_index_filter_timer = 0;
 
     int64_t rows_del_vec_filtered = 0;
+
+    int64_t rowsets_read_count = 0;
+    int64_t segments_read_count = 0;
+    int64_t total_columns_data_page_count = 0;
+
+    int64_t runtime_stats_filtered = 0;
+
+    int64_t read_pk_index_ns = 0;
+
+    // ------ for lake tablet ------
+    int64_t pages_from_local_disk = 0;
+
+    int64_t compressed_bytes_read_local_disk = 0;
+    int64_t compressed_bytes_read_remote = 0;
+    // bytes read requested from be, same as compressed_bytes_read for local tablet
+    int64_t compressed_bytes_read_request = 0;
+
+    int64_t io_count = 0;
+    int64_t io_count_local_disk = 0;
+    int64_t io_count_remote = 0;
+    int64_t io_count_request = 0;
+
+    int64_t io_ns_local_disk = 0;
+    int64_t io_ns_remote = 0;
+
+    int64_t prefetch_hit_count = 0;
+    int64_t prefetch_wait_finish_ns = 0;
+    int64_t prefetch_pending_ns = 0;
+    // ------ for lake tablet ------
 };
 
+const char* const kBytesReadLocalDisk = "bytes_read_local_disk";
+const char* const kBytesReadRemote = "bytes_read_remote";
+const char* const kIOCountLocalDisk = "io_count_local_disk";
+const char* const kIOCountRemote = "io_count_remote";
+const char* const kIONsLocalDisk = "io_ns_local_disk";
+const char* const kIONsRemote = "io_ns_remote";
+const char* const kPrefetchHitCount = "prefetch_hit_count";
+const char* const kPrefetchWaitFinishNs = "prefetch_wait_finish_ns";
+const char* const kPrefetchPendingNs = "prefetch_pending_ns";
+
 typedef uint32_t ColumnId;
+typedef int32_t ColumnUID;
 // Column unique id set
 typedef std::set<uint32_t> UniqueIdSet;
 // Column unique Id -> column id map
@@ -436,28 +320,13 @@ struct RowsetId {
     int64_t mi = 0;
     int64_t lo = 0;
 
-    void init(const std::string& rowset_id_str) {
-        // for new rowsetid its a 48 hex string
-        // if the len < 48, then it is an old format rowset id
-        if (rowset_id_str.length() < 48) {
-            int64_t high = std::stol(rowset_id_str, nullptr, 10);
-            init(1, high, 0, 0);
-        } else {
-            int64_t high = 0;
-            int64_t middle = 0;
-            int64_t low = 0;
-            from_hex(&high, rowset_id_str.substr(0, 16));
-            from_hex(&middle, rowset_id_str.substr(16, 16));
-            from_hex(&low, rowset_id_str.substr(32, 16));
-            init(high >> 56, high & LOW_56_BITS, middle, low);
-        }
-    }
+    void init(std::string_view rowset_id_str);
 
     // to compatiable with old version
     void init(int64_t rowset_id) { init(1, rowset_id, 0, 0); }
 
     void init(int64_t id_version, int64_t high, int64_t middle, int64_t low) {
-        version = id_version;
+        version = static_cast<int8_t>(id_version);
         if (UNLIKELY(high >= MAX_ROWSET_ID)) {
             LOG(FATAL) << "inc rowsetid is too large:" << high;
         }
@@ -477,6 +346,8 @@ struct RowsetId {
             return {buf, 48};
         }
     }
+
+    int64_t id() { return hi & LOW_56_BITS; }
 
     // std::unordered_map need this api
     bool operator==(const RowsetId& rhs) const { return hi == rhs.hi && mi == rhs.mi && lo == rhs.lo; }
@@ -502,14 +373,49 @@ struct RowsetId {
 struct TabletSegmentId {
     int64_t tablet_id = INT64_MAX;
     uint32_t segment_id = UINT32_MAX;
+    TabletSegmentId() {}
+    TabletSegmentId(int64_t tid, uint32_t sid) : tablet_id(tid), segment_id(sid) {}
+    ~TabletSegmentId() {}
     bool operator==(const TabletSegmentId& rhs) const {
         return tablet_id == rhs.tablet_id && segment_id == rhs.segment_id;
+    }
+    bool operator<(const TabletSegmentId& rhs) const {
+        if (tablet_id < rhs.tablet_id) {
+            return true;
+        } else if (tablet_id > rhs.tablet_id) {
+            return false;
+        } else {
+            return segment_id < rhs.segment_id;
+        }
     }
     std::string to_string() const {
         std::stringstream ss;
         ss << tablet_id << "_" << segment_id;
         return ss.str();
     };
+    friend std::ostream& operator<<(std::ostream& out, const TabletSegmentId& tsid) {
+        out << tsid.to_string();
+        return out;
+    }
+};
+
+struct TabletSegmentIdRange {
+    TabletSegmentId left;
+    TabletSegmentId right;
+    TabletSegmentIdRange(int64_t left_tid, uint32_t left_sid, int64_t right_tid, uint32_t right_sid)
+            : left(left_tid, left_sid), right(right_tid, right_sid) {}
+    ~TabletSegmentIdRange() {}
+    // make sure left <= right
+    bool is_valid() const { return left < right || left == right; }
+    std::string to_string() const {
+        std::stringstream ss;
+        ss << "[" << left.to_string() << "," << right.to_string() << "]";
+        return ss.str();
+    };
+    friend std::ostream& operator<<(std::ostream& out, const TabletSegmentIdRange& tsid_range) {
+        out << tsid_range.to_string();
+        return out;
+    }
 };
 
 } // namespace starrocks
@@ -522,5 +428,3 @@ struct hash<starrocks::TabletSegmentId> {
     }
 };
 } // namespace std
-
-#endif // STARROCKS_BE_SRC_OLAP_OLAP_COMMON_H

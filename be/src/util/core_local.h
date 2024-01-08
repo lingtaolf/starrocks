@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/util/core_local.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -30,24 +26,26 @@
 
 #include "common/compiler_util.h"
 #include "gutil/macros.h"
+#include "util/cpu_info.h"
 
 namespace starrocks {
 
 class CoreDataAllocator {
 public:
-    virtual ~CoreDataAllocator() {}
+    virtual ~CoreDataAllocator() = default;
     virtual void* get_or_create(size_t id) = 0;
 };
 
 class CoreDataAllocatorFactory {
 public:
-    CoreDataAllocatorFactory() {}
+    CoreDataAllocatorFactory() = default;
     ~CoreDataAllocatorFactory();
     CoreDataAllocator* get_allocator(size_t cpu_id, size_t data_bytes);
     static CoreDataAllocatorFactory* instance();
 
 private:
-    DISALLOW_COPY_AND_ASSIGN(CoreDataAllocatorFactory);
+    CoreDataAllocatorFactory(const CoreDataAllocatorFactory&) = delete;
+    const CoreDataAllocatorFactory& operator=(const CoreDataAllocatorFactory&) = delete;
 
 private:
     std::mutex _lock;
@@ -69,7 +67,7 @@ public:
         }
     }
 
-    ~CoreLocalValueController() {}
+    ~CoreLocalValueController() = default;
 
     int get_id() {
         std::lock_guard<std::mutex> l(_lock);
@@ -95,7 +93,8 @@ public:
     }
 
 private:
-    DISALLOW_COPY_AND_ASSIGN(CoreLocalValueController);
+    CoreLocalValueController(const CoreLocalValueController&) = delete;
+    const CoreLocalValueController& operator=(const CoreLocalValueController&) = delete;
 
 private:
     std::mutex _lock;
@@ -119,7 +118,7 @@ public:
         }
     }
 
-    ~CoreLocalValue() {
+    ~CoreLocalValue() noexcept {
         for (int i = 0; i < _size; ++i) {
             _values[i]->~T();
         }

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/qe/ShowResultSet.java
 
@@ -31,8 +44,9 @@ import com.starrocks.thrift.TShowResultSetMetaData;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 // Result set of show statement.
 // Redefine ResultSet now, because JDBC is too complicated.
@@ -86,19 +100,23 @@ public class ShowResultSet {
     }
 
     public byte getByte(int col) {
-        return Byte.valueOf(getString(col));
+        return Byte.parseByte(getString(col));
     }
 
     public int getInt(int col) {
-        return Integer.valueOf(getString(col));
+        return Integer.parseInt(getString(col));
     }
 
     public long getLong(int col) {
-        return Long.valueOf(getString(col));
+        return Long.parseLong(getString(col));
     }
 
     public short getShort(int col) {
-        return Short.valueOf(getString(col));
+        return Short.parseShort(getString(col));
+    }
+
+    public int numColumns() {
+        return metaData.getColumnCount();
     }
 
     public TShowResultSet tothrift() {
@@ -112,11 +130,8 @@ public class ShowResultSet {
         }
 
         set.resultRows = Lists.newArrayList();
-        for (int i = 0; i < resultRows.size(); i++) {
-            ArrayList<String> list = Lists.newArrayList();
-            for (int j = 0; j < resultRows.get(i).size(); j++) {
-                list.add(resultRows.get(i).get(j));
-            }
+        for (List<String> resultRow : resultRows) {
+            List<String> list = resultRow.stream().map(x -> Objects.toString(x, "")).collect(Collectors.toList());
             set.resultRows.add(list);
         }
         return set;

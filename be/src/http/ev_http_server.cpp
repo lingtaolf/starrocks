@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/http/ev_http_server.cpp
 
@@ -30,6 +43,7 @@
 
 #include <memory>
 #include <sstream>
+#include <utility>
 
 #include "common/logging.h"
 #include "http/http_channel.h"
@@ -38,16 +52,18 @@
 #include "http/http_request.h"
 #include "service/brpc.h"
 #include "util/debug_util.h"
+#include "util/errno.h"
+#include "util/thread.h"
 
 namespace starrocks {
 
 static void on_chunked(struct evhttp_request* ev_req, void* param) {
-    HttpRequest* request = (HttpRequest*)ev_req->on_free_cb_arg;
+    auto* request = (HttpRequest*)ev_req->on_free_cb_arg;
     request->handler()->on_chunk_data(request);
 }
 
 static void on_free(struct evhttp_request* ev_req, void* arg) {
-    HttpRequest* request = (HttpRequest*)arg;
+    auto* request = (HttpRequest*)arg;
     delete request;
 }
 
@@ -61,7 +77,7 @@ static void on_request(struct evhttp_request* ev_req, void* arg) {
 }
 
 static int on_header(struct evhttp_request* ev_req, void* param) {
-    EvHttpServer* server = (EvHttpServer*)ev_req->on_complete_cb_arg;
+    auto* server = (EvHttpServer*)ev_req->on_complete_cb_arg;
     return server->on_header(ev_req);
 }
 
@@ -80,8 +96,8 @@ EvHttpServer::EvHttpServer(int port, int num_workers)
     DCHECK_EQ(res, 0);
 }
 
-EvHttpServer::EvHttpServer(const std::string& host, int port, int num_workers)
-        : _host(host), _port(port), _num_workers(num_workers), _real_port(0) {
+EvHttpServer::EvHttpServer(std::string host, int port, int num_workers)
+        : _host(std::move(host)), _port(port), _num_workers(num_workers), _real_port(0) {
     DCHECK_GT(_num_workers, 0);
     auto res = pthread_rwlock_init(&_rw_lock, nullptr);
     DCHECK_EQ(res, 0);
@@ -95,41 +111,74 @@ Status EvHttpServer::start() {
     // bind to
     RETURN_IF_ERROR(_bind());
     for (int i = 0; i < _num_workers; ++i) {
-        auto worker = [this, i]() {
-            LOG(INFO) << "EvHttpServer worker start, id=" << i;
-            std::shared_ptr<event_base> base(event_base_new(), [](event_base* base) { event_base_free(base); });
+        auto worker = [this]() {
+            struct event_base* base = event_base_new();
             if (base == nullptr) {
                 LOG(WARNING) << "Couldn't create an event_base.";
                 return;
             }
+            pthread_rwlock_wrlock(&_rw_lock);
+            _event_bases.push_back(base);
+            pthread_rwlock_unlock(&_rw_lock);
+
             /* Create a new evhttp object to handle requests. */
-            std::shared_ptr<evhttp> http(evhttp_new(base.get()), [](evhttp* http) { evhttp_free(http); });
+            struct evhttp* http = evhttp_new(base);
             if (http == nullptr) {
                 LOG(WARNING) << "Couldn't create an evhttp.";
                 return;
             }
-            auto res = evhttp_accept_socket(http.get(), _server_fd);
+
+            pthread_rwlock_wrlock(&_rw_lock);
+            _https.push_back(http);
+            pthread_rwlock_unlock(&_rw_lock);
+
+            auto res = evhttp_accept_socket(http, _server_fd);
             if (res < 0) {
-                LOG(WARNING) << "evhttp accept socket failed";
+                LOG(WARNING) << "evhttp accept socket failed"
+                             << ", error:" << errno_to_string(errno);
                 return;
             }
 
-            evhttp_set_newreqcb(http.get(), on_connection, this);
-            evhttp_set_gencb(http.get(), on_request, this);
+            evhttp_set_newreqcb(http, on_connection, this);
+            evhttp_set_gencb(http, on_request, this);
 
-            event_base_dispatch(base.get());
+            event_base_dispatch(base);
         };
         _workers.emplace_back(worker);
-        _workers[i].detach();
+        Thread::set_thread_name(_workers.back(), "http_server");
     }
     return Status::OK();
 }
 
 void EvHttpServer::stop() {
-    close(_server_fd);
+    // break the base to stop the event
+    for (auto base : _event_bases) {
+        event_base_loopbreak(base);
+    }
+
+    // shutdown the socket to wake up the epoll_wait
+    shutdown(_server_fd, SHUT_RDWR);
 }
 
-void EvHttpServer::join() {}
+void EvHttpServer::join() {
+    for (auto& thread : _workers) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
+    // close the socket at last
+    close(_server_fd);
+
+    // free the evhttp and event_base
+    for (auto http : _https) {
+        evhttp_free(http);
+    }
+
+    for (auto base : _event_bases) {
+        event_base_free(base);
+    }
+}
 
 Status EvHttpServer::_bind() {
     butil::EndPoint point;
@@ -139,12 +188,12 @@ Status EvHttpServer::_bind() {
         ss << "convert address failed, host=" << _host << ", port=" << _port;
         return Status::InternalError(ss.str());
     }
-    _server_fd = butil::tcp_listen(point, true);
+    // reuse_addr arg is removed in brpc 0.9.7 and use gflag instead.
+    // default reuse_addr is true and reuse_port is false.
+    _server_fd = butil::tcp_listen(point);
     if (_server_fd < 0) {
-        char buf[64];
         std::stringstream ss;
-        ss << "tcp listen failed, errno=" << errno << ", errmsg=webserver_port:" << _port << ". "
-           << strerror_r(errno, buf, sizeof(buf));
+        ss << "Failed to listen port. port: " << _port << ", error: " << errno_to_string(errno);
         return Status::InternalError(ss.str());
     }
     if (_port == 0) {
@@ -157,10 +206,8 @@ Status EvHttpServer::_bind() {
     }
     res = butil::make_non_blocking(_server_fd);
     if (res < 0) {
-        char buf[64];
         std::stringstream ss;
-        ss << "make socket to non_blocking failed, errno=" << errno
-           << ", errmsg=" << strerror_r(errno, buf, sizeof(buf));
+        ss << "Failed to generate a non-blocking socket. error: " << errno_to_string(errno);
         return Status::InternalError(ss.str());
     }
     return Status::OK();

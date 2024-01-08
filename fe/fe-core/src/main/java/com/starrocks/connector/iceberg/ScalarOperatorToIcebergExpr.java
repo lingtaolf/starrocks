@@ -1,0 +1,461 @@
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+
+package com.starrocks.connector.iceberg;
+
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
+import com.starrocks.analysis.BoolLiteral;
+import com.starrocks.catalog.PrimitiveType;
+import com.starrocks.common.util.TimeUtils;
+import com.starrocks.connector.exception.StarRocksConnectorException;
+import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
+import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorVisitor;
+import com.starrocks.sql.optimizer.operator.scalar.SubfieldOperator;
+import org.apache.iceberg.exceptions.ValidationException;
+import org.apache.iceberg.expressions.Binder;
+import org.apache.iceberg.expressions.Expression;
+import org.apache.iceberg.expressions.Expressions;
+import org.apache.iceberg.types.Type;
+import org.apache.iceberg.types.Types;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+
+import static org.apache.iceberg.expressions.Expressions.and;
+import static org.apache.iceberg.expressions.Expressions.equal;
+import static org.apache.iceberg.expressions.Expressions.greaterThan;
+import static org.apache.iceberg.expressions.Expressions.greaterThanOrEqual;
+import static org.apache.iceberg.expressions.Expressions.in;
+import static org.apache.iceberg.expressions.Expressions.isNull;
+import static org.apache.iceberg.expressions.Expressions.lessThan;
+import static org.apache.iceberg.expressions.Expressions.lessThanOrEqual;
+import static org.apache.iceberg.expressions.Expressions.not;
+import static org.apache.iceberg.expressions.Expressions.notEqual;
+import static org.apache.iceberg.expressions.Expressions.notIn;
+import static org.apache.iceberg.expressions.Expressions.notNull;
+import static org.apache.iceberg.expressions.Expressions.or;
+import static org.apache.iceberg.expressions.Expressions.startsWith;
+
+/**
+ * Expressions currently supported in Iceberg, maps to StarRocks:
+ * <p>
+ * Supported predicate expressions are:
+ * isNull ->IsNullPredicateOperator(..., false)
+ * notNull ->IsNullPredicateOperator(..., true)
+ * equal -> BinaryPredicateOperator(BinaryPredicateOperator.BinaryType.EQ, ..., ...)
+ * notEqual -> BinaryPredicateOperator(BinaryPredicateOperator.BinaryType.NE, ..., ...)
+ * lessThan -> BinaryPredicateOperator(BinaryPredicateOperator.BinaryType.LT, ..., ...)
+ * lessThanOrEqual -> BinaryPredicateOperator(BinaryPredicateOperator.BinaryType.LE, ..., ...)
+ * greaterThan -> BinaryPredicateOperator(BinaryPredicateOperator.BinaryType.GT, ..., ...)
+ * greaterThanOrEqual -> BinaryPredicateOperator(BinaryPredicateOperator.BinaryType.GE, ..., ...)
+ * in -> InPredicateOperator(..., ..., false)
+ * notIn -> InPredicateOperator(..., ..., true)
+ * startWith -> LikePredicateOperator(LikePredicateOperator.LikeType.LIKE, ..., "prefix%")
+ * <p>
+ * Supported expression operations are:
+ * and -> CompoundPredicateOperator(and, ..., ...)
+ * or -> CompoundPredicateOperator(or, ..., ...)
+ * not -> CompoundPredicateOperator(not, ...)
+ * <p>
+ */
+
+public class ScalarOperatorToIcebergExpr {
+    private static final Logger LOG = LogManager.getLogger(ScalarOperatorToIcebergExpr.class);
+
+    public Expression convert(List<ScalarOperator> operators, IcebergContext context) {
+        IcebergExprVisitor visitor = new IcebergExprVisitor();
+        List<Expression> expressions = Lists.newArrayList();
+        for (ScalarOperator operator : operators) {
+            Expression filterExpr = operator.accept(visitor, context);
+            if (filterExpr != null) {
+                try {
+                    Binder.bind(context.getSchema(), filterExpr, false);
+                    expressions.add(filterExpr);
+                } catch (ValidationException e) {
+                    LOG.error("binding to the table schema failed, cannot be pushed down scanOperator: {}",
+                            operator.debugString());
+                }
+            }
+        }
+
+        LOG.debug("Number of predicates pushed down / Total number of predicates: {}/{}",
+                expressions.size(), operators.size());
+        return expressions.stream().reduce(Expressions.alwaysTrue(), Expressions::and);
+    }
+
+    public static class IcebergContext {
+        private final Types.StructType schema;
+
+        public IcebergContext(Types.StructType schema) {
+            this.schema = schema;
+        }
+
+        public Types.StructType getSchema() {
+            return schema;
+        }
+    }
+
+    private static class IcebergExprVisitor extends ScalarOperatorVisitor<Expression, IcebergContext> {
+
+        private static Type getResultType(String columnName, IcebergContext context) {
+            Preconditions.checkNotNull(context);
+            return getColumnType(columnName, context);
+        }
+
+        private static Type getColumnType(String qualifiedName, IcebergContext context) {
+            String[] paths = qualifiedName.split("\\.");
+            Type type = context.getSchema();
+            for (String path : paths) {
+                type = type.asStructType().fieldType(path);
+            }
+            return type;
+        }
+
+        @Override
+        public Expression visitCompoundPredicate(CompoundPredicateOperator operator, IcebergContext context) {
+            CompoundPredicateOperator.CompoundType op = operator.getCompoundType();
+            if (op == CompoundPredicateOperator.CompoundType.NOT) {
+                if (operator.getChild(0) instanceof LikePredicateOperator) {
+                    return null;
+                }
+                Expression expression = operator.getChild(0).accept(this, context);
+
+                if (expression != null) {
+                    return not(expression);
+                }
+            } else {
+                Expression left = operator.getChild(0).accept(this, context);
+                Expression right = operator.getChild(1).accept(this, context);
+                if (left != null && right != null) {
+                    return (op == CompoundPredicateOperator.CompoundType.OR) ? or(left, right) : and(left, right);
+                }
+            }
+            return null;
+        }
+
+        @Override
+        public Expression visitIsNullPredicate(IsNullPredicateOperator operator, IcebergContext context) {
+            String columnName = getColumnName(operator.getChild(0));
+            if (columnName == null) {
+                return null;
+            }
+            if (operator.isNotNull()) {
+                return notNull(columnName);
+            } else {
+                return isNull(columnName);
+            }
+        }
+
+        @Override
+        public Expression visitBinaryPredicate(BinaryPredicateOperator operator, IcebergContext context) {
+            String columnName = getColumnName(operator.getChild(0));
+            if (columnName == null) {
+                return null;
+            }
+
+            Type icebergType = getResultType(columnName, context);
+            Type.TypeID typeID = icebergType.typeId();
+            Object literalValue = getLiteralValue(operator.getChild(1), icebergType);
+
+            if (literalValue == null) {
+                return null;
+            }
+            if (typeID == Type.TypeID.BOOLEAN) {
+                literalValue = convertBoolLiteralValue(literalValue);
+            }
+            switch (operator.getBinaryType()) {
+                case LT:
+                    return lessThan(columnName, literalValue);
+                case LE:
+                    return lessThanOrEqual(columnName, literalValue);
+                case GT:
+                    return greaterThan(columnName, literalValue);
+                case GE:
+                    return greaterThanOrEqual(columnName, literalValue);
+                case EQ:
+                    return equal(columnName, literalValue);
+                case NE:
+                    return notEqual(columnName, literalValue);
+                default:
+                    return null;
+            }
+        }
+
+        @Override
+        public Expression visitInPredicate(InPredicateOperator operator, IcebergContext context) {
+            String columnName = getColumnName(operator.getChild(0));
+            if (columnName == null) {
+                return null;
+            }
+
+            List<Object> literalValues = operator.getListChildren().stream()
+                    .map(childOperator -> {
+                        Type icebergType = getResultType(columnName, context);
+                        Type.TypeID typeID = icebergType.typeId();
+                        Object literalValue = ScalarOperatorToIcebergExpr.getLiteralValue(childOperator, icebergType);
+                        if (typeID == Type.TypeID.BOOLEAN) {
+                            literalValue = convertBoolLiteralValue(literalValue);
+                        }
+                        return literalValue;
+                    }).collect(Collectors.toList());
+
+            // It should not be pushed down if there is an implicit cast
+            // TODO: Some functions within ScalarOperatorFunctions could be computed on frontends.
+            // Maybe we can obtain the result first and then convert it into an Iceberg expression.
+            if (literalValues.stream().anyMatch(Objects::isNull)) {
+                return null;
+            }
+
+            if (operator.isNotIn()) {
+                return notIn(columnName, literalValues);
+            } else {
+                return in(columnName, literalValues);
+            }
+        }
+
+        @Override
+        public Expression visitLikePredicateOperator(LikePredicateOperator operator, IcebergContext context) {
+            String columnName = getColumnName(operator.getChild(0));
+            if (columnName == null) {
+                return null;
+            }
+
+            if (operator.getLikeType() == LikePredicateOperator.LikeType.LIKE) {
+                if (operator.getChild(1).getType().isStringType()) {
+                    String literal = (String) getLiteralValue(operator.getChild(1), getResultType(columnName, context));
+                    if (literal == null) {
+                        return null;
+                    }
+                    if (literal.indexOf("%") == literal.length() - 1) {
+                        return startsWith(columnName, literal.substring(0, literal.length() - 1));
+                    }
+                }
+            }
+            return null;
+        }
+
+        @Override
+        public Expression visit(ScalarOperator scalarOperator, IcebergContext context) {
+            return null;
+        }
+    }
+
+    private static Object getLiteralValue(ScalarOperator operator, Type icebergType) {
+        if (operator == null) {
+            return null;
+        }
+
+        return operator.accept(new ExtractLiteralValue(), icebergType);
+    }
+
+    private static Object convertBoolLiteralValue(Object literalValue) {
+        try {
+            return new BoolLiteral(String.valueOf(literalValue)).getValue();
+        } catch (Exception e) {
+            throw new StarRocksConnectorException("Failed to convert %s to boolean type", literalValue);
+        }
+    }
+
+    private static class ExtractLiteralValue extends ScalarOperatorVisitor<Object, Type> {
+        private boolean needCast(PrimitiveType sourceType, Type.TypeID dstTypeID) {
+            switch (sourceType) {
+                case BOOLEAN:
+                    return dstTypeID != Type.TypeID.BOOLEAN;
+                case TINYINT:
+                case SMALLINT:
+                case INT:
+                    return dstTypeID != Type.TypeID.INTEGER;
+                case BIGINT:
+                    return dstTypeID != Type.TypeID.LONG;
+                case FLOAT:
+                    return dstTypeID != Type.TypeID.FLOAT;
+                case DOUBLE:
+                    return dstTypeID != Type.TypeID.DOUBLE;
+                case DECIMALV2:
+                case DECIMAL32:
+                case DECIMAL64:
+                case DECIMAL128:
+                    return dstTypeID != Type.TypeID.DECIMAL;
+                case HLL:
+                case VARCHAR:
+                case CHAR:
+                    return dstTypeID != Type.TypeID.STRING;
+                case DATE:
+                    return dstTypeID != Type.TypeID.DATE;
+                case DATETIME:
+                    return dstTypeID != Type.TypeID.TIMESTAMP;
+                default:
+                    return true;
+            }
+        }
+
+        private ConstantOperator tryCastToResultType(ConstantOperator operator, Type.TypeID resultTypeID) {
+
+            Optional<ConstantOperator> res = Optional.empty();
+            switch (resultTypeID) {
+                case BOOLEAN:
+                    res = operator.castTo(com.starrocks.catalog.Type.BOOLEAN);
+                    break;
+                case DATE:
+                    res = operator.castTo(com.starrocks.catalog.Type.DATE);
+                    break;
+                case TIMESTAMP:
+                    res = operator.castTo(com.starrocks.catalog.Type.DATETIME);
+                    break;
+                case STRING:
+                case UUID:
+                    // num and string has different comparator
+                    if (operator.getType().isNumericType()) {
+                        return null;
+                    } else {
+                        res = operator.castTo(com.starrocks.catalog.Type.VARCHAR);
+                    }
+                    break;
+                case BINARY:
+                    res = operator.castTo(com.starrocks.catalog.Type.VARBINARY);
+                    break;
+                    // num usually don't need cast, and num and string has different comparator
+                    // cast is dangerous.
+                case INTEGER:
+                case LONG:
+                    // usually not used as partition column, don't do much work
+                case DECIMAL:
+                case FLOAT:
+                case DOUBLE:
+                case STRUCT:
+                case LIST:
+                case MAP:
+                    // not supported
+                case FIXED:
+                case TIME:
+                    return null;
+            }
+
+            return res.isPresent() ? res.get() : null;
+        }
+
+        @Override
+        public Object visit(ScalarOperator scalarOperator, Type context) {
+            return null;
+        }
+
+        @Override
+        public Object visitConstant(ConstantOperator operator, Type context) {
+            if (context != null && needCast(operator.getType().getPrimitiveType(), context.typeId())) {
+                operator = tryCastToResultType(operator, context.typeId());
+            }
+            if (operator == null) {
+                return null;
+            }
+            switch (operator.getType().getPrimitiveType()) {
+                case BOOLEAN:
+                    return operator.getBoolean();
+                case TINYINT:
+                    return operator.getTinyInt();
+                case SMALLINT:
+                    return operator.getSmallint();
+                case INT:
+                    return operator.getInt();
+                case BIGINT:
+                    return operator.getBigint();
+                case FLOAT:
+                    return operator.getFloat();
+                case DOUBLE:
+                    return operator.getDouble();
+                case DECIMALV2:
+                case DECIMAL32:
+                case DECIMAL64:
+                case DECIMAL128:
+                    return operator.getDecimal();
+                case HLL:
+                case VARCHAR:
+                case CHAR:
+                    return operator.getVarchar();
+                case DATE:
+                    return operator.getDate().toLocalDate().toEpochDay();
+                case DATETIME:
+                    ZoneId zoneId;
+                    if (Types.TimestampType.withZone().equals(context)) {
+                        zoneId = TimeUtils.getTimeZone().toZoneId();
+                    } else {
+                        zoneId = ZoneOffset.UTC;
+                    }
+
+                    long value = operator.getDatetime().atZone(zoneId).toEpochSecond() * 1000
+                            * 1000 * 1000 + operator.getDatetime().getNano();
+                    return TimeUnit.MICROSECONDS.convert(value, TimeUnit.NANOSECONDS);
+                default:
+                    return null;
+            }
+        }
+    }
+
+    private static String getColumnName(ScalarOperator operator) {
+        if (operator == null) {
+            return null;
+        }
+
+        String columnName = operator.accept(new ExtractColumnName(), null);
+        if (columnName == null || columnName.isEmpty()) {
+            return null;
+        }
+        return columnName;
+    }
+
+    private static class ExtractColumnName extends ScalarOperatorVisitor<String, Void> {
+
+        @Override
+        public String visit(ScalarOperator scalarOperator, Void context) {
+            return null;
+        }
+
+        public String visitVariableReference(ColumnRefOperator operator, Void context) {
+            return operator.getName();
+        }
+
+        public String visitCastOperator(CastOperator operator, Void context) {
+            return operator.getChild(0).accept(this, context);
+        }
+
+        public String visitSubfield(SubfieldOperator operator, Void context) {
+            ScalarOperator child = operator.getChild(0);
+            if (!(child instanceof ColumnRefOperator)) {
+                return null;
+            }
+            ColumnRefOperator columnRefChild = ((ColumnRefOperator) child);
+            List<String> paths = new ImmutableList.Builder<String>()
+                    .add(columnRefChild.getName()).addAll(operator.getFieldNames())
+                    .build();
+            return String.join(".", paths);
+        }
+    }
+}

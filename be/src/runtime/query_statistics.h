@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/runtime/query_statistics.h
 
@@ -19,11 +32,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_EXEC_QUERY_STATISTICS_H
-#define STARROCKS_BE_EXEC_QUERY_STATISTICS_H
+#pragma once
 
 #include <mutex>
 
+#include "gen_cpp/FrontendService.h"
 #include "gen_cpp/data.pb.h"
 #include "util/spinlock.h"
 
@@ -36,52 +49,46 @@ class QueryStatisticsRecvr;
 // or plan's statistics and QueryStatisticsRecvr is responsible for collecting it.
 class QueryStatistics {
 public:
-    QueryStatistics() : scan_rows(0), scan_bytes(0), returned_rows(0) {}
-
-    void merge(const QueryStatistics& other) {
-        scan_rows += other.scan_rows;
-        scan_bytes += other.scan_bytes;
-        _stats_items.insert(_stats_items.end(), other._stats_items.begin(), other._stats_items.end());
-    }
+    QueryStatistics() = default;
 
     void set_returned_rows(int64_t num_rows) { this->returned_rows = num_rows; }
 
-    void add_stats_item(QueryStatisticsItemPB& stats_item) {
-        this->_stats_items.emplace_back(stats_item);
-        this->scan_rows += stats_item.scan_rows();
-        this->scan_bytes += stats_item.scan_bytes();
-    }
+    void add_stats_item(QueryStatisticsItemPB& stats_item);
+    void add_scan_stats(int64_t scan_rows, int64_t scan_bytes);
+    void add_cpu_costs(int64_t cpu_ns) { this->cpu_ns += cpu_ns; }
+    void add_mem_costs(int64_t bytes) { mem_cost_bytes += bytes; }
+    void add_spill_bytes(int64_t bytes) { spill_bytes += bytes; }
 
-    void merge(QueryStatisticsRecvr* recvr);
+    void to_pb(PQueryStatistics* statistics);
+    void to_params(TAuditStatistics* params);
 
-    void clear() {
-        scan_rows = 0;
-        scan_bytes = 0;
-        returned_rows = 0;
-        _stats_items.clear();
-    }
+    void merge(int sender_id, QueryStatistics& other);
+    void merge_pb(const PQueryStatistics& statistics);
 
-    void to_pb(PQueryStatistics* statistics) {
-        DCHECK(statistics != nullptr);
-        statistics->set_scan_rows(scan_rows);
-        statistics->set_scan_bytes(scan_bytes);
-        statistics->set_returned_rows(returned_rows);
-        *statistics->mutable_stats_items() = {_stats_items.begin(), _stats_items.end()};
-    }
+    int64_t get_scan_rows() const { return scan_rows; }
+    int64_t get_mem_bytes() const { return mem_cost_bytes; }
 
-    void merge_pb(const PQueryStatistics& statistics) {
-        scan_rows += statistics.scan_rows();
-        scan_bytes += statistics.scan_bytes();
-        _stats_items.insert(_stats_items.end(), statistics.stats_items().begin(), statistics.stats_items().end());
-    }
+    void clear();
 
 private:
-    int64_t scan_rows;
-    int64_t scan_bytes;
+    void update_stats_item(int64_t table_id, int64_t scan_rows, int64_t scan_bytes);
+
+    std::atomic_int64_t scan_rows{0};
+    std::atomic_int64_t scan_bytes{0};
+    std::atomic_int64_t cpu_ns{0};
+    std::atomic_int64_t mem_cost_bytes{0};
+    std::atomic_int64_t spill_bytes{0};
+
     // number rows returned by query.
     // only set once by result sink when closing.
-    int64_t returned_rows;
-    std::vector<QueryStatisticsItemPB> _stats_items;
+    int64_t returned_rows{0};
+    struct ScanStats {
+        ScanStats(int64_t rows, int64_t bytes) : scan_rows(rows), scan_bytes(bytes) {}
+        int64_t scan_rows = 0;
+        int64_t scan_bytes = 0;
+    };
+    SpinLock _lock;
+    std::unordered_map<int64_t, std::shared_ptr<ScanStats>> _stats_items;
 };
 
 // It is used for collecting sub plan query statistics in DataStreamRecvr.
@@ -90,21 +97,11 @@ public:
     ~QueryStatisticsRecvr();
 
     void insert(const PQueryStatistics& statistics, int sender_id);
+    void aggregate(QueryStatistics* statistics);
 
 private:
-    friend class QueryStatistics;
-
-    void merge(QueryStatistics* statistics) {
-        std::lock_guard<SpinLock> l(_lock);
-        for (auto& pair : _query_statistics) {
-            statistics->merge(*(pair.second));
-        }
-    }
-
     std::map<int, QueryStatistics*> _query_statistics;
     SpinLock _lock;
 };
 
 } // namespace starrocks
-
-#endif

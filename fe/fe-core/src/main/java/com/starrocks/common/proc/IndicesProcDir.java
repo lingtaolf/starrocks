@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/proc/IndicesProcDir.java
 
@@ -28,10 +41,12 @@ import com.starrocks.catalog.Database;
 import com.starrocks.catalog.MaterializedIndex;
 import com.starrocks.catalog.MaterializedIndex.IndexExtState;
 import com.starrocks.catalog.OlapTable;
-import com.starrocks.catalog.Partition;
+import com.starrocks.catalog.PhysicalPartition;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.util.ListComparator;
 import com.starrocks.common.util.TimeUtils;
+import com.starrocks.meta.lock.LockType;
+import com.starrocks.meta.lock.Locker;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -48,9 +63,9 @@ public class IndicesProcDir implements ProcDirInterface {
 
     private Database db;
     private OlapTable olapTable;
-    private Partition partition;
+    private PhysicalPartition partition;
 
-    public IndicesProcDir(Database db, OlapTable olapTable, Partition partition) {
+    public IndicesProcDir(Database db, OlapTable olapTable, PhysicalPartition partition) {
         this.db = db;
         this.olapTable = olapTable;
         this.partition = partition;
@@ -64,7 +79,8 @@ public class IndicesProcDir implements ProcDirInterface {
         BaseProcResult result = new BaseProcResult();
         // get info
         List<List<Comparable>> indexInfos = new ArrayList<List<Comparable>>();
-        db.readLock();
+        Locker locker = new Locker();
+        locker.lockDatabase(db, LockType.READ);
         try {
             result.setNames(TITLE_NAMES);
             for (MaterializedIndex materializedIndex : partition.getMaterializedIndices(IndexExtState.ALL)) {
@@ -78,7 +94,7 @@ public class IndicesProcDir implements ProcDirInterface {
             }
 
         } finally {
-            db.readUnlock();
+            locker.unLockDatabase(db, LockType.READ);
         }
 
         // sort by index id
@@ -116,15 +132,20 @@ public class IndicesProcDir implements ProcDirInterface {
             throw new AnalysisException("Invalid index id format: " + indexIdStr);
         }
 
-        db.readLock();
+        Locker locker = new Locker();
+        locker.lockDatabase(db, LockType.READ);
         try {
             MaterializedIndex materializedIndex = partition.getIndex(indexId);
             if (materializedIndex == null) {
                 throw new AnalysisException("Index[" + indexId + "] does not exist.");
             }
-            return new TabletsProcDir(db, materializedIndex);
+            if (olapTable.isCloudNativeTableOrMaterializedView()) {
+                return new LakeTabletsProcDir(db, olapTable, materializedIndex);
+            } else {
+                return new LocalTabletsProcDir(db, olapTable, materializedIndex);
+            }
         } finally {
-            db.readUnlock();
+            locker.unLockDatabase(db, LockType.READ);
         }
     }
 

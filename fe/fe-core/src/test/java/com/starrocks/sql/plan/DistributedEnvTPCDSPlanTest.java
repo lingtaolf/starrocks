@@ -1,12 +1,26 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.sql.plan;
 
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.OlapTable;
+import com.starrocks.common.DdlException;
 import com.starrocks.common.FeConstants;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.utframe.UtFrameUtils;
-import org.junit.Assert;
+import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
@@ -14,24 +28,35 @@ public class DistributedEnvTPCDSPlanTest extends TPCDSPlanTestBase {
     @BeforeClass
     public static void beforeClass() throws Exception {
         TPCDSPlanTest.beforeClass();
-        Catalog catalog = connectContext.getCatalog();
-        OlapTable customer_address = (OlapTable) catalog.getDb("default_cluster:test").getTable("customer_address");
-        setTableStatistics(customer_address, 1000000);
+        GlobalStateMgr globalStateMgr = connectContext.getGlobalStateMgr();
+        OlapTable customerAddress =
+                (OlapTable) globalStateMgr.getDb("test").getTable("customer_address");
+        setTableStatistics(customerAddress, 1000000);
 
-        OlapTable customer = (OlapTable) catalog.getDb("default_cluster:test").getTable("customer");
+        OlapTable customer = (OlapTable) globalStateMgr.getDb("test").getTable("customer");
         setTableStatistics(customer, 2000000);
 
-        OlapTable store_sales = (OlapTable) catalog.getDb("default_cluster:test").getTable("store_sales");
-        setTableStatistics(store_sales, 287997024);
+        OlapTable storeSales = (OlapTable) globalStateMgr.getDb("test").getTable("store_sales");
+        setTableStatistics(storeSales, 287997024);
 
-        OlapTable date_dim = (OlapTable) catalog.getDb("default_cluster:test").getTable("date_dim");
-        setTableStatistics(date_dim, 73048);
+        OlapTable dateDim = (OlapTable) globalStateMgr.getDb("test").getTable("date_dim");
+        setTableStatistics(dateDim, 73048);
 
-        OlapTable item = (OlapTable) catalog.getDb("default_cluster:test").getTable("item");
+        OlapTable item = (OlapTable) globalStateMgr.getDb("test").getTable("item");
         setTableStatistics(item, 203999);
 
         UtFrameUtils.addMockBackend(10002);
         UtFrameUtils.addMockBackend(10003);
+    }
+
+    @AfterClass
+    public static void afterClass() {
+        try {
+            UtFrameUtils.dropMockBackend(10002);
+            UtFrameUtils.dropMockBackend(10003);
+        } catch (DdlException e) {
+            e.printStackTrace();
+        }
     }
 
     @Test
@@ -60,9 +85,9 @@ public class DistributedEnvTPCDSPlanTest extends TPCDSPlanTestBase {
                 " having count(*) >= 10\n" +
                 " order by cnt, a.ca_state\n" +
                 " limit 100;";
-        String planFragment = getFragmentPlan(sql);
-        Assert.assertTrue(planFragment.contains("0:OlapScanNode\n" +
-                "     TABLE: store_sales"));
+        String plan = getFragmentPlan(sql);
+        assertContains(plan, "0:OlapScanNode\n" +
+                "     TABLE: store_sales");
         FeConstants.runningUnitTest = false;
     }
 }

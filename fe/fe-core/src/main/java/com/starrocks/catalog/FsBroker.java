@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/FsBroker.java
 
@@ -22,11 +35,12 @@
 package com.starrocks.catalog;
 
 import com.google.gson.annotations.SerializedName;
-import com.starrocks.common.FeMetaVersion;
+import com.starrocks.common.Config;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.persist.gson.GsonUtils;
 import com.starrocks.system.BrokerHbResponse;
+import com.starrocks.system.HeartbeatResponse;
 import com.starrocks.system.HeartbeatResponse.HbStatus;
 
 import java.io.DataInput;
@@ -38,14 +52,15 @@ public class FsBroker implements Writable, Comparable<FsBroker> {
     public String ip;
     @SerializedName(value = "port")
     public int port;
-    // msg for ping result
-    public String heartbeatErrMsg = "";
-    public long lastUpdateTime = -1;
-
     @SerializedName(value = "lastStartTime")
     public long lastStartTime = -1;
     @SerializedName(value = "isAlive")
     public boolean isAlive;
+
+    // msg for ping result
+    public String heartbeatErrMsg = "";
+    public long lastUpdateTime = -1;
+    private int heartbeatRetryTimes = 0;
 
     public FsBroker() {
     }
@@ -59,7 +74,7 @@ public class FsBroker implements Writable, Comparable<FsBroker> {
      * handle Broker's heartbeat response.
      * return true if alive state is changed.
      */
-    public boolean handleHbResponse(BrokerHbResponse hbResponse) {
+    public boolean handleHbResponse(BrokerHbResponse hbResponse, boolean isReplay) {
         boolean isChanged = false;
         if (hbResponse.getStatus() == HbStatus.OK) {
             if (!isAlive) {
@@ -71,14 +86,34 @@ public class FsBroker implements Writable, Comparable<FsBroker> {
             }
             lastUpdateTime = hbResponse.getHbTime();
             heartbeatErrMsg = "";
+            this.heartbeatRetryTimes = 0;
         } else {
-            if (isAlive) {
-                isAlive = false;
-                isChanged = true;
+            if (this.heartbeatRetryTimes < Config.heartbeat_retry_times) {
+                this.heartbeatRetryTimes++;
+            } else {
+                if (isAlive) {
+                    isAlive = false;
+                }
+                heartbeatErrMsg = hbResponse.getMsg() == null ? "Unknown error" : hbResponse.getMsg();
             }
-            heartbeatErrMsg = hbResponse.getMsg() == null ? "Unknown error" : hbResponse.getMsg();
+            // When the master receives an error heartbeat info which status not ok, 
+            // this heartbeat info also need to be synced to follower.
+            // Since the failed heartbeat info also modifies fe's memory, (this.heartbeatRetryTimes++;)
+            // if this heartbeat is not synchronized to the follower, 
+            // that will cause the Follower and leader’s memory to be inconsistent
+            isChanged = true;
         }
-
+        if (!isReplay) {
+            hbResponse.aliveStatus = isAlive ?
+                    HeartbeatResponse.AliveStatus.ALIVE : HeartbeatResponse.AliveStatus.NOT_ALIVE;
+        } else {
+            if (hbResponse.aliveStatus != null) {
+                // The metadata before the upgrade does not contain hbResponse.aliveStatus,
+                // in which case the alive status needs to be handled according to the original logic
+                isAlive = hbResponse.aliveStatus == HeartbeatResponse.AliveStatus.ALIVE;
+                heartbeatRetryTimes = 0;
+            }
+        }
         return isChanged;
     }
 
@@ -122,25 +157,14 @@ public class FsBroker implements Writable, Comparable<FsBroker> {
         Text.writeString(out, json);
     }
 
-    private void readFields(DataInput in) throws IOException {
-        ip = Text.readString(in);
-        port = in.readInt();
-    }
-
     @Override
     public String toString() {
         return ip + ":" + port;
     }
 
     public static FsBroker readIn(DataInput in) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_73) {
-            FsBroker broker = new FsBroker();
-            broker.readFields(in);
-            return broker;
-        } else {
-            String json = Text.readString(in);
-            return GsonUtils.GSON.fromJson(json, FsBroker.class);
-        }
+        String json = Text.readString(in);
+        return GsonUtils.GSON.fromJson(json, FsBroker.class);
     }
 }
 

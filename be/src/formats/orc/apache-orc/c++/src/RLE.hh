@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/RLE.hh
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -20,8 +16,7 @@
  * limitations under the License.
  */
 
-#ifndef ORC_RLE_HH
-#define ORC_RLE_HH
+#pragma once
 
 #include <memory>
 
@@ -35,7 +30,8 @@ inline int64_t zigZag(int64_t value) {
 }
 
 inline int64_t unZigZag(uint64_t value) {
-    return value >> 1 ^ -(value & 1);
+    uint64_t mask = value & 1;
+    return value >> 1 ^ (~mask + 1);
 }
 
 class RleEncoder {
@@ -101,6 +97,10 @@ public:
     // must be non-inline!
     virtual ~RleDecoder();
 
+    RleDecoder(ReaderMetrics* _metrics) : metrics(_metrics) {
+        // pass
+    }
+
     /**
      * Seek to a particular spot.
      */
@@ -119,6 +119,9 @@ public:
      *    pointer is not null, positions that are false are skipped.
      */
     virtual void next(int64_t* data, uint64_t numValues, const char* notNull) = 0;
+
+protected:
+    ReaderMetrics* metrics;
 };
 
 /**
@@ -139,9 +142,7 @@ std::unique_ptr<RleEncoder> createRleEncoder(std::unique_ptr<BufferedOutputStrea
    * @param pool memory pool to use for allocation
    */
 std::unique_ptr<RleDecoder> createRleDecoder(std::unique_ptr<SeekableInputStream> input, bool isSigned,
-                                             RleVersion version, MemoryPool& pool,
-                                             DataBuffer<char>* sharedBufferPtr = nullptr);
+                                             RleVersion version, MemoryPool& pool, ReaderMetrics* metrics,
+                                             DataBuffer<char>* sharedBufferPtr);
 
 } // namespace orc
-
-#endif // ORC_RLE_HH

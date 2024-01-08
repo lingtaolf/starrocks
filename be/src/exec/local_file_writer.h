@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/local_file_writer.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,10 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_EXEC_LOCAL_FILE_WRITER_H
-#define STARROCKS_BE_SRC_EXEC_LOCAL_FILE_WRITER_H
+#pragma once
 
-#include <stdio.h>
+#include <cstdio>
 
 #include "exec/file_writer.h"
 
@@ -32,14 +27,14 @@ class RuntimeState;
 
 class LocalFileWriter : public FileWriter {
 public:
-    LocalFileWriter(const std::string& path, int64_t start_offset);
-    virtual ~LocalFileWriter();
+    LocalFileWriter(std::string path, int64_t start_offset);
+    ~LocalFileWriter() override;
 
     Status open() override;
 
-    virtual Status write(const uint8_t* buf, size_t buf_len, size_t* written_len) override;
+    Status write(const uint8_t* buf, size_t buf_len, size_t* written_len) override;
 
-    virtual Status close() override;
+    Status close() override;
 
 private:
     std::string _path;
@@ -48,5 +43,3 @@ private:
 };
 
 } // end namespace starrocks
-
-#endif // STARROCKS_BE_SRC_EXEC_LOCAL_FILE_WRITER_H

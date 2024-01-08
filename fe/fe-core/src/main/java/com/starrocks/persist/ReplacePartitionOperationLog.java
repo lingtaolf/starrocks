@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/persist/ReplacePartitionOperationLog.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -48,16 +44,25 @@ public class ReplacePartitionOperationLog implements Writable {
     private boolean strictRange;
     @SerializedName(value = "useTempPartitionName")
     private boolean useTempPartitionName;
+    @SerializedName(value = "unPartitionedTable")
+    private boolean unPartitionedTable;
 
     public ReplacePartitionOperationLog(long dbId, long tblId, List<String> partitionNames,
                                         List<String> tempPartitonNames, boolean strictRange,
-                                        boolean useTempPartitionName) {
+                                        boolean useTempPartitionName, boolean unPartitionedTable) {
         this.dbId = dbId;
         this.tblId = tblId;
         this.partitions = partitionNames;
         this.tempPartitions = tempPartitonNames;
         this.strictRange = strictRange;
         this.useTempPartitionName = useTempPartitionName;
+        this.unPartitionedTable = unPartitionedTable;
+    }
+
+    public ReplacePartitionOperationLog(long dbId, long tblId, List<String> partitionNames,
+                                        List<String> tempPartitonNames, boolean strictRange,
+                                        boolean useTempPartitionName) {
+        this(dbId, tblId, partitionNames, tempPartitonNames, strictRange, useTempPartitionName, false);
     }
 
     public long getDbId() {
@@ -82,6 +87,10 @@ public class ReplacePartitionOperationLog implements Writable {
 
     public boolean useTempPartitionName() {
         return useTempPartitionName;
+    }
+
+    public boolean isUnPartitionedTable() {
+        return unPartitionedTable;
     }
 
     public static ReplacePartitionOperationLog read(DataInput in) throws IOException {

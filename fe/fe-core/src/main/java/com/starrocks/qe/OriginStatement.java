@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/qe/OriginStatement.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -48,6 +44,10 @@ public class OriginStatement implements Writable {
         this.idx = idx;
     }
 
+    public OriginStatement(String singleOriginStmt) {
+        this(singleOriginStmt, 0);
+    }
+
     public static OriginStatement read(DataInput in) throws IOException {
         String json = Text.readString(in);
         return GsonUtils.GSON.fromJson(json, OriginStatement.class);
@@ -57,5 +57,13 @@ public class OriginStatement implements Writable {
     public void write(DataOutput out) throws IOException {
         String json = GsonUtils.GSON.toJson(this);
         Text.writeString(out, json);
+    }
+
+    @Override
+    public String toString() {
+        return "OriginStatement{" +
+                "originStmt='" + originStmt + '\'' +
+                ", idx=" + idx +
+                '}';
     }
 }

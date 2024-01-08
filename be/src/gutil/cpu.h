@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license.
 // (https://developers.google.com/open-source/licenses/bsd)
 
-#ifndef BASE_CPU_H_
-#define BASE_CPU_H_
+#pragma once
+
 #include <string>
 #include <tuple>
 
@@ -82,37 +82,43 @@ public:
     bool has_popcnt() const { return has_popcnt_; }
     bool has_avx() const { return has_avx_; }
     bool has_avx2() const { return has_avx2_; }
+    bool has_avx512f() const { return has_avx512f_; }
+    bool has_avx512bw() const { return has_avx512bw_; }
     bool has_aesni() const { return has_aesni_; }
     bool has_non_stop_time_stamp_counter() const { return has_non_stop_time_stamp_counter_; }
     bool is_running_in_vm() const { return is_running_in_vm_; }
     IntelMicroArchitecture GetIntelMicroArchitecture() const;
     const std::string& cpu_brand() const { return cpu_brand_; }
+    std::string debug_string() const;
+    static const CPU* instance();
 
 private:
     // Query the processor for CPUID information.
     void Initialize();
-    int signature_; // raw form of type, family, model, and stepping
-    int type_;      // process type
-    int family_;    // family of the processor
-    int model_;     // model of processor
-    int stepping_;  // processor revision number
-    int ext_model_;
-    int ext_family_;
-    bool has_mmx_;
-    bool has_sse_;
-    bool has_sse2_;
-    bool has_sse3_;
-    bool has_ssse3_;
-    bool has_sse41_;
-    bool has_sse42_;
-    bool has_popcnt_;
-    bool has_avx_;
-    bool has_avx2_;
-    bool has_aesni_;
-    bool has_non_stop_time_stamp_counter_;
-    bool is_running_in_vm_;
+    int signature_{0}; // raw form of type, family, model, and stepping
+    int type_{0};      // process type
+    int family_{0};    // family of the processor
+    int model_{0};     // model of processor
+    int stepping_{0};  // processor revision number
+    int ext_model_{0};
+    int ext_family_{0};
+    bool has_mmx_{false};
+    bool has_sse_{false};
+    bool has_sse2_{false};
+    bool has_sse3_{false};
+    bool has_ssse3_{false};
+    bool has_sse41_{false};
+    bool has_sse42_{false};
+    bool has_popcnt_{false};
+    bool has_avx_{false};
+    bool has_avx2_{false};
+    bool has_avx512f_{false};
+    bool has_avx512bw_{false};
+    bool has_aesni_{false};
+    bool has_non_stop_time_stamp_counter_{false};
+    bool is_running_in_vm_{false};
     std::string cpu_vendor_;
     std::string cpu_brand_;
 };
+
 } // namespace base
-#endif // BASE_CPU_H_

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/gutil/atomicops-internals-x86.h
-
 // Copyright 2003 Google Inc.
 //
 // Licensed to the Apache Software Foundation (ASF) under one
@@ -28,11 +24,11 @@
 // be included directly.  Clients should instead include
 // "base/atomicops.h".
 
-#ifndef GUTIL_ATOMICOPS_INTERNALS_X86_H_
-#define GUTIL_ATOMICOPS_INTERNALS_X86_H_
+#pragma once
 
 #include <common/logging.h>
-#include <stdint.h>
+
+#include <cstdint>
 
 #define BASE_HAS_ATOMIC64 1 // Use only in tests and base/atomic*
 
@@ -448,5 +444,3 @@ inline Atomic64 Barrier_CompareAndSwap(volatile Atomic64* ptr, Atomic64 old_valu
 } // namespace base
 
 #undef ATOMICOPS_COMPILER_BARRIER
-
-#endif // GUTIL_ATOMICOPS_INTERNALS_X87_H_

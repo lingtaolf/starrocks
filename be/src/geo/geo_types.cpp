@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/geo/geo_types.cpp
 
@@ -22,24 +35,21 @@
 #include "geo/geo_types.h"
 
 #include <s2/s2cap.h>
-
-#include "common/compiler_util.h"
-DIAGNOSTIC_PUSH
-DIAGNOSTIC_IGNORE("-Wclass-memaccess")
 #include <s2/s2cell.h>
-DIAGNOSTIC_POP
-
 #include <s2/s2earth.h>
 #include <s2/s2latlng.h>
 #include <s2/s2polygon.h>
 #include <s2/s2polyline.h>
 #include <s2/util/coding/coder.h>
 #include <s2/util/units/length-units.h>
-#include <stdio.h>
 
+#include <cmath>
+#include <cstdio>
 #include <iomanip>
+#include <memory>
 #include <sstream>
 
+#include "common/compiler_util.h"
 #include "geo/wkt_parse.h"
 
 namespace starrocks {
@@ -50,7 +60,7 @@ void print_s2point(std::ostream& os, const S2Point& point) {
 }
 
 static inline bool is_valid_lng_lat(double lng, double lat) {
-    return abs(lng) <= 180 && abs(lat) <= 90;
+    return std::abs(lng) <= 180 && std::abs(lat) <= 90;
 }
 
 // Return GEO_PARSE_OK, if and only if this can be converted to a valid S2Point
@@ -114,7 +124,7 @@ static GeoParseStatus to_s2loop(const GeoCoordinateList& coords, std::unique_ptr
     if (points.size() < 3) {
         return GEO_PARSE_LOOP_LACK_VERTICES;
     }
-    loop->reset(new S2Loop(points));
+    *loop = std::make_unique<S2Loop>(points);
     if (!(*loop)->IsValid()) {
         return GEO_PARSE_LOOP_INVALID;
     }
@@ -137,7 +147,7 @@ static GeoParseStatus to_s2polyline(const GeoCoordinateList& coords, std::unique
     if (points.size() < 2) {
         return GEO_PARSE_POLYLINE_LACK_VERTICES;
     }
-    polyline->reset(new S2Polyline(points));
+    *polyline = std::make_unique<S2Polyline>(points);
     if (!(*polyline)->IsValid()) {
         return GEO_PARSE_POLYLINE_INVALID;
     }
@@ -155,7 +165,7 @@ static GeoParseStatus to_s2polygon(const GeoCoordinateListList& coords_list, std
             return GEO_PARSE_POLYGON_NOT_HOLE;
         }
     }
-    polygon->reset(new S2Polygon(std::move(loops)));
+    *polygon = std::make_unique<S2Polygon>(std::move(loops));
     return GEO_PARSE_OK;
 }
 
@@ -191,19 +201,19 @@ GeoShape* GeoShape::from_encoded(const void* ptr, size_t size) {
     std::unique_ptr<GeoShape> shape;
     switch (((const char*)ptr)[1]) {
     case GEO_SHAPE_POINT: {
-        shape.reset(new GeoPoint());
+        shape = std::make_unique<GeoPoint>();
         break;
     }
     case GEO_SHAPE_LINE_STRING: {
-        shape.reset(new GeoLine());
+        shape = std::make_unique<GeoLine>();
         break;
     }
     case GEO_SHAPE_POLYGON: {
-        shape.reset(new GeoPolygon());
+        shape = std::make_unique<GeoPolygon>();
         break;
     }
     case GEO_SHAPE_CIRCLE: {
-        shape.reset(new GeoCircle());
+        shape = std::make_unique<GeoCircle>();
         break;
     }
     default:
@@ -217,7 +227,7 @@ GeoShape* GeoShape::from_encoded(const void* ptr, size_t size) {
 }
 
 GeoPoint::GeoPoint() : _point(new S2Point()) {}
-GeoPoint::~GeoPoint() {}
+GeoPoint::~GeoPoint() = default;
 
 bool GeoPoint::st_distance_sphere(double x_lng, double x_lat, double y_lng, double y_lat, double* result) {
     S2LatLng x = S2LatLng::FromDegrees(x_lat, x_lng);
@@ -250,7 +260,7 @@ void GeoPoint::encode(std::string* buf) {
 }
 
 bool GeoPoint::decode(const void* data, size_t size) {
-    if (size < sizeof(*_point)) {
+    if (size != sizeof(*_point)) {
         return false;
     }
 
@@ -274,8 +284,8 @@ std::string GeoPoint::as_wkt() const {
     return ss.str();
 }
 
-GeoLine::GeoLine() {}
-GeoLine::~GeoLine() {}
+GeoLine::GeoLine() = default;
+GeoLine::~GeoLine() = default;
 
 GeoParseStatus GeoLine::from_coords(const GeoCoordinateList& list) {
     return to_s2polyline(list, &_polyline);
@@ -289,12 +299,12 @@ void GeoLine::encode(std::string* buf) {
 
 bool GeoLine::decode(const void* data, size_t size) {
     Decoder decoder(data, size);
-    _polyline.reset(new S2Polyline());
+    _polyline = std::make_unique<S2Polyline>();
     return _polyline->Decode(&decoder);
 }
 
-GeoPolygon::GeoPolygon() {}
-GeoPolygon::~GeoPolygon() {}
+GeoPolygon::GeoPolygon() = default;
+GeoPolygon::~GeoPolygon() = default;
 
 GeoParseStatus GeoPolygon::from_coords(const GeoCoordinateListList& list) {
     return to_s2polygon(list, &_polygon);
@@ -308,8 +318,8 @@ void GeoPolygon::encode(std::string* buf) {
 
 bool GeoPolygon::decode(const void* data, size_t size) {
     Decoder decoder(data, size);
-    _polygon.reset(new S2Polygon());
-    return _polygon->Decode(&decoder);
+    _polygon = std::make_unique<S2Polygon>();
+    return _polygon->Decode(&decoder) && _polygon->IsValid();
 }
 
 std::string GeoLine::as_wkt() const {
@@ -352,7 +362,7 @@ std::string GeoPolygon::as_wkt() const {
 bool GeoPolygon::contains(const GeoShape* rhs) const {
     switch (rhs->type()) {
     case GEO_SHAPE_POINT: {
-        const GeoPoint* point = (const GeoPoint*)rhs;
+        const auto* point = (const GeoPoint*)rhs;
         return _polygon->Contains(*point->point());
 #if 0
         if (_polygon->Contains(point->point())) {
@@ -362,11 +372,11 @@ bool GeoPolygon::contains(const GeoShape* rhs) const {
 #endif
     }
     case GEO_SHAPE_LINE_STRING: {
-        const GeoLine* line = (const GeoLine*)rhs;
+        const auto* line = (const GeoLine*)rhs;
         return _polygon->Contains(*line->polyline());
     }
     case GEO_SHAPE_POLYGON: {
-        const GeoPolygon* other = (const GeoPolygon*)rhs;
+        const auto* other = (const GeoPolygon*)rhs;
         return _polygon->Contains(other->polygon());
     }
 #if 0
@@ -381,7 +391,7 @@ bool GeoPolygon::contains(const GeoShape* rhs) const {
     }
     case GEO_SHAPE_MULTI_LINE_STRING: {
         const GeoMultiLine* multi_line = (const GeoMultiLine*)rhs;
-        for (auto line : multi_line->lines()) {
+        for (auto& line : multi_line->lines()) {
             if (!_polygon.Contains(line)) {
                 return false;
             }
@@ -390,7 +400,7 @@ bool GeoPolygon::contains(const GeoShape* rhs) const {
     }
     case GEO_SHAPE_MULTI_POLYGON: {
         const GeoMultiPolygon* multi_polygon = (const GeoMultiPolygon*)rhs;
-        for (auto polygon : multi_polygon->polygons()) {
+        for (auto& polygon : multi_polygon->polygons()) {
             if (!_polygon.Contains(polygon)) {
                 return false;
             }
@@ -403,8 +413,8 @@ bool GeoPolygon::contains(const GeoShape* rhs) const {
     }
 }
 
-GeoCircle::GeoCircle() {}
-GeoCircle::~GeoCircle() {}
+GeoCircle::GeoCircle() = default;
+GeoCircle::~GeoCircle() = default;
 
 GeoParseStatus GeoCircle::init(double lng, double lat, double radius_meter) {
     S2Point center;
@@ -413,7 +423,7 @@ GeoParseStatus GeoCircle::init(double lng, double lat, double radius_meter) {
         return status;
     }
     S1Angle radius = S2Earth::ToAngle(util::units::Meters(radius_meter));
-    _cap.reset(new S2Cap(center, radius));
+    _cap = std::make_unique<S2Cap>(center, radius);
     if (!_cap->is_valid()) {
         return GEO_PARSE_CIRCLE_INVALID;
     }
@@ -423,7 +433,7 @@ GeoParseStatus GeoCircle::init(double lng, double lat, double radius_meter) {
 bool GeoCircle::contains(const GeoShape* rhs) const {
     switch (rhs->type()) {
     case GEO_SHAPE_POINT: {
-        const GeoPoint* point = (const GeoPoint*)rhs;
+        const auto* point = (const GeoPoint*)rhs;
         return _cap->Contains(*point->point());
 #if 0
         if (_polygon->Contains(point->point())) {
@@ -452,7 +462,7 @@ bool GeoCircle::contains(const GeoShape* rhs) const {
     }
     case GEO_SHAPE_MULTI_LINE_STRING: {
         const GeoMultiLine* multi_line = (const GeoMultiLine*)rhs;
-        for (auto line : multi_line->lines()) {
+        for (auto& line : multi_line->lines()) {
             if (!_polygon.Contains(line)) {
                 return false;
             }
@@ -461,7 +471,7 @@ bool GeoCircle::contains(const GeoShape* rhs) const {
     }
     case GEO_SHAPE_MULTI_POLYGON: {
         const GeoMultiPolygon* multi_polygon = (const GeoMultiPolygon*)rhs;
-        for (auto polygon : multi_polygon->polygons()) {
+        for (auto& polygon : multi_polygon->polygons()) {
             if (!_polygon.Contains(polygon)) {
                 return false;
             }
@@ -482,8 +492,8 @@ void GeoCircle::encode(std::string* buf) {
 
 bool GeoCircle::decode(const void* data, size_t size) {
     Decoder decoder(data, size);
-    _cap.reset(new S2Cap());
-    return _cap->Decode(&decoder);
+    _cap = std::make_unique<S2Cap>();
+    return _cap->Decode(&decoder) && _cap->is_valid();
 }
 
 std::string GeoCircle::as_wkt() const {
@@ -522,7 +532,7 @@ bool GeoMultiPolygon::contains(const GeoShape* rhs) {
     }
     case GEO_SHAPE_MULTI_POINT: {
         const GeoMultiPoint* multi_point = (const GeoMultiPoint*)rhs;
-        for (auto point : multi_point->points()) {
+        for (auto& point : multi_point->points()) {
             if (!_contains(point)) {
                 return false;
             }
@@ -531,7 +541,7 @@ bool GeoMultiPolygon::contains(const GeoShape* rhs) {
     }
     case GEO_SHAPE_LINE_STRING: {
         const GeoMultiLine* multi_line = (const GeoMultiLine*)rhs;
-        for (auto line : multi_line->lines()) {
+        for (auto& line : multi_line->lines()) {
             if (!_contains(line)) {
                 return false;
             }
@@ -540,7 +550,7 @@ bool GeoMultiPolygon::contains(const GeoShape* rhs) {
     }
     case GEO_SHAPE_POLYGON: {
         const GeoMultiPolygon* multi_polygon = (const GeoMultiPolygon*)rhs;
-        for (auto polygon : multi_polygon->polygons()) {
+        for (auto& polygon : multi_polygon->polygons()) {
             if (!_contains(polygon)) {
                 return false;
             }

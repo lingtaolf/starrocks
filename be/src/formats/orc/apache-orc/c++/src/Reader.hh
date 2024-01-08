@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/orc/tree/main/c++/src/Reader.hh
 
@@ -20,8 +33,7 @@
  * limitations under the License.
  */
 
-#ifndef ORC_READER_IMPL_HH
-#define ORC_READER_IMPL_HH
+#pragma once
 
 #include "ColumnReader.hh"
 #include "RLE.hh"
@@ -65,6 +77,11 @@ struct FileContents {
     CompressionKind compression;
     MemoryPool* pool;
     std::ostream* errorStream;
+    /// Decimal64 in ORCv2 uses RLE to store values. This flag indicates whether
+    /// this new encoding is used.
+    bool isDecimalAsLong;
+    std::unique_ptr<proto::Metadata> metadata;
+    ReaderMetrics* readerMetrics;
 };
 
 proto::StripeFooter getStripeFooter(const proto::StripeInformation& info, const FileContents& contents);
@@ -104,10 +121,8 @@ public:
     ColumnSelector(const FileContents* contents);
 
     // Select the columns from the RowReaderoptions object
-    void updateSelected(std::vector<bool>& selectedColumns, const RowReaderOptions& options);
-
-    // Select the columns from the Readeroptions object
-    void updateSelected(std::vector<bool>& selectedColumns, const ReaderOptions& options);
+    void updateSelected(std::vector<bool>& selectedColumns, std::vector<bool>& lazyLoadColumns,
+                        const RowReaderOptions& options);
 };
 
 class RowReaderImpl : public RowReader {
@@ -121,11 +136,13 @@ private:
 
     // inputs
     std::vector<bool> selectedColumns;
+    std::vector<bool> lazyLoadColumns;
 
     // footer
     proto::Footer* footer;
     DataBuffer<uint64_t> firstRowOfStripe;
     mutable std::unique_ptr<Type> selectedSchema;
+    bool skipBloomFilters;
 
     // reading state
     uint64_t previousRow;
@@ -133,7 +150,11 @@ private:
     uint64_t currentStripe;
     uint64_t lastStripe; // the stripe AFTER the last one
     uint64_t currentRowInStripe;
+    uint64_t lazyLoadLastUsedRowInStripe; // which row in stripe loazy load files are used in last time.
+
     uint64_t rowsInCurrentStripe;
+    // number of row groups between first stripe and last stripe
+    uint64_t numRowGroupsInStripeRange;
     proto::StripeInformation currentStripeInfo;
     proto::StripeFooter currentStripeFooter;
     std::unique_ptr<ColumnReader> reader;
@@ -141,6 +162,7 @@ private:
     bool enableEncodedBlock;
     // internal methods
     void startNextStripe();
+    inline void markEndOfFile();
 
     // row index of current stripe with column id as the key
     std::unordered_map<uint64_t, proto::RowIndex> rowIndexes;
@@ -167,11 +189,11 @@ private:
     // If only a subset of row groups are selected then the next read should
     // stop at the end of selected range.
     static uint64_t computeBatchSize(uint64_t requestedSize, uint64_t currentRowInStripe, uint64_t rowsInCurrentStripe,
-                                     uint64_t rowIndexStride, const std::vector<bool>& includedRowGroups);
+                                     uint64_t rowIndexStride, const std::vector<uint64_t>& nextSkippedRows);
 
     // Skip non-selected rows
     static uint64_t advanceToNextRowGroup(uint64_t currentRowInStripe, uint64_t rowsInCurrentStripe,
-                                          uint64_t rowIndexStride, const std::vector<bool>& includedRowGroups);
+                                          uint64_t rowIndexStride, const std::vector<uint64_t>& nextSkippedRows);
 
     friend class TestRowReader_advanceToNextRowGroup_Test;
     friend class TestRowReader_computeBatchSize_Test;
@@ -181,6 +203,16 @@ private:
      * @param rowGroupEntryId the row group id to seek to
      */
     void seekToRowGroup(uint32_t rowGroupEntryId);
+    void getRowGroupPosition(uint32_t rowGroupEntryId, PositionProviderMap* map);
+
+    /**
+     * Check if the file has bad bloom filters. We will skip using them in the
+     * following reads.
+     * @return true if it has.
+     */
+    bool hasBadBloomFilters();
+
+    void buildIORanges(std::vector<InputStream::IORange>* io_ranges);
 
 public:
     /**
@@ -188,16 +220,19 @@ public:
     * @param contents of the file
     * @param options options for reading
     */
-    RowReaderImpl(std::shared_ptr<FileContents> contents, const RowReaderOptions& options);
+    RowReaderImpl(const std::shared_ptr<FileContents>& contents, const RowReaderOptions& options);
 
     // Select the columns from the options object
-    const std::vector<bool> getSelectedColumns() const override;
+    const std::vector<bool>& getSelectedColumns() const override;
+    const std::vector<bool>& getLazyLoadColumns() const override;
 
     const Type& getSelectedType() const override;
 
     std::unique_ptr<ColumnVectorBatch> createRowBatch(uint64_t size) const override;
 
-    bool next(ColumnVectorBatch& data) override;
+    bool next(ColumnVectorBatch& data, ReadPosition* pos) override;
+    void lazyLoadSeekTo(uint64_t rowInStripe) override;
+    void lazyLoadNext(ColumnVectorBatch& data, uint64_t numValues) override;
 
     CompressionKind getCompression() const;
 
@@ -209,6 +244,7 @@ public:
 
     const FileContents& getFileContents() const;
     bool getThrowOnHive11DecimalOverflow() const;
+    bool getIsDecimalAsLong() const;
     int32_t getForcedScaleOnHive11Decimal() const;
     bool getUseWriterTimezone() const;
     DataBuffer<char>* getSharedBuffer() const;
@@ -237,7 +273,6 @@ private:
                                std::vector<std::vector<proto::ColumnStatistics> >* indexStats) const;
 
     // metadata
-    mutable std::unique_ptr<proto::Metadata> metadata;
     mutable bool isMetadataLoaded;
 
 public:
@@ -261,6 +296,8 @@ public:
 
     uint32_t getWriterIdValue() const override;
 
+    std::string getSoftwareVersion() const override;
+
     WriterVersion getWriterVersion() const override;
 
     uint64_t getNumberOfRows() const override;
@@ -278,6 +315,7 @@ public:
     uint64_t getNumberOfStripes() const override;
 
     std::unique_ptr<StripeInformation> getStripe(uint64_t) const override;
+    const orc::proto::StripeInformation& getStripeInOrcFormat(uint64_t stripeIndex) const override;
 
     uint64_t getNumberOfStripeStatistics() const override;
 
@@ -305,6 +343,8 @@ public:
 
     bool hasCorrectStatistics() const override;
 
+    const ReaderMetrics* getReaderMetrics() const override { return contents->readerMetrics; }
+
     const proto::PostScript* getPostscript() const { return contents->postscript.get(); }
 
     uint64_t getBlockSize() const { return contents->blockSize; }
@@ -328,5 +368,3 @@ public:
 };
 
 } // namespace orc
-
-#endif

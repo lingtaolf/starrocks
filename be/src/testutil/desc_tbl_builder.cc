@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/testutil/desc_tbl_builder.cc
 
@@ -24,13 +37,15 @@
 #include <vector>
 
 #include "runtime/descriptors.h"
+#include "runtime/mem_tracker.h"
 #include "util/bit_util.h"
 
 using std::vector;
 
 namespace starrocks {
 
-DescriptorTblBuilder::DescriptorTblBuilder(ObjectPool* obj_pool) : _obj_pool(obj_pool) {}
+DescriptorTblBuilder::DescriptorTblBuilder(RuntimeState* state, ObjectPool* obj_pool)
+        : _state(state), _obj_pool(obj_pool) {}
 
 TupleDescBuilder& DescriptorTblBuilder::declare_tuple() {
     TupleDescBuilder* tuple_builder = _obj_pool->add(new TupleDescBuilder());
@@ -69,17 +84,17 @@ static TTupleDescriptor make_tuple_descriptor(int id, int byte_size, int num_nul
 }
 
 DescriptorTbl* DescriptorTblBuilder::build() {
-    DescriptorTbl* desc_tbl = NULL;
+    DescriptorTbl* desc_tbl = nullptr;
     TDescriptorTable thrift_desc_tbl;
     int tuple_id = 0;
     int slot_id = 0;
 
-    for (int i = 0; i < _tuples_descs.size(); ++i) {
-        build_tuple(_tuples_descs[i]->slot_types(), &thrift_desc_tbl, &tuple_id, &slot_id);
+    for (auto& _tuples_desc : _tuples_descs) {
+        build_tuple(_tuples_desc->slot_types(), &thrift_desc_tbl, &tuple_id, &slot_id);
     }
 
-    Status status = DescriptorTbl::create(_obj_pool, thrift_desc_tbl, &desc_tbl);
-    DCHECK(status.ok());
+    Status status = DescriptorTbl::create(_state, _obj_pool, thrift_desc_tbl, &desc_tbl, config::vector_chunk_size);
+    CHECK(status.ok());
     return desc_tbl;
 }
 

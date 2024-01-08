@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/ScalarFunction.java
 
@@ -21,19 +34,17 @@
 
 package com.starrocks.catalog;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.gson.Gson;
-import com.starrocks.analysis.CreateFunctionStmt;
+import com.google.gson.annotations.SerializedName;
 import com.starrocks.analysis.FunctionName;
-import com.starrocks.analysis.HdfsURI;
 import com.starrocks.common.io.Text;
+import com.starrocks.sql.ast.CreateFunctionStmt;
+import com.starrocks.sql.ast.HdfsURI;
 import com.starrocks.thrift.TFunction;
 import com.starrocks.thrift.TFunctionBinaryType;
 import com.starrocks.thrift.TScalarFunction;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.util.Strings;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -44,18 +55,21 @@ import java.util.Map;
 
 import static com.starrocks.common.io.IOUtils.writeOptionString;
 
-// import com.starrocks.thrift.TSymbolType;
-
 /**
  * Internal representation of a scalar function.
  */
 public class ScalarFunction extends Function {
-    private static final Logger LOG = LogManager.getLogger(ScalarFunction.class);
     // The name inside the binary at location_ that contains this particular
     // function. e.g. org.example.MyUdf.class.
+    @SerializedName(value = "symbolName")
     private String symbolName;
+    @SerializedName(value = "prepareFnSymbol")
     private String prepareFnSymbol;
+    @SerializedName(value = "closeFnSymbol")
     private String closeFnSymbol;
+    // isolated/shared
+    @SerializedName(value = "isolated")
+    private boolean isolationType = true;
 
     // Only used for serialization
     protected ScalarFunction() {
@@ -81,38 +95,24 @@ public class ScalarFunction extends Function {
         setCloseFnSymbol(closeFnSymbol);
     }
 
-    public ScalarFunction(long fid, FunctionName name, List<Type> argTypes, Type retType, boolean hasVarArgs,
-                          boolean isVectorized) {
-        super(fid, name, argTypes, retType, hasVarArgs, isVectorized);
+    public ScalarFunction(long fid, FunctionName name, List<Type> argTypes, Type retType, boolean hasVarArgs) {
+        super(fid, name, argTypes, retType, hasVarArgs);
+    }
+
+    public ScalarFunction(ScalarFunction other) {
+        super(other);
+        symbolName = other.symbolName;
+        prepareFnSymbol = other.prepareFnSymbol;
+        closeFnSymbol = other.closeFnSymbol;
+        isolationType = other.isolationType;
     }
 
     public static ScalarFunction createVectorizedBuiltin(long fid,
                                                          String name, List<Type> argTypes,
                                                          boolean hasVarArgs, Type retType) {
-        ScalarFunction fn = new ScalarFunction(fid,
-                new FunctionName(name), argTypes, retType, hasVarArgs, true);
+        ScalarFunction fn = new ScalarFunction(fid, new FunctionName(name), argTypes, retType, hasVarArgs);
         fn.setBinaryType(TFunctionBinaryType.BUILTIN);
         fn.setUserVisible(true);
-
-        return fn;
-    }
-
-    /**
-     * Creates a builtin scalar function. This is a helper that wraps a few steps
-     * into one call.
-     */
-    public static ScalarFunction createBuiltin(
-            String name, List<Type> argTypes,
-            boolean hasVarArgs, Type retType, String symbol,
-            String prepareFnSymbol, String closeFnSymbol, boolean userVisible) {
-        Preconditions.checkNotNull(symbol);
-        ScalarFunction fn = new ScalarFunction(
-                new FunctionName(name), argTypes, retType, hasVarArgs);
-        fn.setBinaryType(TFunctionBinaryType.BUILTIN);
-        fn.setUserVisible(userVisible);
-        fn.symbolName = symbol;
-        fn.prepareFnSymbol = prepareFnSymbol;
-        fn.closeFnSymbol = closeFnSymbol;
         return fn;
     }
 
@@ -124,79 +124,7 @@ public class ScalarFunction extends Function {
      */
     public static ScalarFunction createBuiltinOperator(
             String name, ArrayList<Type> argTypes, Type retType) {
-        // Operators have a well defined symbol based on the function name and type.
-        // Convert Add(TINYINT, TINYINT) --> Add_TinyIntVal_TinyIntVal
-        String beFn = name;
-        boolean usesDecimal = false;
-        boolean usesDecimalV2 = false;
-        boolean usesDecimalV3 = false;
-        for (int i = 0; i < argTypes.size(); ++i) {
-            switch (argTypes.get(i).getPrimitiveType()) {
-                case BOOLEAN:
-                    beFn += "_boolean_val";
-                    break;
-                case TINYINT:
-                    beFn += "_tiny_int_val";
-                    break;
-                case SMALLINT:
-                    beFn += "_small_int_val";
-                    break;
-                case INT:
-                    beFn += "_int_val";
-                    break;
-                case BIGINT:
-                    beFn += "_big_int_val";
-                    break;
-                case LARGEINT:
-                    beFn += "_large_int_val";
-                    break;
-                case FLOAT:
-                    beFn += "_float_val";
-                    break;
-                case DOUBLE:
-                case TIME:
-                    beFn += "_double_val";
-                    break;
-                case CHAR:
-                case VARCHAR:
-                case HLL:
-                case BITMAP:
-                case PERCENTILE:
-                    beFn += "_string_val";
-                    break;
-                case DATE:
-                case DATETIME:
-                    beFn += "_datetime_val";
-                    break;
-                case DECIMALV2:
-                    beFn += "_decimalv2_val";
-                    usesDecimalV2 = true;
-                    break;
-                case DECIMAL32:
-                    beFn += "_decimal32_val";
-                    usesDecimalV3 = true;
-                    break;
-                case DECIMAL64:
-                    beFn += "_decimal64_val";
-                    usesDecimalV3 = true;
-                    break;
-                case DECIMAL128:
-                    beFn += "_decimal128_val";
-                    usesDecimalV3 = true;
-                    break;
-                default:
-                    Preconditions.checkState(false, "Argument type not supported: " + argTypes.get(i));
-            }
-        }
-        String beClass = usesDecimal ? "DecimalOperators" : "Operators";
-        if (usesDecimalV2) {
-            beClass = "DecimalV2Operators";
-        }
-        if (usesDecimalV3) {
-            beClass = "DecimalV3Operators";
-        }
-        String symbol = "starrocks::" + beClass + "::" + beFn;
-        return createBuiltinOperator(name, symbol, argTypes, retType);
+        return createBuiltinOperator(name, Strings.EMPTY, argTypes, retType);
     }
 
     public static ScalarFunction createBuiltinOperator(
@@ -215,32 +143,29 @@ public class ScalarFunction extends Function {
         return fn;
     }
 
-    /**
-     * Create a function that is used to search the catalog for a matching builtin. Only
-     * the fields necessary for matching function prototypes are specified.
-     */
-    public static ScalarFunction createBuiltinSearchDesc(
-            String name, Type[] argTypes, boolean hasVarArgs) {
-        ArrayList<Type> fnArgs =
-                (argTypes == null) ? new ArrayList<Type>() : Lists.newArrayList(argTypes);
-        ScalarFunction fn = new ScalarFunction(
-                new FunctionName(name), fnArgs, Type.INVALID, hasVarArgs);
-        fn.setBinaryType(TFunctionBinaryType.BUILTIN);
+    public static ScalarFunction createUdf(
+            FunctionName name, Type[] args,
+            Type returnType, boolean isVariadic,
+            TFunctionBinaryType binaryType,
+            String objectFile, String symbol, String prepareFnSymbol, String closeFnSymbol, boolean isolationType) {
+        ScalarFunction fn = new ScalarFunction(name, args, returnType, isVariadic);
+        fn.setBinaryType(binaryType);
+        fn.setUserVisible(true);
+        fn.symbolName = symbol;
+        fn.prepareFnSymbol = prepareFnSymbol;
+        fn.closeFnSymbol = closeFnSymbol;
+        fn.setIsolationType(isolationType);
+        fn.setLocation(new HdfsURI(objectFile));
         return fn;
     }
 
     public static ScalarFunction createUdf(
             FunctionName name, Type[] args,
             Type returnType, boolean isVariadic,
+            TFunctionBinaryType binaryType,
             String objectFile, String symbol, String prepareFnSymbol, String closeFnSymbol) {
-        ScalarFunction fn = new ScalarFunction(name, args, returnType, isVariadic);
-        fn.setBinaryType(TFunctionBinaryType.HIVE);
-        fn.setUserVisible(true);
-        fn.symbolName = symbol;
-        fn.prepareFnSymbol = prepareFnSymbol;
-        fn.closeFnSymbol = closeFnSymbol;
-        fn.setLocation(new HdfsURI(objectFile));
-        return fn;
+        return createUdf(name, args, returnType, isVariadic, binaryType, objectFile,
+                symbol, prepareFnSymbol, closeFnSymbol, true);
     }
 
     public void setSymbolName(String s) {
@@ -256,7 +181,7 @@ public class ScalarFunction extends Function {
     }
 
     public String getSymbolName() {
-        return symbolName;
+        return symbolName == null ? Strings.EMPTY : symbolName;
     }
 
     public String getPrepareFnSymbol() {
@@ -265,6 +190,14 @@ public class ScalarFunction extends Function {
 
     public String getCloseFnSymbol() {
         return closeFnSymbol;
+    }
+
+    public boolean getIsolationType() {
+        return isolationType;
+    }
+
+    public void setIsolationType(boolean isolationType) {
+        this.isolationType = isolationType;
     }
 
     @Override
@@ -283,18 +216,16 @@ public class ScalarFunction extends Function {
     @Override
     public TFunction toThrift() {
         TFunction fn = super.toThrift();
-        if (symbolName == null) {
-            // For vector engine, the symbol field is required
-            symbolName = "";
-        }
-        fn.setScalar_fn(new TScalarFunction());
-        fn.getScalar_fn().setSymbol(symbolName);
+        TScalarFunction scalarFunction = new TScalarFunction();
+        scalarFunction.setSymbol(getSymbolName());
         if (prepareFnSymbol != null) {
-            fn.getScalar_fn().setPrepare_fn_symbol(prepareFnSymbol);
+            scalarFunction.setPrepare_fn_symbol(prepareFnSymbol);
         }
         if (closeFnSymbol != null) {
-            fn.getScalar_fn().setClose_fn_symbol(closeFnSymbol);
+            scalarFunction.setClose_fn_symbol(closeFnSymbol);
         }
+        fn.setScalar_fn(scalarFunction);
+        fn.setIsolated(isolationType);
         return fn;
     }
 
@@ -324,9 +255,16 @@ public class ScalarFunction extends Function {
     @Override
     public String getProperties() {
         Map<String, String> properties = Maps.newHashMap();
-        properties.put(CreateFunctionStmt.OBJECT_FILE_KEY, getLocation() == null ? "" : getLocation().toString());
+        properties.put("fid", getFunctionId() + "");
+        properties.put(CreateFunctionStmt.FILE_KEY, getLocation() == null ? "" : getLocation().toString());
         properties.put(CreateFunctionStmt.MD5_CHECKSUM, checksum);
-        properties.put(CreateFunctionStmt.SYMBOL_KEY, symbolName);
+        properties.put(CreateFunctionStmt.SYMBOL_KEY, getSymbolName());
+        properties.put(CreateFunctionStmt.TYPE_KEY, getBinaryType().name());
         return new Gson().toJson(properties);
+    }
+
+    @Override
+    public Function copy() {
+        return new ScalarFunction(this);
     }
 }

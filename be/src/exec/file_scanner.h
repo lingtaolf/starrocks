@@ -1,100 +1,112 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/file_scanner.h
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-#ifndef BE_SRC_EXEC_BASE_SCANNER_H_
-#define BE_SRC_EXEC_BASE_SCANNER_H_
+#pragma once
 
-#include "common/status.h"
+#include "common/statusor.h"
 #include "exprs/expr.h"
-#include "runtime/tuple.h"
+#include "gen_cpp/PlanNodes_types.h"
 #include "util/runtime_profile.h"
 
 namespace starrocks {
+class SequentialFile;
+class RandomAccessFile;
+} // namespace starrocks
 
-class Tuple;
-class TupleDescriptor;
-class TupleRow;
-class RowDescriptor;
-class MemTracker;
-class RuntimeState;
-class ExprContext;
+namespace starrocks {
+
+const int64_t MAX_ERROR_LINES_IN_FILE = 50;
 
 struct ScannerCounter {
-    ScannerCounter() : num_rows_filtered(0), num_rows_unselected(0) {}
+    int64_t num_rows_filtered = 0;
+    int64_t num_rows_unselected = 0;
+    int64_t filtered_rows_read = 0;
+    int64_t num_rows_read = 0;
+    int64_t num_bytes_read = 0;
 
-    int64_t num_rows_filtered;   // unqualified rows (unmatch the dest schema, or no partition)
-    int64_t num_rows_unselected; // rows filterd by predicates
+    int64_t total_ns = 0;
+    int64_t fill_ns = 0;
+    int64_t read_batch_ns = 0;
+    int64_t cast_chunk_ns = 0;
+    int64_t materialize_ns = 0;
+
+    int64_t init_chunk_ns = 0;
+
+    int64_t file_read_ns = 0;
 };
 
 class FileScanner {
 public:
     FileScanner(RuntimeState* state, RuntimeProfile* profile, const TBrokerScanRangeParams& params,
-                ScannerCounter* counter);
-    virtual ~FileScanner() { Expr::close(_dest_expr_ctx, _state); };
+                ScannerCounter* counter, bool schema_only = false);
+    virtual ~FileScanner();
 
-    virtual Status init_expr_ctxes();
-    // Open this scanner, will initialize information need to
+    virtual Status init_expr_ctx();
+
     virtual Status open();
 
-    // Get next tuple
-    virtual Status get_next(Tuple* tuple, MemPool* tuple_pool, bool* eof) = 0;
+    virtual StatusOr<ChunkPtr> get_next() = 0;
 
-    // Close this scanner
-    virtual void close() = 0;
-    bool fill_dest_tuple(Tuple* dest_tuple, MemPool* mem_pool);
+    virtual void close();
 
-    void fill_slots_of_columns_from_path(int start, const std::vector<std::string>& columns_from_path);
+    virtual Status get_schema(std::vector<SlotDescriptor>* schema) { return Status::NotSupported("not implemented"); }
+
+    static Status sample_schema(RuntimeState* state, const TBrokerScanRange& scan_range,
+                                std::vector<SlotDescriptor>* schema);
+
+    Status create_random_access_file(const TBrokerRangeDesc& range_desc, const TNetworkAddress& address,
+                                     const TBrokerScanRangeParams& params, CompressionTypePB compression,
+                                     std::shared_ptr<RandomAccessFile>* file);
+
+    Status create_sequential_file(const TBrokerRangeDesc& range_desc, const TNetworkAddress& address,
+                                  const TBrokerScanRangeParams& params, std::shared_ptr<SequentialFile>* file);
+
+    // only for test
+    RuntimeState* TEST_runtime_state() { return _state; }
+
+protected:
+    void fill_columns_from_path(ChunkPtr& chunk, int slot_start, const std::vector<std::string>& columns_from_path,
+                                int size);
+    // materialize is used to transform source chunk depicted by src_slot_descriptors into destination
+    // chunk depicted by dest_slot_descriptors
+    StatusOr<ChunkPtr> materialize(const starrocks::ChunkPtr& src, starrocks::ChunkPtr& cast);
 
 protected:
     RuntimeState* _state;
+    RuntimeProfile* _profile;
     const TBrokerScanRangeParams& _params;
-    // used for process stat
     ScannerCounter* _counter;
 
-    // Used for constructing tuple
-    // slots for value read from broker file
-    std::vector<SlotDescriptor*> _src_slot_descs;
     std::unique_ptr<RowDescriptor> _row_desc;
-    Tuple* _src_tuple;
-    TupleRow* _src_tuple_row;
-
-    std::unique_ptr<MemTracker> _mem_tracker;
-    // Mem pool used to allocate _src_tuple and _src_tuple_row
-    MemPool _mem_pool;
-
-    // Dest tuple descriptor and dest expr context
-    const TupleDescriptor* _dest_tuple_desc;
-    std::vector<ExprContext*> _dest_expr_ctx;
-    // the map values of dest slot id to src slot desc
-    // if there is not key of dest slot id in dest_sid_to_src_sid_without_trans, it will be set to nullptr
-    std::vector<SlotDescriptor*> _src_slot_descs_order_by_dest;
 
     bool _strict_mode;
-    // Profile
-    RuntimeProfile* _profile;
-    RuntimeProfile::Counter* _rows_read_counter;
-    RuntimeProfile::Counter* _read_timer;
-    RuntimeProfile::Counter* _materialize_timer;
+    int64_t _error_counter;
+
+    // sources
+    std::vector<SlotDescriptor*> _src_slot_descriptors;
+
+    // destination
+    const TupleDescriptor* _dest_tuple_desc;
+    std::vector<ExprContext*> _dest_expr_ctx;
+
+    // the map values of destination slot id to src slot desc
+    // index: destination slot id
+    // value: source slot desc
+    std::vector<SlotDescriptor*> _dest_slot_desc_mappings;
+
+    bool _case_sensitive = true;
+
+    bool _schema_only;
 };
-
-} /* namespace starrocks */
-
-#endif /* BE_SRC_EXEC_BASE_SCANNER_H_ */
+} // namespace starrocks

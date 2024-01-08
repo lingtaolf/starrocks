@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/mysql/privilege/UserProperty.java
 
@@ -22,25 +35,18 @@
 package com.starrocks.mysql.privilege;
 
 import com.google.common.base.Joiner;
-import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import com.starrocks.analysis.SetUserPropertyVar;
 import com.starrocks.catalog.AccessPrivilege;
-import com.starrocks.catalog.Catalog;
-import com.starrocks.catalog.ResourceGroup;
-import com.starrocks.catalog.ResourceType;
 import com.starrocks.cluster.ClusterNamespace;
+import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
-import com.starrocks.common.FeMetaVersion;
-import com.starrocks.common.LoadException;
 import com.starrocks.common.Pair;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.load.DppConfig;
-import com.starrocks.system.SystemInfoService;
-import org.apache.commons.lang.StringUtils;
+import com.starrocks.sql.ast.SetUserPropertyVar;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -52,7 +58,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
 /*
@@ -65,8 +70,6 @@ public class UserProperty implements Writable {
     private static final String PROP_MAX_USER_CONNECTIONS = "max_user_connections";
     private static final String PROP_RESOURCE = "resource";
     private static final String PROP_QUOTA = "quota";
-    private static final String PROP_DEFAULT_LOAD_CLUSTER = "default_load_cluster";
-    private static final String PROP_LOAD_CLUSTER = "load_cluster";
 
     // for system user
     public static final Set<Pattern> ADVANCED_PROPERTIES = Sets.newHashSet();
@@ -76,11 +79,6 @@ public class UserProperty implements Writable {
     private String qualifiedUser;
 
     private long maxConn = 100;
-    // Resource belong to this user.
-    private UserResource resource = new UserResource(1000);
-    // load cluster
-    private String defaultLoadCluster = null;
-    private Map<String, DppConfig> clusterToDppConfig = Maps.newHashMap();
 
     /*
      *  We keep white list here to save Baidu domain name (BNS) or DNS as white list.
@@ -101,13 +99,8 @@ public class UserProperty implements Writable {
     static {
         ADVANCED_PROPERTIES.add(Pattern.compile("^" + PROP_MAX_USER_CONNECTIONS + "$", Pattern.CASE_INSENSITIVE));
         ADVANCED_PROPERTIES.add(Pattern.compile("^" + PROP_RESOURCE + ".", Pattern.CASE_INSENSITIVE));
-        ADVANCED_PROPERTIES.add(Pattern.compile("^" + PROP_LOAD_CLUSTER + "." + DppConfig.CLUSTER_NAME_REGEX + "."
-                + DppConfig.PRIORITY + "$", Pattern.CASE_INSENSITIVE));
 
         COMMON_PROPERTIES.add(Pattern.compile("^" + PROP_QUOTA + ".", Pattern.CASE_INSENSITIVE));
-        COMMON_PROPERTIES.add(Pattern.compile("^" + PROP_DEFAULT_LOAD_CLUSTER + "$", Pattern.CASE_INSENSITIVE));
-        COMMON_PROPERTIES.add(Pattern.compile("^" + PROP_LOAD_CLUSTER + "." + DppConfig.CLUSTER_NAME_REGEX + ".",
-                Pattern.CASE_INSENSITIVE));
     }
 
     public UserProperty() {
@@ -163,12 +156,9 @@ public class UserProperty implements Writable {
         whiteList.removeDomain(domain);
     }
 
-    public void update(List<Pair<String, String>> properties) throws DdlException {
+    public void update(List<Pair<String, String>> properties, boolean isReplay) throws DdlException {
         // copy
         long newMaxConn = maxConn;
-        UserResource newResource = resource.getCopiedUserResource();
-        String newDefaultLoadCluster = defaultLoadCluster;
-        Map<String, DppConfig> newDppConfigs = Maps.newHashMap(clusterToDppConfig);
 
         // update
         for (Pair<String, String> entry : properties) {
@@ -191,54 +181,12 @@ public class UserProperty implements Writable {
                 if (newMaxConn <= 0 || newMaxConn > 10000) {
                     throw new DdlException(PROP_MAX_USER_CONNECTIONS + " is not valid, must between 1 and 10000");
                 }
-            } else if (keyArr[0].equalsIgnoreCase(PROP_RESOURCE)) {
-                // set property "resource.cpu_share" = "100"
-                if (keyArr.length != 2) {
-                    throw new DdlException(PROP_RESOURCE + " format error");
-                }
 
-                int resource = 0;
-                try {
-                    resource = Integer.parseInt(value);
-                } catch (NumberFormatException e) {
-                    throw new DdlException(key + " is not number");
+                if (!isReplay && newMaxConn > Config.qe_max_connection) {
+                    throw new DdlException(
+                            PROP_MAX_USER_CONNECTIONS + " is not valid, must less than qe_max_connection " +
+                                    Config.qe_max_connection);
                 }
-
-                if (resource <= 0) {
-                    throw new DdlException(key + " is not valid");
-                }
-
-                newResource.updateResource(keyArr[1], resource);
-            } else if (keyArr[0].equalsIgnoreCase(PROP_QUOTA)) {
-                // set property "quota.normal" = "100"
-                if (keyArr.length != 2) {
-                    throw new DdlException(PROP_QUOTA + " format error");
-                }
-
-                int quota = 0;
-                try {
-                    quota = Integer.parseInt(value);
-                } catch (NumberFormatException e) {
-                    throw new DdlException(key + " is not number");
-                }
-
-                if (quota <= 0) {
-                    throw new DdlException(key + " is not valid");
-                }
-
-                newResource.updateGroupShare(keyArr[1], quota);
-            } else if (keyArr[0].equalsIgnoreCase(PROP_LOAD_CLUSTER)) {
-                updateLoadCluster(keyArr, value, newDppConfigs);
-            } else if (keyArr[0].equalsIgnoreCase(PROP_DEFAULT_LOAD_CLUSTER)) {
-                // set property "default_load_cluster" = "cluster1"
-                if (keyArr.length != 1) {
-                    throw new DdlException(PROP_DEFAULT_LOAD_CLUSTER + " format error");
-                }
-                if (value != null && !newDppConfigs.containsKey(value)) {
-                    throw new DdlException("Load cluster[" + value + "] does not exist");
-                }
-
-                newDefaultLoadCluster = value;
             } else {
                 throw new DdlException("Unknown user property(" + key + ")");
             }
@@ -246,117 +194,13 @@ public class UserProperty implements Writable {
 
         // set
         maxConn = newMaxConn;
-        resource = newResource;
-        if (newDppConfigs.containsKey(newDefaultLoadCluster)) {
-            defaultLoadCluster = newDefaultLoadCluster;
-        } else {
-            defaultLoadCluster = null;
-        }
-        clusterToDppConfig = newDppConfigs;
-    }
-
-    private void updateLoadCluster(String[] keyArr, String value, Map<String, DppConfig> newDppConfigs)
-            throws DdlException {
-        if (keyArr.length == 1 && Strings.isNullOrEmpty(value)) {
-            // set property "load_cluster" = '';
-            newDppConfigs.clear();
-        } else if (keyArr.length == 2 && Strings.isNullOrEmpty(value)) {
-            // set property "load_cluster.cluster1" = ''
-            String cluster = keyArr[1];
-            newDppConfigs.remove(cluster);
-        } else if (keyArr.length == 3 && Strings.isNullOrEmpty(value)) {
-            // set property "load_cluster.cluster1.xxx" = ''
-            String cluster = keyArr[1];
-            if (!newDppConfigs.containsKey(cluster)) {
-                throw new DdlException("Load cluster[" + value + "] does not exist");
-            }
-
-            try {
-                newDppConfigs.get(cluster).resetConfigByKey(keyArr[2]);
-            } catch (LoadException e) {
-                throw new DdlException(e.getMessage());
-            }
-        } else if (keyArr.length == 3 && value != null) {
-            // set property "load_cluster.cluster1.xxx" = "xxx"
-            String cluster = keyArr[1];
-            Map<String, String> configMap = Maps.newHashMap();
-            configMap.put(keyArr[2], value);
-
-            try {
-                DppConfig newDppConfig = DppConfig.create(configMap);
-
-                if (newDppConfigs.containsKey(cluster)) {
-                    newDppConfigs.get(cluster).update(newDppConfig, true);
-                } else {
-                    newDppConfigs.put(cluster, newDppConfig);
-                }
-            } catch (LoadException e) {
-                throw new DdlException(e.getMessage());
-            }
-        } else {
-            throw new DdlException(PROP_LOAD_CLUSTER + " format error");
-        }
-    }
-
-    public UserResource getResource() {
-        return resource;
     }
 
     public List<List<String>> fetchProperty() {
         List<List<String>> result = Lists.newArrayList();
-        String dot = SetUserPropertyVar.DOT_SEPARATOR;
 
         // max user connections
         result.add(Lists.newArrayList(PROP_MAX_USER_CONNECTIONS, String.valueOf(maxConn)));
-
-        // resource
-        ResourceGroup group = resource.getResource();
-        for (Map.Entry<ResourceType, Integer> entry : group.getQuotaMap().entrySet()) {
-            result.add(Lists.newArrayList(PROP_RESOURCE + dot + entry.getKey().getDesc().toLowerCase(),
-                    entry.getValue().toString()));
-        }
-
-        // quota
-        Map<String, AtomicInteger> groups = resource.getShareByGroup();
-        for (Map.Entry<String, AtomicInteger> entry : groups.entrySet()) {
-            result.add(Lists.newArrayList(PROP_QUOTA + dot + entry.getKey(), entry.getValue().toString()));
-        }
-
-        // load cluster
-        if (defaultLoadCluster != null) {
-            result.add(Lists.newArrayList(PROP_DEFAULT_LOAD_CLUSTER, defaultLoadCluster));
-        } else {
-            result.add(Lists.newArrayList(PROP_DEFAULT_LOAD_CLUSTER, ""));
-        }
-
-        for (Map.Entry<String, DppConfig> entry : clusterToDppConfig.entrySet()) {
-            String cluster = entry.getKey();
-            DppConfig dppConfig = entry.getValue();
-            String clusterPrefix = PROP_LOAD_CLUSTER + dot + cluster + dot;
-
-            // starrocks path
-            if (dppConfig.getStarRocksPath() != null) {
-                result.add(Lists.newArrayList(clusterPrefix + DppConfig.getStarRocksPathKey(), dppConfig.getStarRocksPath()));
-            }
-
-            // http port
-            result.add(Lists.newArrayList(clusterPrefix + DppConfig.getHttpPortKey(),
-                    String.valueOf(dppConfig.getHttpPort())));
-
-            // hadoop configs
-            if (dppConfig.getHadoopConfigs() != null) {
-                List<String> configs = Lists.newArrayList();
-                for (Map.Entry<String, String> configEntry : dppConfig.getHadoopConfigs().entrySet()) {
-                    configs.add(String.format("%s=%s", configEntry.getKey(), configEntry.getValue()));
-                }
-                result.add(Lists.newArrayList(clusterPrefix + DppConfig.getHadoopConfigsKey(),
-                        StringUtils.join(configs, ";")));
-            }
-
-            // priority
-            result.add(Lists.newArrayList(clusterPrefix + DppConfig.getPriorityKey(),
-                    String.valueOf(dppConfig.getPriority())));
-        }
 
         // get resolved ips if user has domain
         Map<String, Set<String>> resolvedIPs = whiteList.getResolvedIPs();
@@ -387,102 +231,41 @@ public class UserProperty implements Writable {
 
     @Override
     public void write(DataOutput out) throws IOException {
-        Text.writeString(out, qualifiedUser);
+        Text.writeString(out, ClusterNamespace.getFullName(qualifiedUser));
         out.writeLong(maxConn);
 
-        // user resource
-        resource.write(out);
+        UserResource.write(out);
 
-        // load cluster
-        if (defaultLoadCluster == null) {
-            out.writeBoolean(false);
-        } else {
-            out.writeBoolean(true);
-            Text.writeString(out, defaultLoadCluster);
-        }
-
-        out.writeInt(clusterToDppConfig.size());
-        for (Map.Entry<String, DppConfig> entry : clusterToDppConfig.entrySet()) {
-            Text.writeString(out, entry.getKey());
-            entry.getValue().write(out);
-        }
+        // Be compatible with default load cluster
+        out.writeBoolean(false);
+        // Be compatible with clusterToDppConfig
+        out.writeInt(0);
 
         whiteList.write(out);
     }
 
     public void readFields(DataInput in) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_43) {
-            // consume the flag of empty user name
-            in.readBoolean();
-        }
-
-        // user name
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_30) {
-            qualifiedUser = ClusterNamespace.getFullName(SystemInfoService.DEFAULT_CLUSTER, Text.readString(in));
-        } else {
-            qualifiedUser = Text.readString(in);
-        }
-
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_43) {
-            int passwordLen = in.readInt();
-            password = new byte[passwordLen];
-            in.readFully(password);
-
-            isAdmin = in.readBoolean();
-
-            if (Catalog.getCurrentCatalogJournalVersion() >= 1) {
-                isSuperuser = in.readBoolean();
-            }
-        }
+        // username
+        qualifiedUser = ClusterNamespace.getNameFromFullName(Text.readString(in));
 
         maxConn = in.readLong();
 
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_43) {
-            int numPriv = in.readInt();
-            for (int i = 0; i < numPriv; ++i) {
-                String dbName = null;
-                if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_30) {
-                    dbName = ClusterNamespace.getFullName(SystemInfoService.DEFAULT_CLUSTER, Text.readString(in));
-                } else {
-                    dbName = Text.readString(in);
-                }
-                AccessPrivilege ap = AccessPrivilege.valueOf(Text.readString(in));
-                dbPrivMap.put(dbName, ap);
-            }
-        }
-
-        // user resource
-        resource = UserResource.readIn(in);
+        UserResource.readIn(in);
 
         // load cluster
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_12) {
-            if (in.readBoolean()) {
-                defaultLoadCluster = Text.readString(in);
-            }
-
-            int clusterNum = in.readInt();
-            for (int i = 0; i < clusterNum; ++i) {
-                String cluster = Text.readString(in);
-                DppConfig dppConfig = new DppConfig();
-                dppConfig.readFields(in);
-                clusterToDppConfig.put(cluster, dppConfig);
-            }
+        // Be compatible with defaultLoadCluster
+        if (in.readBoolean()) {
+            Text.readString(in);
         }
 
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_21) {
-            whiteList.readFields(in);
-            if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_69) {
-                whiteList.convertOldDomainPrivMap(qualifiedUser);
-            }
+        int clusterNum = in.readInt();
+        // TODO(zc): Be compatible with dppConfig, we can assert clusterNum is 0 in version 2.5
+        for (int i = 0; i < clusterNum; ++i) {
+            Text.readString(in);
+            DppConfig dppConfig = new DppConfig();
+            dppConfig.readFields(in);
         }
 
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_43) {
-            if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_30) {
-                if (in.readBoolean()) {
-                    // consume cluster name
-                    Text.readString(in);
-                }
-            }
-        }
+        whiteList.readFields(in);
     }
 }

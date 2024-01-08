@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/runtime/record_batch_queue.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_RECORD_BATCH_QUEUE_H
-#define STARROCKS_RECORD_BATCH_QUEUE_H
+#pragma once
 
 #include <util/spinlock.h>
 
@@ -53,6 +48,8 @@ public:
 
     bool blocking_put(const std::shared_ptr<arrow::RecordBatch>& val) { return _queue.blocking_put(val); }
 
+    bool try_put(const std::shared_ptr<arrow::RecordBatch>& val) { return _queue.try_put(val); }
+
     // Shut down the queue. Wakes up all threads waiting on blocking_get or blocking_put.
     void shutdown();
 
@@ -63,5 +60,3 @@ private:
 };
 
 } // namespace starrocks
-
-#endif //STARROCKS_RECORD_BATCH_QUEUE_H

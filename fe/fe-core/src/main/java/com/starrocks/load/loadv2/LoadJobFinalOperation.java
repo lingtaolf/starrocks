@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/load/loadv2/LoadJobFinalOperation.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,6 +17,7 @@
 
 package com.starrocks.load.loadv2;
 
+import com.google.gson.annotations.SerializedName;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.load.EtlStatus;
@@ -37,13 +34,20 @@ import java.io.IOException;
  * It is used to edit the job final state.
  */
 public class LoadJobFinalOperation extends TxnCommitAttachment implements Writable {
+    @SerializedName("id")
     private long id;
+    @SerializedName("ls")
     private EtlStatus loadingStatus = new EtlStatus();
+    @SerializedName("ps")
     private int progress;
+    @SerializedName("lst")
     private long loadStartTimestamp;
+    @SerializedName("ft")
     private long finishTimestamp;
+    @SerializedName("js")
     private JobState jobState;
     // optional
+    @SerializedName("fm")
     private FailMsg failMsg;
 
     public LoadJobFinalOperation() {

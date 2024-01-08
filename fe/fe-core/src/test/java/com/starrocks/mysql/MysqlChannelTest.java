@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/mysql/MysqlChannelTest.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -103,7 +99,7 @@ public class MysqlChannelTest {
                 minTimes = 0;
                 result = new Delegate() {
                     int fakeRead(ByteBuffer buffer) {
-                        int maxLen = 0xffffff - 1;
+                        int maxLen = MysqlChannel.MAX_PHYSICAL_PACKET_LENGTH;
                         MysqlSerializer serializer = MysqlSerializer.newInstance();
                         if (readIdx == 0) {
                             // packet
@@ -151,7 +147,7 @@ public class MysqlChannelTest {
         MysqlChannel channel1 = new MysqlChannel(channel);
 
         ByteBuffer buf = channel1.fetchOnePacket();
-        Assert.assertEquals(0xffffff - 1 + 10, buf.remaining());
+        Assert.assertEquals(MysqlChannel.MAX_PHYSICAL_PACKET_LENGTH + 10, buf.remaining());
         for (int i = 0; i < 0xffffff - 1 + 10; ++i) {
             Assert.assertEquals('a' + (i % 26), buf.get());
         }
@@ -166,7 +162,7 @@ public class MysqlChannelTest {
                 minTimes = 0;
                 result = new Delegate() {
                     int fakeRead(ByteBuffer buffer) {
-                        int maxLen = 0xffffff - 1;
+                        int maxLen = MysqlChannel.MAX_PHYSICAL_PACKET_LENGTH;
                         MysqlSerializer serializer = MysqlSerializer.newInstance();
                         if (readIdx == 0) {
                             // packet
@@ -298,6 +294,43 @@ public class MysqlChannelTest {
         ByteBuffer buf = ByteBuffer.allocate(1000);
         channel1.sendAndFlush(buf);
         Assert.fail("No Exception throws.");
+    }
+
+    @Test
+    public void testSendAfterException() throws IOException {
+        // Mock.
+        new Expectations() {
+            {
+                channel.write((ByteBuffer) any);
+                // The first calling `write()` throws IOException.
+                result = new IOException();
+                // The other calling `write()` executes normally.
+                result = new Delegate() {
+                    int fakeRead(ByteBuffer buffer) {
+                        int writeLen = buffer.remaining();
+                        buffer.position(buffer.limit());
+                        return writeLen;
+                    }
+                };
+            }
+        };
+
+        MysqlChannel channel1 = new MysqlChannel(channel);
+
+        // The first calling `realNetSend()` in `flush()` throws IOException.
+        // If `flush()` doesn't consider this exception, `sendBuffer` won't be reset to write mode,
+        // which will cause BufferOverflowException at the next calling `sendOnePacket()`.
+        ByteBuffer buf = ByteBuffer.allocate(10);
+        buf.putInt(1);
+        buf.flip(); // limit=4
+        channel1.sendOnePacket(buf);
+        buf.clear();
+        Assert.assertThrows(IOException.class, channel1::flush);
+
+        buf.putInt(1);
+        buf.putInt(2);
+        buf.flip(); // limit=8
+        channel1.sendOnePacket(buf);
     }
 
 }

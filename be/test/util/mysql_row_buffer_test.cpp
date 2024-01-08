@@ -1,4 +1,16 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "util/mysql_row_buffer.h"
 
@@ -7,6 +19,7 @@
 #include "gtest/gtest.h"
 #include "gutil/port.h"
 #include "runtime/large_int_value.h"
+#include "types/constexpr.h"
 
 namespace starrocks {
 
@@ -378,6 +391,22 @@ TEST_F(MysqlRowBufferTest, test_array) {
         auto data = decode_mysql_row(&slice);
 
         ASSERT_EQ("[[1,2],[],null]", data.value());
+        ASSERT_EQ("", slice);
+    }
+    // json array
+    {
+        MysqlRowBuffer row_buffer;
+        row_buffer.begin_push_array();
+
+        Slice json = R"({"k1": "v1"})";
+        row_buffer.push_string(json.data, json.size, '\'');
+
+        row_buffer.finish_push_array();
+
+        Slice slice(row_buffer.data());
+        auto data = decode_mysql_row(&slice);
+
+        ASSERT_EQ(R"(['{"k1": "v1"}'])", data.value());
         ASSERT_EQ("", slice);
     }
 }

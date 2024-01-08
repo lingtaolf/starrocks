@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/load/loadv2/LoadJobScheduler.java
 
@@ -27,9 +40,9 @@ import com.starrocks.common.Config;
 import com.starrocks.common.DuplicatedRequestException;
 import com.starrocks.common.LabelAlreadyUsedException;
 import com.starrocks.common.LoadException;
+import com.starrocks.common.util.FrontendDaemon;
 import com.starrocks.common.util.LogBuilder;
 import com.starrocks.common.util.LogKey;
-import com.starrocks.common.util.MasterDaemon;
 import com.starrocks.load.FailMsg;
 import com.starrocks.transaction.BeginTransactionException;
 import org.apache.logging.log4j.LogManager;
@@ -44,14 +57,14 @@ import java.util.concurrent.RejectedExecutionException;
  * The function of execute will be called in LoadScheduler.
  * The status of LoadJob will be changed to loading after LoadScheduler.
  */
-public class LoadJobScheduler extends MasterDaemon {
+public class LoadJobScheduler extends FrontendDaemon {
 
     private static final Logger LOG = LogManager.getLogger(LoadJobScheduler.class);
 
     private LinkedBlockingQueue<LoadJob> needScheduleJobs = Queues.newLinkedBlockingQueue();
 
     public LoadJobScheduler() {
-        super("Load job scheduler", Config.load_checker_interval_second * 1000);
+        super("Load job scheduler", Config.load_checker_interval_second * 1000L);
     }
 
     @Override

@@ -1,27 +1,21 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/analysis/FunctionName.java
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package com.starrocks.analysis;
 
 import com.google.common.base.Strings;
+import com.google.gson.annotations.SerializedName;
 import com.starrocks.cluster.ClusterNamespace;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.ErrorCode;
@@ -29,8 +23,6 @@ import com.starrocks.common.ErrorReport;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.thrift.TFunctionName;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -42,9 +34,11 @@ import java.util.Objects;
  * db.function_name.
  */
 public class FunctionName implements Writable {
-    private static final Logger LOG = LogManager.getLogger(FunctionName.class);
+    public static final String GLOBAL_UDF_DB = "__global_udf_db__";
 
+    @SerializedName(value = "db")
     private String db_;
+    @SerializedName(value = "fn")
     private String fn_;
 
     private FunctionName() {
@@ -53,9 +47,6 @@ public class FunctionName implements Writable {
     public FunctionName(String db, String fn) {
         db_ = db;
         fn_ = fn.toLowerCase();
-        if (db_ != null) {
-            db_ = db_.toLowerCase();
-        }
     }
 
     public FunctionName(String fn) {
@@ -63,21 +54,13 @@ public class FunctionName implements Writable {
         fn_ = fn.toLowerCase();
     }
 
-    public FunctionName(TFunctionName thriftName) {
-        db_ = thriftName.db_name.toLowerCase();
-        fn_ = thriftName.function_name.toLowerCase();
-    }
-
-    // Same as FunctionName but for builtins and we'll leave the case
-    // as is since we aren't matching by string.
-    public static FunctionName createBuiltinName(String fn) {
-        FunctionName name = new FunctionName(fn);
-        name.fn_ = fn;
-        return name;
-    }
-
-    public static FunctionName fromThrift(TFunctionName fnName) {
-        return new FunctionName(fnName.getDb_name(), fnName.getFunction_name());
+    public static FunctionName createFnName(String fn) {
+        final String[] dbWithFn = fn.split("\\.");
+        if (dbWithFn.length == 2) {
+            return new FunctionName(dbWithFn[0], dbWithFn[1]);
+        } else {
+            return new FunctionName(null, fn);
+        }
     }
 
     @Override
@@ -86,18 +69,7 @@ public class FunctionName implements Writable {
             return false;
         }
         FunctionName o = (FunctionName) obj;
-        if ((db_ == null || o.db_ == null) && (db_ != o.db_)) {
-            if (db_ == null && o.db_ != null) {
-                return false;
-            }
-            if (db_ != null && o.db_ == null) {
-                return false;
-            }
-            if (!db_.equalsIgnoreCase(o.db_)) {
-                return false;
-            }
-        }
-        return fn_.equalsIgnoreCase(o.fn_);
+        return Objects.equals(db_, o.db_) && Objects.equals(fn_, o.fn_);
     }
 
     public String getDb() {
@@ -112,8 +84,12 @@ public class FunctionName implements Writable {
         return fn_;
     }
 
-    public boolean isFullyQualified() {
-        return db_ != null;
+    public boolean isGlobalFunction() {
+        return GLOBAL_UDF_DB.equals(db_);
+    }
+
+    public void setAsGlobalFunction() {
+        db_ = GLOBAL_UDF_DB;
     }
 
     @Override
@@ -124,21 +100,7 @@ public class FunctionName implements Writable {
         return db_ + "." + fn_;
     }
 
-    // used to analyze db element in function name, add cluster
-    public String analyzeDb(Analyzer analyzer) throws AnalysisException {
-        String db = db_;
-        if (db == null) {
-            db = analyzer.getDefaultDb();
-        } else {
-            if (Strings.isNullOrEmpty(analyzer.getClusterName())) {
-                ErrorReport.reportAnalysisException(ErrorCode.ERR_CLUSTER_NAME_NULL);
-            }
-            db = ClusterNamespace.getFullName(analyzer.getClusterName(), db);
-        }
-        return db;
-    }
-
-    public void analyze(Analyzer analyzer) throws AnalysisException {
+    public void analyze(String defaultDb) throws AnalysisException {
         if (fn_.length() == 0) {
             throw new AnalysisException("Function name can not be empty.");
         }
@@ -153,23 +115,11 @@ public class FunctionName implements Writable {
             throw new AnalysisException("Function cannot start with a digit: " + fn_);
         }
         if (db_ == null) {
-            db_ = analyzer.getDefaultDb();
+            db_ = defaultDb;
             if (Strings.isNullOrEmpty(db_)) {
                 ErrorReport.reportAnalysisException(ErrorCode.ERR_NO_DB_ERROR);
             }
-        } else {
-            if (Strings.isNullOrEmpty(analyzer.getClusterName())) {
-                ErrorReport.reportAnalysisException(ErrorCode.ERR_CLUSTER_NAME_NULL);
-            }
-            db_ = ClusterNamespace.getFullName(analyzer.getClusterName(), db_);
         }
-
-        // If the function name is not fully qualified, it must not be the same as a builtin
-        //        if (!isFullyQualified() && OpcodeRegistry.instance().getFunctionOperator(
-        //          getFunction()) != FunctionOperator.INVALID_OPERATOR) {
-        //            throw new AnalysisException(
-        //              "Function cannot have the same name as a builtin: " + getFunction());
-        //        }
     }
 
     private boolean isValidCharacter(char c) {
@@ -187,7 +137,8 @@ public class FunctionName implements Writable {
     public void write(DataOutput out) throws IOException {
         if (db_ != null) {
             out.writeBoolean(true);
-            Text.writeString(out, db_);
+            // compatible with old version
+            Text.writeString(out, ClusterNamespace.getFullName(db_));
         } else {
             out.writeBoolean(false);
         }
@@ -196,7 +147,8 @@ public class FunctionName implements Writable {
 
     public void readFields(DataInput in) throws IOException {
         if (in.readBoolean()) {
-            db_ = Text.readString(in);
+            // compatible with old version
+            db_ = ClusterNamespace.getNameFromFullName(Text.readString(in));
         }
         fn_ = Text.readString(in);
     }

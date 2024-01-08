@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/test/TestDecompression.cc
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -321,7 +317,7 @@ TEST_F(TestDecompression, testCreateNone) {
     std::unique_ptr<SeekableInputStream> result = createDecompressor(
             CompressionKind_NONE,
             std::unique_ptr<SeekableInputStream>(new SeekableArrayInputStream(bytes.data(), bytes.size())), 32768,
-            *getDefaultPool());
+            *getDefaultPool(), nullptr);
     const void* ptr;
     int length;
     result->Next(&ptr, &length);
@@ -334,7 +330,7 @@ TEST_F(TestDecompression, testLzoEmpty) {
     const unsigned char buffer[] = {0};
     std::unique_ptr<SeekableInputStream> result = createDecompressor(
             CompressionKind_LZO, std::unique_ptr<SeekableInputStream>(new SeekableArrayInputStream(buffer, 0)), 32768,
-            *getDefaultPool());
+            *getDefaultPool(), nullptr);
     EXPECT_EQ("lzo(SeekableArrayInputStream 0 of 0)", result->getName());
     const void* ptr;
     int length;
@@ -347,7 +343,7 @@ TEST_F(TestDecompression, testLzoSmall) {
     std::unique_ptr<SeekableInputStream> result = createDecompressor(
             CompressionKind_LZO,
             std::unique_ptr<SeekableInputStream>(new SeekableArrayInputStream(buffer, ARRAY_SIZE(buffer))), 128 * 1024,
-            *getDefaultPool());
+            *getDefaultPool(), nullptr);
     const void* ptr;
     int length;
     ASSERT_EQ(true, result->Next(&ptr, &length));
@@ -387,7 +383,7 @@ TEST_F(TestDecompression, testLzoLong) {
     std::unique_ptr<SeekableInputStream> result = createDecompressor(
             CompressionKind_LZO,
             std::unique_ptr<SeekableInputStream>(new SeekableArrayInputStream(buffer, ARRAY_SIZE(buffer))), 128 * 1024,
-            *getDefaultPool());
+            *getDefaultPool(), nullptr);
     const void* ptr;
     int length;
     ASSERT_EQ(true, result->Next(&ptr, &length));
@@ -402,7 +398,7 @@ TEST_F(TestDecompression, testLz4Empty) {
     const unsigned char buffer[] = {0};
     std::unique_ptr<SeekableInputStream> result = createDecompressor(
             CompressionKind_LZ4, std::unique_ptr<SeekableInputStream>(new SeekableArrayInputStream(buffer, 0)), 32768,
-            *getDefaultPool());
+            *getDefaultPool(), nullptr);
     EXPECT_EQ("lz4(SeekableArrayInputStream 0 of 0)", result->getName());
     const void* ptr;
     int length;
@@ -415,7 +411,7 @@ TEST_F(TestDecompression, testLz4Small) {
     std::unique_ptr<SeekableInputStream> result = createDecompressor(
             CompressionKind_LZ4,
             std::unique_ptr<SeekableInputStream>(new SeekableArrayInputStream(buffer, ARRAY_SIZE(buffer))), 128 * 1024,
-            *getDefaultPool());
+            *getDefaultPool(), nullptr);
     const void* ptr;
     int length;
     ASSERT_EQ(true, result->Next(&ptr, &length));
@@ -448,7 +444,7 @@ TEST_F(TestDecompression, testLz4Long) {
     std::unique_ptr<SeekableInputStream> result = createDecompressor(
             CompressionKind_LZ4,
             std::unique_ptr<SeekableInputStream>(new SeekableArrayInputStream(buffer, ARRAY_SIZE(buffer))), 128 * 1024,
-            *getDefaultPool());
+            *getDefaultPool(), nullptr);
     const void* ptr;
     int length;
     ASSERT_EQ(true, result->Next(&ptr, &length));
@@ -464,7 +460,7 @@ TEST(Zlib, testCreateZlib) {
     std::unique_ptr<SeekableInputStream> result = createDecompressor(
             CompressionKind_ZLIB,
             std::unique_ptr<SeekableInputStream>(new SeekableArrayInputStream(buffer, ARRAY_SIZE(buffer))), 32768,
-            *getDefaultPool());
+            *getDefaultPool(), nullptr);
     EXPECT_EQ("zlib(SeekableArrayInputStream 0 of 8)", result->getName());
     const void* ptr;
     int length;
@@ -490,7 +486,7 @@ TEST(Zlib, testLiteralBlocks) {
     std::unique_ptr<SeekableInputStream> result = createDecompressor(
             CompressionKind_ZLIB,
             std::unique_ptr<SeekableInputStream>(new SeekableArrayInputStream(buffer, ARRAY_SIZE(buffer), 5)), 5,
-            *getDefaultPool());
+            *getDefaultPool(), nullptr);
     EXPECT_EQ("zlib(SeekableArrayInputStream 0 of 23)", result->getName());
     const void* ptr;
     int length;
@@ -528,7 +524,7 @@ TEST(Zlib, testInflate) {
     std::unique_ptr<SeekableInputStream> result = createDecompressor(
             CompressionKind_ZLIB,
             std::unique_ptr<SeekableInputStream>(new SeekableArrayInputStream(buffer, ARRAY_SIZE(buffer))), 1000,
-            *getDefaultPool());
+            *getDefaultPool(), nullptr);
     const void* ptr;
     int length;
     ASSERT_EQ(true, result->Next(&ptr, &length));
@@ -546,7 +542,7 @@ TEST(Zlib, testInflateSequence) {
     std::unique_ptr<SeekableInputStream> result = createDecompressor(
             CompressionKind_ZLIB,
             std::unique_ptr<SeekableInputStream>(new SeekableArrayInputStream(buffer, ARRAY_SIZE(buffer), 3)), 1000,
-            *getDefaultPool());
+            *getDefaultPool(), nullptr);
     const void* ptr;
     int length;
     ASSERT_THROW(result->BackUp(20), std::logic_error);
@@ -579,7 +575,7 @@ TEST(Zlib, testSkip) {
     std::unique_ptr<SeekableInputStream> result = createDecompressor(
             CompressionKind_ZLIB,
             std::unique_ptr<SeekableInputStream>(new SeekableArrayInputStream(buffer, ARRAY_SIZE(buffer), 5)), 5,
-            *getDefaultPool());
+            *getDefaultPool(), nullptr);
     const void* ptr;
     int length;
     ASSERT_EQ(true, result->Next(&ptr, &length));
@@ -619,6 +615,11 @@ public:
         buf[2] = static_cast<char>(compressedSize >> 15);
     }
 
+    void writeUncompressedHeader(size_t compressedSize) {
+        writeHeader(compressedSize);
+        buf[0] |= 1;
+    }
+
     size_t getCompressedSize() const {
         size_t header = static_cast<unsigned char>(buf[0]);
         header |= static_cast<size_t>(static_cast<unsigned char>(buf[1])) << 8;
@@ -648,7 +649,7 @@ TEST(Snappy, testBasic) {
             createDecompressor(CompressionKind_SNAPPY,
                                std::unique_ptr<SeekableInputStream>(new SeekableArrayInputStream(
                                        compressBuffer.getBuffer(), compressBuffer.getBufferSize(), blockSize)),
-                               buf.size(), *getDefaultPool());
+                               buf.size(), *getDefaultPool(), nullptr);
     const void* data;
     int length;
     ASSERT_TRUE(result->Next(&data, &length));
@@ -684,7 +685,7 @@ TEST(Snappy, testMultiBuffer) {
     std::unique_ptr<SeekableInputStream> result = createDecompressor(
             CompressionKind_SNAPPY,
             std::unique_ptr<SeekableInputStream>(new SeekableArrayInputStream(input.data(), input.size(), blockSize)),
-            buf.size(), *getDefaultPool());
+            buf.size(), *getDefaultPool(), nullptr);
     for (int i = 0; i < 4; ++i) {
         const void* data;
         int length;
@@ -714,7 +715,7 @@ TEST(Snappy, testSkip) {
             createDecompressor(CompressionKind_SNAPPY,
                                std::unique_ptr<SeekableInputStream>(new SeekableArrayInputStream(
                                        compressBuffer.getBuffer(), compressBuffer.getBufferSize(), blockSize)),
-                               buf.size(), *getDefaultPool());
+                               buf.size(), *getDefaultPool(), nullptr);
     const void* data;
     int length;
     // skip 1/2; in 2 jumps
@@ -725,6 +726,51 @@ TEST(Snappy, testSkip) {
     for (int i = N / 2; i < N; ++i) {
         EXPECT_EQ(i % 8, (reinterpret_cast<const int*>(data))[i - N / 2]);
     }
+}
+
+TEST_F(TestDecompression, testUncompressedSeek) {
+    SCOPED_TRACE("testUncompressedSeek");
+    const int N = 197;
+    CompressBuffer compressBuffer(N);
+    compressBuffer.writeUncompressedHeader(N);
+    for (int i = 0; i < N; ++i) {
+        compressBuffer.getCompressed()[i] = static_cast<char>(i);
+    }
+    size_t chunkSize = compressBuffer.getBufferSize();
+    std::vector<char> buf(chunkSize * 2);
+    ::memcpy(buf.data(), compressBuffer.getBuffer(), chunkSize);
+    ::memcpy(buf.data() + chunkSize, compressBuffer.getBuffer(), chunkSize);
+
+    // Choose a block size larger than the chunk size.
+    const long blockSize = 300;
+    std::unique_ptr<SeekableInputStream> input(new SeekableArrayInputStream(buf.data(), buf.size(), blockSize));
+    std::unique_ptr<SeekableInputStream> stream =
+            createDecompressor(CompressionKind_SNAPPY, std::move(input), chunkSize, *getDefaultPool(), nullptr);
+
+    const void* data;
+    int len;
+    // First read returns the first chunk.
+    ASSERT_TRUE(stream->Next(&data, &len));
+    EXPECT_EQ(N, len);
+    checkBytes(reinterpret_cast<const char*>(data), N, 0);
+    // The second chunk lays across the block boundary.
+    // Second read returns the first part of the second chunk.
+    ASSERT_TRUE(stream->Next(&data, &len));
+    EXPECT_EQ(blockSize - chunkSize - HEADER_SIZE, len);
+    checkBytes(reinterpret_cast<const char*>(data), len, 0);
+
+    // Seek to the 100th item of the second chunk. The position is in the second block.
+    {
+        std::list<uint64_t> offsets;
+        offsets.push_back(compressBuffer.getBufferSize());
+        offsets.push_back(100);
+        PositionProvider posn(offsets);
+        stream->seek(posn);
+    }
+    // Read the remaining N-100 bytes of the second chunk.
+    EXPECT_TRUE(stream->Next(&data, &len));
+    EXPECT_EQ(N - 100, len);
+    checkBytes(reinterpret_cast<const char*>(data), len, 100);
 }
 
 } // namespace orc

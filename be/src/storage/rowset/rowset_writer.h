@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/olap/rowset/rowset_writer.h
 
@@ -19,42 +32,47 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_OLAP_ROWSET_ROWSET_WRITER_H
-#define STARROCKS_BE_SRC_OLAP_ROWSET_ROWSET_WRITER_H
+#pragma once
 
+#include <mutex>
+#include <vector>
+
+#include "common/statusor.h"
+#include "gen_cpp/data.pb.h"
+#include "gen_cpp/olap_file.pb.h"
 #include "gen_cpp/types.pb.h"
 #include "gutil/macros.h"
+#include "runtime/global_dict/types.h"
+#include "runtime/global_dict/types_fwd_decl.h"
 #include "storage/column_mapping.h"
+#include "storage/compaction_utils.h"
 #include "storage/rowset/rowset.h"
+#include "storage/rowset/rowset_writer.h"
 #include "storage/rowset/rowset_writer_context.h"
+#include "storage/rowset/segment_writer.h"
+
+namespace butil {
+class IOBuf;
+}
 
 namespace starrocks {
 
-struct ContiguousRow;
-class RowCursor;
+class SegmentWriter;
+class WritableFile;
 
-namespace vectorized {
+enum class FlushChunkState { UNKNOWN, UPSERT, DELETE, MIXED };
+
 class Chunk;
 class Column;
-} // namespace vectorized
 
 // RowsetWriter is responsible for writing data into segment by row or chunk.
-// Only BetaRowsetWriter supports chunk.
 // Usage Example:
 //      // create writer
 //      std::unique_ptr<RowsetWriter> writer;
 //      RowsetFactory::create_rowset_writer(writer_context, &writer);
 //
 //      // write data
-//      // 1. serial add row
-//      // should ensure the order of data between rows
-//      // flush segment when size or number of rows reaches certain condition
-//      writer->add_row(row1);
-//      writer->add_row(row2);
-//      ...
-//      writer->flush();
-//
-//      // 2. serial add chunk
+//      // 1. serial add chunk
 //      // should ensure the order of data between chunks
 //      // flush segment when size or number of rows reaches certain condition
 //      writer->add_chunk(chunk1);
@@ -62,9 +80,18 @@ class Column;
 //      ...
 //      writer->flush();
 //
-//      // 3. parallel add chunk
+//      // 2. parallel add chunk
 //      // each chunk generates a segment
 //      writer->flush_chunk(chunk);
+//
+//      // 3. add chunk by columns
+//      for (column_group : column_groups) {
+//          writer->add_columns(chunk1, column_group, is_key);
+//          writer->add_columns(chunk2, column_group, is_key);
+//          ...
+//          writer->flush_columns();
+//      }
+//      writer->final_flush();
 //
 //      // finish
 //      writer->build();
@@ -72,55 +99,166 @@ class Column;
 class RowsetWriter {
 public:
     RowsetWriter() = default;
+    explicit RowsetWriter(const RowsetWriterContext& context);
     virtual ~RowsetWriter() = default;
 
-    virtual OLAPStatus init() = 0;
+    RowsetWriter(const RowsetWriter&) = delete;
+    const RowsetWriter& operator=(const RowsetWriter&) = delete;
 
-    // Memory note: input `row` is guaranteed to be copied into writer's internal buffer, including all slice data
-    // referenced by `row`. That means callers are free to de-allocate memory for `row` after this method returns.
-    virtual OLAPStatus add_row(const RowCursor& row) = 0;
-    virtual OLAPStatus add_row(const ContiguousRow& row) = 0;
+    virtual Status init();
 
-    virtual OLAPStatus add_chunk(const vectorized::Chunk& chunk) = 0;
+    virtual Status add_chunk(const Chunk& chunk) { return Status::NotSupported("RowsetWriter::add_chunk"); }
 
-    // Used for updatable tablet compaction (BetaRowsetWriter), need to write src rssid with segment
-    virtual OLAPStatus add_chunk_with_rssid(const vectorized::Chunk& chunk, const vector<uint32_t>& rssid) {
-        return OLAP_ERR_FUNC_NOT_IMPLEMENTED;
+    // Used for vertical compaction
+    // |Chunk| contains partial columns data corresponding to |column_indexes|.
+    virtual Status add_columns(const Chunk& chunk, const std::vector<uint32_t>& column_indexes, bool is_key) {
+        return Status::NotSupported("RowsetWriter::add_columns");
     }
 
-    // This routine is free to modify the content of |chunk|.
-    virtual OLAPStatus flush_chunk(const vectorized::Chunk& chunk) = 0;
+    virtual Status flush_chunk(const Chunk& chunk, SegmentPB* seg_info = nullptr) {
+        return Status::NotSupported("RowsetWriter::flush_chunk");
+    }
 
-    virtual OLAPStatus flush_chunk_with_deletes(const vectorized::Chunk& upserts,
-                                                const vectorized::Column& deletes) = 0;
+    virtual Status flush_chunk_with_deletes(const Chunk& upserts, const Column& deletes,
+                                            SegmentPB* seg_info = nullptr) {
+        return Status::NotSupported("RowsetWriter::flush_chunk_with_deletes");
+    }
 
     // Precondition: the input `rowset` should have the same type of the rowset we're building
-    virtual OLAPStatus add_rowset(RowsetSharedPtr rowset) = 0;
+    virtual Status add_rowset(RowsetSharedPtr rowset) { return Status::NotSupported("RowsetWriter::add_rowset"); }
 
     // Precondition: the input `rowset` should have the same type of the rowset we're building
-    virtual OLAPStatus add_rowset_for_linked_schema_change(RowsetSharedPtr rowset,
-                                                           const SchemaMapping& schema_mapping) = 0;
+    virtual Status add_rowset_for_linked_schema_change(RowsetSharedPtr rowset, const SchemaMapping& schema_mapping) {
+        return Status::NotSupported("RowsetWriter::add_rowset_for_linked_schema_change");
+    }
 
     // explicit flush all buffered rows into segment file.
-    // note that `add_row` could also trigger flush when certain conditions are met
-    virtual OLAPStatus flush() = 0;
+    virtual Status flush() { return Status::NotSupported("RowsetWriter::flush"); }
+
+    // Used for vertical compaction
+    // flush columns data and index
+    virtual Status flush_columns() { return Status::NotSupported("RowsetWriter::flush_columns"); }
+
+    // flush segments footer
+    virtual Status final_flush() { return Status::NotSupported("RowsetWriter::final_flush"); }
 
     // finish building and return pointer to the built rowset (guaranteed to be inited).
     // return nullptr when failed
-    virtual RowsetSharedPtr build() = 0;
+    virtual StatusOr<RowsetSharedPtr> build();
 
-    virtual Version version() = 0;
+    Status flush_segment(const SegmentPB& segment_pb, butil::IOBuf& data);
 
-    virtual int64_t num_rows() = 0;
+    virtual Version version() { return _context.version; }
 
-    virtual int64_t total_data_size() = 0;
+    virtual int64_t num_rows() { return _num_rows_written; }
 
-    virtual RowsetId rowset_id() = 0;
+    virtual int64_t total_data_size() { return _total_data_size; }
+
+    virtual RowsetId rowset_id() { return _context.rowset_id; }
+
+    const DictColumnsValidMap& global_dict_columns_valid_info() const { return _global_dict_columns_valid_info; }
+
+    const GlobalDictByNameMaps* rowset_global_dicts() const { return _writer_options.global_dicts; }
 
 private:
-    DISALLOW_COPY_AND_ASSIGN(RowsetWriter);
+    Status _flush_segment(const SegmentPB& segment_pb, butil::IOBuf& data);
+
+    Status _flush_delete_file(const SegmentPB& segment_pb, butil::IOBuf& data);
+
+    Status _flush_update_file(const SegmentPB& segment_pb, butil::IOBuf& data);
+
+protected:
+    RowsetWriterContext _context;
+    std::shared_ptr<FileSystem> _fs;
+    std::unique_ptr<RowsetMetaPB> _rowset_meta_pb;
+    std::unique_ptr<RowsetTxnMetaPB> _rowset_txn_meta_pb;
+    SegmentWriterOptions _writer_options;
+
+    int _num_segment = 0;
+    int _num_delfile = 0;
+    int _num_uptfile = 0;
+    vector<uint32> _delfile_idxes;
+    vector<std::string> _tmp_segment_files;
+    // mutex lock for vectorized add chunk and flush
+    std::mutex _lock;
+
+    // counters and statistics maintained during data write
+    int64_t _num_rows_written = 0;
+    int64_t _num_rows_flushed = 0;
+    std::vector<int64_t> _num_rows_of_tmp_segment_files;
+    int64_t _num_rows_del = 0;
+    int64_t _total_row_size = 0;
+    int64_t _total_data_size = 0;
+    int64_t _total_index_size = 0;
+    int64_t _num_rows_upt = 0;
+    int64_t _total_update_row_size = 0;
+
+    bool _is_pending = false;
+    bool _already_built = false;
+
+    FlushChunkState _flush_chunk_state = FlushChunkState::UNKNOWN;
+
+    DictColumnsValidMap _global_dict_columns_valid_info;
+};
+
+class VerticalRowsetWriter;
+
+// Chunk contains all schema columns data.
+class HorizontalRowsetWriter final : public RowsetWriter {
+public:
+    explicit HorizontalRowsetWriter(const RowsetWriterContext& context);
+    ~HorizontalRowsetWriter() override;
+
+    Status add_chunk(const Chunk& chunk) override;
+
+    Status flush_chunk(const Chunk& chunk, SegmentPB* seg_info = nullptr) override;
+    Status flush_chunk_with_deletes(const Chunk& upserts, const Column& deletes, SegmentPB* seg_info) override;
+
+    // add rowset by create hard link
+    Status add_rowset(RowsetSharedPtr rowset) override;
+    Status add_rowset_for_linked_schema_change(RowsetSharedPtr rowset, const SchemaMapping& schema_mapping) override;
+
+    Status flush() override;
+
+    StatusOr<RowsetSharedPtr> build() override;
+
+private:
+    StatusOr<std::unique_ptr<SegmentWriter>> _create_segment_writer();
+
+    Status _flush_segment_writer(std::unique_ptr<SegmentWriter>* segment_writer, SegmentPB* seg_info = nullptr);
+
+    Status _final_merge();
+
+    Status _flush_chunk(const Chunk& chunk, SegmentPB* seg_info = nullptr);
+
+    std::string _flush_state_to_string();
+
+    std::string _error_msg();
+
+    std::unique_ptr<SegmentWriter> _segment_writer;
+    std::unique_ptr<VerticalRowsetWriter> _vertical_rowset_writer;
+};
+
+// Chunk contains partial columns data corresponding to column_indexes.
+class VerticalRowsetWriter final : public RowsetWriter {
+public:
+    explicit VerticalRowsetWriter(const RowsetWriterContext& context);
+    ~VerticalRowsetWriter() override;
+
+    Status add_columns(const Chunk& chunk, const std::vector<uint32_t>& column_indexes, bool is_key) override;
+
+    Status flush_columns() override;
+
+    Status final_flush() override;
+
+private:
+    StatusOr<std::unique_ptr<SegmentWriter>> _create_segment_writer(const std::vector<uint32_t>& column_indexes,
+                                                                    bool is_key);
+
+    Status _flush_columns(std::unique_ptr<SegmentWriter>* segment_writer);
+
+    std::vector<std::unique_ptr<SegmentWriter>> _segment_writers;
+    size_t _current_writer_index = 0;
 };
 
 } // namespace starrocks
-
-#endif // STARROCKS_BE_SRC_OLAP_ROWSET_ROWSET_WRITER_H

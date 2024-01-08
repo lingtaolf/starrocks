@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/agent/status.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,8 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_AGENT_STATUS_H
-#define STARROCKS_BE_SRC_AGENT_STATUS_H
+#pragma once
+
+#include <string>
 
 namespace starrocks {
 
@@ -47,5 +44,53 @@ enum AgentStatus {
     STARROCKS_INTERNAL_ERROR = -902,
     STARROCKS_DISK_REACH_CAPACITY_LIMIT = -903,
 };
+
+inline std::string print_agent_status(AgentStatus status) {
+    switch (status) {
+    case STARROCKS_SUCCESS:
+        return "STARROCKS_SUCCESS";
+    case STARROCKS_ERROR:
+        return "STARROCKS_ERROR";
+    case STARROCKS_TASK_REQUEST_ERROR:
+        return "STARROCKS_TASK_REQUEST_ERROR";
+    case STARROCKS_FILE_DOWNLOAD_INVALID_PARAM:
+        return "STARROCKS_FILE_DOWNLOAD_INVALID_PARAM";
+    case STARROCKS_FILE_DOWNLOAD_INSTALL_OPT_FAILED:
+        return "STARROCKS_FILE_DOWNLOAD_INSTALL_OPT_FAILED";
+    case STARROCKS_FILE_DOWNLOAD_CURL_INIT_FAILED:
+        return "STARROCKS_FILE_DOWNLOAD_CURL_INIT_FAILED";
+    case STARROCKS_FILE_DOWNLOAD_FAILED:
+        return "STARROCKS_FILE_DOWNLOAD_FAILED";
+    case STARROCKS_FILE_DOWNLOAD_GET_LENGTH_FAILED:
+        return "STARROCKS_FILE_DOWNLOAD_GET_LENGTH_FAILED";
+    case STARROCKS_FILE_DOWNLOAD_NOT_EXIST:
+        return "STARROCKS_FILE_DOWNLOAD_NOT_EXIST";
+    case STARROCKS_FILE_DOWNLOAD_LIST_DIR_FAIL:
+        return "STARROCKS_FILE_DOWNLOAD_LIST_DIR_FAIL";
+    case STARROCKS_CREATE_TABLE_EXIST:
+        return "STARROCKS_CREATE_TABLE_EXIST";
+    case STARROCKS_CREATE_TABLE_DIFF_SCHEMA_EXIST:
+        return "STARROCKS_CREATE_TABLE_DIFF_SCHEMA_EXIST";
+    case STARROCKS_CREATE_TABLE_NOT_EXIST:
+        return "STARROCKS_CREATE_TABLE_NOT_EXIST";
+    case STARROCKS_DROP_TABLE_NOT_EXIST:
+        return "STARROCKS_DROP_TABLE_NOT_EXIST";
+    case STARROCKS_PUSH_INVALID_TABLE:
+        return "STARROCKS_PUSH_INVALID_TABLE";
+    case STARROCKS_PUSH_INVALID_VERSION:
+        return "STARROCKS_PUSH_INVALID_VERSION";
+    case STARROCKS_PUSH_TIME_OUT:
+        return "STARROCKS_PUSH_TIME_OUT";
+    case STARROCKS_PUSH_HAD_LOADED:
+        return "STARROCKS_PUSH_HAD_LOADED";
+    case STARROCKS_TIMEOUT:
+        return "STARROCKS_TIMEOUT";
+    case STARROCKS_INTERNAL_ERROR:
+        return "STARROCKS_INTERNAL_ERROR";
+    case STARROCKS_DISK_REACH_CAPACITY_LIMIT:
+        return "STARROCKS_DISK_REACH_CAPACITY_LIMIT";
+    }
+    return "unknown";
+}
+
 } // namespace starrocks
-#endif // STARROCKS_BE_SRC_AGENT_STATUS_H

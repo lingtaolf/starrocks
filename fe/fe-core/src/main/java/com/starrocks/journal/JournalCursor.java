@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/journal/JournalCursor.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -24,9 +20,20 @@ package com.starrocks.journal;
 // This class is like JDBC ResultSet.
 public interface JournalCursor {
 
-    // Return the next journal. return null when there is no more journals
-    public JournalEntity next();
+    // meaning read till the end
+    public static long CUROSR_END_KEY = -1;
+
+    // Return the next journal.
+    // Return null when there is no more journals, or if need to retry from outside.
+    // Raise a JournalException if there is an error in reading from the underlying storage.
+    // Raise a JournalInconsistentException if read dirty data and need to exit
+    public JournalEntity next() throws InterruptedException, JournalException, JournalInconsistentException;
+
+    // refresh offer a way to update environment, such as update databases in current environment
+    public void refresh() throws InterruptedException, JournalException, JournalInconsistentException;
 
     public void close();
 
+    // skip current log
+    public void skipNext();
 }

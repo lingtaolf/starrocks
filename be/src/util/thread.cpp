@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/thread.cpp
 
@@ -21,7 +34,7 @@
 
 #include "thread.h"
 
-#include <sys/prctl.h>
+#include <fmt/format.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -34,6 +47,7 @@
 #include <string>
 
 #include "common/logging.h"
+#include "exec/schema_scanner/schema_be_threads_scanner.h"
 #include "gutil/atomicops.h"
 #include "gutil/dynamic_annotations.h"
 #include "gutil/once.h"
@@ -45,7 +59,7 @@ namespace starrocks {
 
 class ThreadMgr;
 
-__thread Thread* Thread::_tls = NULL;
+__thread Thread* Thread::_tls = nullptr;
 
 // Singleton instance of ThreadMgr. Only visible in this file, used only by Thread.
 // // The Thread class adds a reference to thread_manager while it is supervising a thread so
@@ -61,7 +75,7 @@ static GoogleOnceType once = GOOGLE_ONCE_INIT;
 // auditing. Used only by Thread.
 class ThreadMgr {
 public:
-    ThreadMgr() : _threads_started_metric(0), _threads_running_metric(0) {}
+    ThreadMgr() = default;
 
     ~ThreadMgr() {
         std::lock_guard lock(_lock);
@@ -77,24 +91,28 @@ public:
     // already been removed, this is a no-op.
     void remove_thread(const pthread_t& pthread_id, const std::string& category);
 
+    void get_thread_infos(std::vector<BeThreadInfo>& infos);
+
 private:
     // Container class for any details we want to capture about a thread
     // TODO: Add start-time.
     // TODO: Track fragment ID.
     class ThreadDescriptor {
     public:
-        ThreadDescriptor() {}
-        ThreadDescriptor(std::string category, std::string name, int64_t thread_id)
-                : _name(std::move(name)), _category(std::move(category)), _thread_id(thread_id) {}
+        ThreadDescriptor() = default;
+        ThreadDescriptor(std::string category, std::string name, int64_t thread_id, Thread* thread)
+                : _name(std::move(name)), _category(std::move(category)), _thread_id(thread_id), _thread(thread) {}
 
         const std::string& name() const { return _name; }
         const std::string& category() const { return _category; }
         int64_t thread_id() const { return _thread_id; }
+        Thread* thread() const { return _thread; }
 
     private:
         std::string _name;
         std::string _category;
         int64_t _thread_id;
+        Thread* _thread{nullptr};
     };
 
     // A ThreadCategory is a set of threads that are logically related.
@@ -113,20 +131,18 @@ private:
 
     // Counters to track all-time total number of threads, and the
     // current number of running threads.
-    uint64_t _threads_started_metric;
-    uint64_t _threads_running_metric;
+    uint64_t _threads_started_metric{0};
+    uint64_t _threads_running_metric{0};
 
-    DISALLOW_COPY_AND_ASSIGN(ThreadMgr);
+    ThreadMgr(const ThreadMgr&) = delete;
+    const ThreadMgr& operator=(const ThreadMgr&) = delete;
 };
 
 void ThreadMgr::set_thread_name(const std::string& name, int64_t tid) {
     if (tid == getpid()) {
         return;
     }
-    int err = prctl(PR_SET_NAME, name.c_str());
-    if (err < 0 && errno != EPERM) {
-        LOG(ERROR) << "set_thread_name";
-    }
+    Thread::set_thread_name(pthread_self(), name);
 }
 
 void ThreadMgr::add_thread(const pthread_t& pthread_id, const std::string& name, const std::string& category,
@@ -147,7 +163,7 @@ void ThreadMgr::add_thread(const pthread_t& pthread_id, const std::string& name,
     ANNOTATE_IGNORE_READS_AND_WRITES_BEGIN();
     {
         std::lock_guard l(_lock);
-        _thread_categories[category][pthread_id] = ThreadDescriptor(category, name, tid);
+        _thread_categories[category][pthread_id] = ThreadDescriptor(category, name, tid, Thread::current_thread());
         _threads_running_metric++;
         _threads_started_metric++;
     }
@@ -169,6 +185,26 @@ void ThreadMgr::remove_thread(const pthread_t& pthread_id, const std::string& ca
     ANNOTATE_IGNORE_READS_AND_WRITES_END();
 }
 
+void ThreadMgr::get_thread_infos(std::vector<BeThreadInfo>& infos) {
+    std::lock_guard l(_lock);
+    for (const auto& category : _thread_categories) {
+        for (const auto& thread : category.second) {
+            BeThreadInfo& info = infos.emplace_back();
+            info.group = thread.second.category();
+            info.name = thread.second.name();
+            info.pthread_id = thread.first;
+            info.tid = thread.second.thread_id();
+            info.idle = thread.second.thread()->idle();
+            info.finished_tasks = thread.second.thread()->finished_tasks();
+        }
+    }
+}
+
+void Thread::get_thread_infos(std::vector<BeThreadInfo>& infos) {
+    GoogleOnceInit(&once, &init_threadmgr);
+    thread_manager->get_thread_infos(infos);
+}
+
 Thread::~Thread() {
     if (_joinable) {
         int ret = pthread_detach(_thread);
@@ -177,7 +213,7 @@ Thread::~Thread() {
 }
 
 void Thread::join() {
-    ThreadJoiner(this).join();
+    (void)ThreadJoiner(this).join();
 }
 
 int64_t Thread::tid() const {
@@ -201,7 +237,7 @@ const std::string& Thread::category() const {
 }
 
 std::string Thread::to_string() const {
-    return strings::Substitute("Thread $0 (name: \"$1\", category: \"$2\")", tid(), _name, _category);
+    return strings::Substitute(R"(Thread $0 (name: "$1", category: "$2"))", tid(), _name, _category);
 }
 
 Thread* Thread::current_thread() {
@@ -214,6 +250,32 @@ int64_t Thread::unique_thread_id() {
 
 int64_t Thread::current_thread_id() {
     return syscall(SYS_gettid);
+}
+
+void Thread::set_thread_name(pthread_t t, const std::string& name) {
+    // pthread_setname_np's length is restricted to 16 bytes, including the terminating null byte ('\0')
+    int ret;
+    if (name.length() < 16) {
+        ret = pthread_setname_np(t, name.data());
+    } else {
+        std::string str = name;
+        str.at(15) = '\0';
+        ret = pthread_setname_np(t, str.data());
+    }
+    if (ret) {
+        LOG(WARNING) << "failed to set thread name: " << name;
+    }
+}
+
+void Thread::set_thread_name(std::thread& t, std::string name) {
+    // pthread_setname_np's length is restricted to 16 bytes, including the terminating null byte ('\0')
+    if (name.length() >= 16) {
+        name.at(15) = '\0';
+    }
+    int ret = pthread_setname_np(t.native_handle(), name.data());
+    if (ret) {
+        LOG(WARNING) << "failed to set thread name: " << name;
+    }
 }
 
 int64_t Thread::wait_for_tid() const {
@@ -254,9 +316,9 @@ Status Thread::start_thread(const std::string& category, const std::string& name
         t->Release();
     });
 
-    int ret = pthread_create(&t->_thread, NULL, &Thread::supervise_thread, t.get());
+    int ret = pthread_create(&t->_thread, nullptr, &Thread::supervise_thread, t.get());
     if (ret) {
-        return Status::RuntimeError("Could not create thread", ret, strerror(ret));
+        return Status::RuntimeError(fmt::format("Could not create thread: {}", strerror(ret)));
     }
 
     // The thread has been created and is now joinable.
@@ -272,7 +334,7 @@ Status Thread::start_thread(const std::string& category, const std::string& name
 }
 
 void* Thread::supervise_thread(void* arg) {
-    Thread* t = static_cast<Thread*>(arg);
+    auto* t = static_cast<Thread*>(arg);
     int64_t system_tid = Thread::current_thread_id();
     PCHECK(system_tid != -1);
 
@@ -292,9 +354,8 @@ void* Thread::supervise_thread(void* arg) {
     // WaitForTid().
     Release_Store(&t->_tid, system_tid);
 
-    std::string name = strings::Substitute("$0-$1", t->name(), system_tid);
-    thread_manager->set_thread_name(name, t->_tid);
-    thread_manager->add_thread(pthread_self(), name, t->category(), t->_tid);
+    thread_manager->set_thread_name(t->_name, t->_tid);
+    thread_manager->add_thread(pthread_self(), t->_name, t->category(), t->_tid);
 
     // FinishThread() is guaranteed to run (even if functor_ throws an
     // exception) because pthread_cleanup_push() creates a scoped object
@@ -303,11 +364,11 @@ void* Thread::supervise_thread(void* arg) {
     t->_functor();
     pthread_cleanup_pop(true);
 
-    return NULL;
+    return nullptr;
 }
 
 void Thread::finish_thread(void* arg) {
-    Thread* t = static_cast<Thread*>(arg);
+    auto* t = static_cast<Thread*>(arg);
 
     // We're here either because of the explicit pthread_cleanup_pop() in
     // SuperviseThread() or through pthread_exit(). In either case,
@@ -352,7 +413,7 @@ ThreadJoiner& ThreadJoiner::give_up_after_ms(int ms) {
 
 Status ThreadJoiner::join() {
     if (Thread::current_thread() && Thread::current_thread()->tid() == _thread->tid()) {
-        return Status::InvalidArgument("Can't join on own thread", -1, _thread->_name);
+        return Status::InvalidArgument(fmt::format("Can't join on own thread: {}", _thread->_name));
     }
 
     // Early exit: double join is a no-op.
@@ -388,14 +449,14 @@ Status ThreadJoiner::join() {
             // Unconditionally join before returning, to guarantee that any TLS
             // has been destroyed (pthread_key_create() destructors only run
             // after a pthread's user method has returned).
-            int ret = pthread_join(_thread->_thread, NULL);
+            int ret = pthread_join(_thread->_thread, nullptr);
             CHECK_EQ(ret, 0);
             _thread->_joinable = false;
             return Status::OK();
         }
         waited_ms += wait_for;
     }
-    return Status::Aborted(strings::Substitute("Timed out after $0ms joining on $1", waited_ms, _thread->_name));
+    return Status::Aborted(fmt::format("Timed out after {}ms joining on {}", waited_ms, _thread->_name));
 }
 
 } // namespace starrocks

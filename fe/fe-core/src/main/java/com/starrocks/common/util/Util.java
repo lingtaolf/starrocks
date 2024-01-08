@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/util/Util.java
 
@@ -27,34 +40,39 @@ import com.starrocks.catalog.Column;
 import com.starrocks.catalog.PrimitiveType;
 import com.starrocks.catalog.Type;
 import com.starrocks.common.AnalysisException;
+import com.starrocks.common.TimeoutException;
+import com.starrocks.sql.analyzer.SemanticException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.BufferedReader;
-import java.io.DataInput;
-import java.io.DataOutput;
-import java.io.File;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.UnsupportedEncodingException;
+import java.lang.management.ThreadInfo;
+import java.net.URI;
 import java.net.URL;
 import java.net.URLConnection;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Predicate;
 import java.util.zip.Adler32;
+import java.util.zip.DeflaterOutputStream;
 
 public class Util {
     private static final Logger LOG = LogManager.getLogger(Util.class);
     private static final Map<PrimitiveType, String> TYPE_STRING_MAP = new HashMap<PrimitiveType, String>();
 
     private static final long DEFAULT_EXEC_CMD_TIMEOUT_MS = 600000L;
+
+    public static final String AUTO_GENERATED_EXPR_ALIAS_PREFIX = "EXPR$";
 
     private static final String[] ORDINAL_SUFFIX =
             new String[] {"th", "st", "nd", "rd", "th", "th", "th", "th", "th", "th"};
@@ -79,6 +97,8 @@ public class Util {
         TYPE_STRING_MAP.put(PrimitiveType.BOOLEAN, "bool");
         TYPE_STRING_MAP.put(PrimitiveType.BITMAP, "bitmap");
         TYPE_STRING_MAP.put(PrimitiveType.PERCENTILE, "percentile");
+        TYPE_STRING_MAP.put(PrimitiveType.JSON, "json");
+        TYPE_STRING_MAP.put(PrimitiveType.VARBINARY, "varbinary(%d)");
     }
 
     private static class CmdWorker extends Thread {
@@ -142,11 +162,11 @@ public class Util {
         }
     }
 
-    public static CommandResult executeCommand(String cmd, String[] envp) {
+    public static CommandResult executeCommand(String cmd, String[] envp) throws TimeoutException {
         return executeCommand(cmd, envp, DEFAULT_EXEC_CMD_TIMEOUT_MS);
     }
 
-    public static CommandResult executeCommand(String cmd, String[] envp, long timeoutMs) {
+    public static CommandResult executeCommand(String cmd, String[] envp, long timeoutMs) throws TimeoutException {
         CommandResult result = new CommandResult();
         List<String> cmdList = shellSplit(cmd);
         String[] cmds = cmdList.toArray(new String[0]);
@@ -161,10 +181,10 @@ public class Util {
                 cmdWorker.join(timeoutMs);
                 exitValue = cmdWorker.getExitValue();
                 if (exitValue == null) {
-                    // if we get this far then we never got an exit value from the worker thread
-                    // as a result of a timeout 
-                    LOG.warn("exec command [{}] timed out.", cmd);
-                    exitValue = -1;
+                    // timeout if we get null exit value from work thread
+                    String msg = String.format("exec command [%s] timed out.", cmd);
+                    LOG.warn(msg);
+                    throw new TimeoutException(msg);
                 }
             } catch (InterruptedException ex) {
                 cmdWorker.interrupt();
@@ -246,97 +266,63 @@ public class Util {
     public static int schemaHash(int schemaVersion, List<Column> columns, Set<String> bfColumns, double bfFpp) {
         Adler32 adler32 = new Adler32();
         adler32.update(schemaVersion);
-        String charsetName = "UTF-8";
-        try {
-            List<String> indexColumnNames = Lists.newArrayList();
-            List<String> bfColumnNames = Lists.newArrayList();
-            // columns
-            for (Column column : columns) {
-                adler32.update(column.getName().getBytes(charsetName));
-                String typeString = columnHashString(column);
-                adler32.update(typeString.getBytes(charsetName));
+        List<String> indexColumnNames = Lists.newArrayList();
+        List<String> bfColumnNames = Lists.newArrayList();
+        // columns
+        for (Column column : columns) {
+            adler32.update(column.getName().getBytes(StandardCharsets.UTF_8));
+            String typeString = columnHashString(column);
+            if (typeString == null) {
+                throw new SemanticException("Type:%s of column:%s does not support",
+                        column.getType().toString(), column.getName());
+            }
+            adler32.update(typeString.getBytes(StandardCharsets.UTF_8));
 
-                String columnName = column.getName();
-                if (column.isKey()) {
-                    indexColumnNames.add(columnName);
-                }
-
-                if (bfColumns != null && bfColumns.contains(columnName)) {
-                    bfColumnNames.add(columnName);
-                }
+            String columnName = column.getName();
+            if (column.isKey()) {
+                indexColumnNames.add(columnName);
             }
 
-            // index column name
-            for (String columnName : indexColumnNames) {
-                adler32.update(columnName.getBytes(charsetName));
+            if (bfColumns != null && bfColumns.contains(columnName)) {
+                bfColumnNames.add(columnName);
+            }
+        }
+
+        // index column name
+        for (String columnName : indexColumnNames) {
+            adler32.update(columnName.getBytes(StandardCharsets.UTF_8));
+        }
+
+        // bloom filter index
+        if (!bfColumnNames.isEmpty()) {
+            // bf column name
+            for (String columnName : bfColumnNames) {
+                adler32.update(columnName.getBytes(StandardCharsets.UTF_8));
             }
 
-            // bloom filter index
-            if (!bfColumnNames.isEmpty()) {
-                // bf column name
-                for (String columnName : bfColumnNames) {
-                    adler32.update(columnName.getBytes(charsetName));
-                }
-
-                // bf fpp
-                String bfFppStr = String.valueOf(bfFpp);
-                adler32.update(bfFppStr.getBytes(charsetName));
-            }
-        } catch (UnsupportedEncodingException e) {
-            LOG.error("encoding error", e);
-            return -1;
+            // bf fpp
+            String bfFppStr = String.valueOf(bfFpp);
+            adler32.update(bfFppStr.getBytes(StandardCharsets.UTF_8));
         }
 
         return Math.abs((int) adler32.getValue());
     }
 
-    public static long generateVersionHash() {
-        return Math.abs(new Random().nextLong());
-    }
-
     public static int generateSchemaHash() {
-        return Math.abs(new Random().nextInt());
-    }
-
-    /**
-     * Chooses k unique random elements from a population sequence
-     */
-    public static <T> List<T> sample(List<T> population, int kNum) {
-        if (population.isEmpty() || population.size() < kNum) {
-            return null;
-        }
-
-        Collections.shuffle(population);
-        return population.subList(0, kNum);
-    }
-
-    /**
-     * Delete directory and all contents in this directory
-     */
-    public static boolean deleteDirectory(File directory) {
-        if (!directory.exists()) {
-            return true;
-        }
-
-        if (directory.isDirectory()) {
-            File[] files = directory.listFiles();
-            if (null != files) {
-                for (File file : files) {
-                    if (file.isDirectory()) {
-                        deleteDirectory(file);
-                    } else {
-                        file.delete();
-                    }
-                }
-            }
-        }
-        return directory.delete();
+        return Math.abs(ThreadLocalRandom.current().nextInt(Integer.MAX_VALUE));
     }
 
     public static String dumpThread(Thread t, int lineNum) {
+        return dumpThread(t.getName(), t.getId(), t.getStackTrace(), lineNum);
+    }
+
+    public static String dumpThread(ThreadInfo t, int lineNum) {
+        return dumpThread(t.getThreadName(), t.getThreadId(), t.getStackTrace(), lineNum);
+    }
+
+    public static String dumpThread(String name, long id, StackTraceElement[] elements, int lineNum) {
         StringBuilder sb = new StringBuilder();
-        StackTraceElement[] elements = t.getStackTrace();
-        sb.append("dump thread: ").append(t.getName()).append(", id: ").append(t.getId()).append("\n");
+        sb.append("dump thread: ").append(name).append(", id: ").append(id).append("\n");
         int count = lineNum;
         for (StackTraceElement element : elements) {
             if (count == 0) {
@@ -381,7 +367,6 @@ public class Util {
                     stream.close();
                 } catch (IOException e) {
                     LOG.warn("failed to close stream when get result from url: {}", urlStr, e);
-                    return null;
                 }
             }
         }
@@ -397,7 +382,7 @@ public class Util {
 
         long result = defaultVal;
         try {
-            result = Long.valueOf(valStr);
+            result = Long.parseLong(valStr);
         } catch (NumberFormatException e) {
             throw new AnalysisException(hintMsg);
         }
@@ -420,7 +405,7 @@ public class Util {
         }
 
         try {
-            return Boolean.valueOf(valStr);
+            return Boolean.parseBoolean(valStr);
         } catch (NumberFormatException e) {
             throw new AnalysisException(hintMsg);
         }
@@ -428,37 +413,6 @@ public class Util {
 
     public static void stdoutWithTime(String msg) {
         System.out.println("[" + TimeUtils.longToTimeString(System.currentTimeMillis()) + "] " + msg);
-    }
-
-    // not support encode negative value now
-    public static void encodeVarint64(long source, DataOutput out) throws IOException {
-        assert source >= 0;
-        short B = 128;
-
-        while (source > B) {
-            out.write((int) (source & (B - 1) | B));
-            source = source >> 7;
-        }
-        out.write((int) (source & (B - 1)));
-    }
-
-    // not support decode negative value now
-    public static long decodeVarint64(DataInput in) throws IOException {
-        long result = 0;
-        int shift = 0;
-        short B = 128;
-
-        while (true) {
-            int oneByte = in.readUnsignedByte();
-            boolean isEnd = (oneByte & B) == 0;
-            result = result | ((long) (oneByte & B - 1) << (shift * 7));
-            if (isEnd) {
-                break;
-            }
-            shift++;
-        }
-
-        return result;
     }
 
     // return the ordinal string of an Integer
@@ -488,5 +442,36 @@ public class Util {
         conn.setReadTimeout(readTimeoutMs);
         return conn.getInputStream();
     }
-}
 
+    public static void validateMetastoreUris(String uris) {
+        if (uris == null) {
+            throw new IllegalArgumentException("Null hive.metastore.uris, " +
+                    "please check your property's key and value of catalog or resource.");
+        }
+        URI[] parsedUris = Arrays.stream(uris.split(",")).map(URI::create).toArray(URI[]::new);
+        for (URI uri : parsedUris) {
+            if (Strings.isNullOrEmpty(uri.getScheme()) || !uri.getScheme().equals("thrift")) {
+                throw new IllegalArgumentException("Invalid scheme of URI in hive.metastore.uris: " + uri +
+                        " it should be thrift.");
+            }
+            if (Strings.isNullOrEmpty(uri.getHost())) {
+                throw new IllegalArgumentException("Invalid host of URI in hive.metastore.uris URI: " + uri);
+            }
+            if (uri.getPort() == -1) {
+                throw new IllegalArgumentException("Invalid port of URI in hive.metastore.uris URI: " + uri);
+            }
+        }
+    }
+
+    public static String deriveAliasFromOrdinal(int ordinal) {
+        return AUTO_GENERATED_EXPR_ALIAS_PREFIX + ordinal;
+    }
+
+    public static byte[] compress(byte[] input) throws IOException {
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+        try (DeflaterOutputStream dos = new DeflaterOutputStream(outputStream)) {
+            dos.write(input);
+        }
+        return outputStream.toByteArray();
+    }
+}

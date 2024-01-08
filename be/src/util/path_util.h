@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/util/path_util.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -25,8 +21,7 @@
 #include <string>
 #include <vector>
 
-namespace starrocks {
-namespace path_util {
+namespace starrocks::path_util {
 
 // NOTE: The methods here are only related to path processing, do not involve
 // any file and IO operations.
@@ -67,5 +62,4 @@ std::string base_name(const std::string& path);
 // NOTE: path can be either one file's full path or only file name
 std::string file_extension(const std::string& path);
 
-} // namespace path_util
-} // namespace starrocks
+} // namespace starrocks::path_util

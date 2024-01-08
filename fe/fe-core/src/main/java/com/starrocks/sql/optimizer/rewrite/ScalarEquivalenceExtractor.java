@@ -1,11 +1,24 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.sql.optimizer.rewrite;
 
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import com.starrocks.analysis.BinaryType;
 import com.starrocks.sql.optimizer.Utils;
-import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
@@ -54,7 +67,7 @@ public class ScalarEquivalenceExtractor {
         searchResult.remove(columnRef);
         Set<ScalarOperator> result = Sets.newLinkedHashSet();
         for (ScalarOperator s : searchResult) {
-            result.add(new BinaryPredicateOperator(BinaryPredicateOperator.BinaryType.EQ, columnRef, s));
+            result.add(new BinaryPredicateOperator(BinaryType.EQ, columnRef, s));
         }
 
         result.addAll(valueResult);
@@ -86,7 +99,7 @@ public class ScalarEquivalenceExtractor {
             }
 
             // Derive columnRef = columnRef, like {a = b, b = c} => {a = c}
-            if (isColumnRefOperator(operator)) {
+            if (operator.isColumnRef()) {
                 ColumnRefOperator ref = (ColumnRefOperator) operator;
                 tempResult.addAll(columnRefEquivalenceMap.getOrDefault(ref, Collections.emptySet()));
                 continue;
@@ -113,7 +126,7 @@ public class ScalarEquivalenceExtractor {
                 ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(rewriteMap);
 
                 // will modify the operator, must use clone
-                ScalarOperator r = operator.clone().accept(rewriter, null);
+                ScalarOperator r = rewriter.rewrite(operator);
                 tempResult.add(r);
             }
         }
@@ -137,7 +150,7 @@ public class ScalarEquivalenceExtractor {
 
         for (ScalarOperator operator : search) {
             // can't resolve function(columnRef)
-            if (!isColumnRefOperator(operator)) {
+            if (!operator.isColumnRef()) {
                 continue;
             }
 
@@ -147,14 +160,14 @@ public class ScalarEquivalenceExtractor {
         ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(rewriteMap);
 
         for (ScalarOperator operator : search) {
-            if (!isColumnRefOperator(operator)) {
+            if (!operator.isColumnRef()) {
                 continue;
             }
 
             Set<ScalarOperator> values =
                     columnValuesMap.getOrDefault((ColumnRefOperator) operator, Collections.emptySet());
             // avoid use Collection::toSet
-            values.stream().map(d -> d.clone().accept(rewriter, null)).forEach(result::add);
+            values.stream().map(rewriter::rewrite).forEach(result::add);
         }
 
         return result;
@@ -194,13 +207,13 @@ public class ScalarEquivalenceExtractor {
                 columnValuesMap.get(child1).add(predicate);
 
                 // handle column-constant relation, should check left is column, use for optimizer derive function
-                if (!isColumnRefOperator(predicate.getChild(0))) {
+                if (!predicate.getChild(0).isColumnRef()) {
                     return null;
                 }
 
                 child1 = (ColumnRefOperator) predicate.getChild(0);
-                if (BinaryPredicateOperator.BinaryType.EQ.equals(predicate.getBinaryType()) &&
-                        isConstantOperator(predicate.getChild(1))) {
+                if (BinaryType.EQ.equals(predicate.getBinaryType()) &&
+                        predicate.getChild(1).isConstantRef()) {
                     if (!columnRefEquivalenceMap.containsKey(child1)) {
                         columnRefEquivalenceMap.put(child1, Sets.newLinkedHashSet());
                     }
@@ -211,20 +224,20 @@ public class ScalarEquivalenceExtractor {
             }
 
             // column equivalence only support EQ
-            if (!BinaryPredicateOperator.BinaryType.EQ.equals(predicate.getBinaryType())) {
+            if (!BinaryType.EQ.equals(predicate.getBinaryType())) {
                 return null;
             }
 
             // add (right column)-(left column) relation in columnRef-columnRef mapping
             ScalarOperator child2 = predicate.getChild(1);
-            if (isColumnRefOperator(child2)) {
+            if (child2.isColumnRef()) {
                 ColumnRefOperator ref2 = (ColumnRefOperator) child2;
                 Set<ScalarOperator> child2Set = columnRefEquivalenceMap.getOrDefault(ref2, Sets.newLinkedHashSet());
                 child2Set.add(predicate.getChild(0));
                 columnRefEquivalenceMap.put(ref2, child2Set);
             }
 
-            if (!isColumnRefOperator(predicate.getChild(0))) {
+            if (!predicate.getChild(0).isColumnRef()) {
                 return null;
             }
 
@@ -277,11 +290,4 @@ public class ScalarEquivalenceExtractor {
         }
     }
 
-    private boolean isColumnRefOperator(ScalarOperator operator) {
-        return OperatorType.VARIABLE.equals(operator.getOpType());
-    }
-
-    private boolean isConstantOperator(ScalarOperator operator) {
-        return OperatorType.CONSTANT.equals(operator.getOpType());
-    }
 }

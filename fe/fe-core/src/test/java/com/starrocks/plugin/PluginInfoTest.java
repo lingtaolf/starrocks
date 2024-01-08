@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/plugin/PluginInfoTest.java
 
@@ -21,13 +34,13 @@
 
 package com.starrocks.plugin;
 
-import com.starrocks.catalog.Catalog;
-import com.starrocks.catalog.FakeCatalog;
+import com.starrocks.catalog.FakeGlobalStateMgr;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.io.DataOutputBuffer;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.common.util.DigitalVersion;
 import com.starrocks.plugin.PluginInfo.PluginType;
+import com.starrocks.server.GlobalStateMgr;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -41,17 +54,17 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class PluginInfoTest {
-    private Catalog catalog;
+    private GlobalStateMgr globalStateMgr;
 
-    private FakeCatalog fakeCatalog;
+    private FakeGlobalStateMgr fakeGlobalStateMgr;
 
     @Before
     public void setUp() {
-        fakeCatalog = new FakeCatalog();
-        catalog = Deencapsulation.newInstance(Catalog.class);
+        fakeGlobalStateMgr = new FakeGlobalStateMgr();
+        globalStateMgr = Deencapsulation.newInstance(GlobalStateMgr.class);
 
-        FakeCatalog.setCatalog(catalog);
-        FakeCatalog.setMetaVersion(FeConstants.meta_version);
+        FakeGlobalStateMgr.setGlobalStateMgr(globalStateMgr);
+        FakeGlobalStateMgr.setMetaVersion(FeConstants.META_VERSION);
     }
 
     @Test

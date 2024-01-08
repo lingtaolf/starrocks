@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/gutil/stl_util.h
-
 // Copyright 2002 Google Inc.
 //
 // Licensed to the Apache Software Foundation (ASF) under one
@@ -29,13 +25,11 @@
 // and Google friendly API.
 //
 
-#ifndef UTIL_GTL_STL_UTIL_H_
-#define UTIL_GTL_STL_UTIL_H_
-
-#include <stddef.h>
-#include <string.h> // for memcpy
+#pragma once
 
 #include <algorithm>
+#include <cstddef>
+#include <cstring> // for memcpy
 using std::copy;
 using std::max;
 using std::min;
@@ -345,7 +339,7 @@ inline const T* vector_as_array(const vector<T, Allocator>* v) {
 // implementations.
 inline char* string_as_array(string* str) {
     // DO NOT USE const_cast<char*>(str->data())! See the unittest for why.
-    return str->empty() ? NULL : &*str->begin();
+    return str->empty() ? nullptr : &*str->begin();
 }
 
 // These are methods that test two hash maps/sets for equality.  These exist
@@ -420,13 +414,14 @@ void STLDeleteValues(T* v) {
 // directly.
 class BaseDeleter {
 public:
-    virtual ~BaseDeleter() {}
+    virtual ~BaseDeleter() = default;
 
 protected:
-    BaseDeleter() {}
+    BaseDeleter() = default;
 
 private:
-    DISALLOW_EVIL_CONSTRUCTORS(BaseDeleter);
+    BaseDeleter(const BaseDeleter&) = delete;
+    const BaseDeleter& operator=(const BaseDeleter&) = delete;
 };
 
 // Given a pointer to an STL container, this class will delete all the element
@@ -435,14 +430,15 @@ private:
 template <class STLContainer>
 class TemplatedElementDeleter : public BaseDeleter {
 public:
-    explicit TemplatedElementDeleter<STLContainer>(STLContainer* ptr) : container_ptr_(ptr) {}
+    explicit TemplatedElementDeleter(STLContainer* ptr) : container_ptr_(ptr) {}
 
-    virtual ~TemplatedElementDeleter<STLContainer>() { STLDeleteElements(container_ptr_); }
+    ~TemplatedElementDeleter() override { STLDeleteElements(container_ptr_); }
 
 private:
     STLContainer* container_ptr_;
 
-    DISALLOW_EVIL_CONSTRUCTORS(TemplatedElementDeleter);
+    TemplatedElementDeleter(const TemplatedElementDeleter&) = delete;
+    const TemplatedElementDeleter& operator=(const TemplatedElementDeleter&) = delete;
 };
 
 // Like TemplatedElementDeleter, this class will delete element pointers from a
@@ -458,7 +454,8 @@ public:
 private:
     BaseDeleter* deleter_;
 
-    DISALLOW_EVIL_CONSTRUCTORS(ElementDeleter);
+    ElementDeleter(const ElementDeleter&) = delete;
+    const ElementDeleter& operator=(const ElementDeleter&) = delete;
 };
 
 // Given a pointer to an STL container this class will delete all the value
@@ -467,14 +464,15 @@ private:
 template <class STLContainer>
 class TemplatedValueDeleter : public BaseDeleter {
 public:
-    explicit TemplatedValueDeleter<STLContainer>(STLContainer* ptr) : container_ptr_(ptr) {}
+    explicit TemplatedValueDeleter(STLContainer* ptr) : container_ptr_(ptr) {}
 
-    virtual ~TemplatedValueDeleter<STLContainer>() { STLDeleteValues(container_ptr_); }
+    ~TemplatedValueDeleter() override { STLDeleteValues(container_ptr_); }
 
 private:
     STLContainer* container_ptr_;
 
-    DISALLOW_EVIL_CONSTRUCTORS(TemplatedValueDeleter);
+    TemplatedValueDeleter(const TemplatedValueDeleter&) = delete;
+    const TemplatedValueDeleter& operator=(const TemplatedValueDeleter&) = delete;
 };
 
 // Similar to ElementDeleter, but wraps a TemplatedValueDeleter rather than an
@@ -489,7 +487,8 @@ public:
 private:
     BaseDeleter* deleter_;
 
-    DISALLOW_EVIL_CONSTRUCTORS(ValueDeleter);
+    ValueDeleter(const ValueDeleter&) = delete;
+    const ValueDeleter& operator=(const ValueDeleter&) = delete;
 };
 
 // STLElementDeleter and STLValueDeleter are similar to ElementDeleter and
@@ -502,8 +501,8 @@ private:
 template <class STLContainer>
 class STLElementDeleter {
 public:
-    STLElementDeleter<STLContainer>(STLContainer* ptr) : container_ptr_(ptr) {}
-    ~STLElementDeleter<STLContainer>() { STLDeleteElements(container_ptr_); }
+    STLElementDeleter(STLContainer* ptr) : container_ptr_(ptr) {}
+    ~STLElementDeleter() { STLDeleteElements(container_ptr_); }
 
 private:
     STLContainer* container_ptr_;
@@ -512,8 +511,8 @@ private:
 template <class STLContainer>
 class STLValueDeleter {
 public:
-    STLValueDeleter<STLContainer>(STLContainer* ptr) : container_ptr_(ptr) {}
-    ~STLValueDeleter<STLContainer>() { STLDeleteValues(container_ptr_); }
+    STLValueDeleter(STLContainer* ptr) : container_ptr_(ptr) {}
+    ~STLValueDeleter() { STLDeleteValues(container_ptr_); }
 
 private:
     STLContainer* container_ptr_;
@@ -637,7 +636,7 @@ bool STLIncludes(const SortedSTLContainerA& a, const SortedSTLContainerB& b) {
 template <typename Pair, typename UnaryOp>
 class UnaryOperateOnFirst : public std::unary_function<Pair, typename UnaryOp::result_type> {
 public:
-    UnaryOperateOnFirst() {}
+    UnaryOperateOnFirst() = default;
 
     UnaryOperateOnFirst(const UnaryOp& f) : f_(f) { // TODO(user): explicit?
     }
@@ -656,7 +655,7 @@ UnaryOperateOnFirst<Pair, UnaryOp> UnaryOperate1st(const UnaryOp& f) {
 template <typename Pair, typename UnaryOp>
 class UnaryOperateOnSecond : public std::unary_function<Pair, typename UnaryOp::result_type> {
 public:
-    UnaryOperateOnSecond() {}
+    UnaryOperateOnSecond() = default;
 
     UnaryOperateOnSecond(const UnaryOp& f) : f_(f) { // TODO(user): explicit?
     }
@@ -675,7 +674,7 @@ UnaryOperateOnSecond<Pair, UnaryOp> UnaryOperate2nd(const UnaryOp& f) {
 template <typename Pair, typename BinaryOp>
 class BinaryOperateOnFirst : public std::binary_function<Pair, Pair, typename BinaryOp::result_type> {
 public:
-    BinaryOperateOnFirst() {}
+    BinaryOperateOnFirst() = default;
 
     BinaryOperateOnFirst(const BinaryOp& f) : f_(f) { // TODO(user): explicit?
     }
@@ -695,7 +694,7 @@ BinaryOperateOnFirst<Pair, BinaryOp> BinaryOperate1st(const BinaryOp& f) {
 template <typename Pair, typename BinaryOp>
 class BinaryOperateOnSecond : public std::binary_function<Pair, Pair, typename BinaryOp::result_type> {
 public:
-    BinaryOperateOnSecond() {}
+    BinaryOperateOnSecond() = default;
 
     BinaryOperateOnSecond(const BinaryOp& f) : f_(f) {}
 
@@ -757,20 +756,22 @@ BinaryComposeBinary<F, G1, G2> BinaryCompose2(F f, G1 g1, G2 g2) {
 template <typename T, typename Alloc = std::allocator<T> >
 class STLCountingAllocator : public Alloc {
 public:
-    typedef typename Alloc::pointer pointer;
-    typedef typename Alloc::size_type size_type;
+    using AllocatorTraits = std::allocator_traits<Alloc>;
 
-    STLCountingAllocator() : bytes_used_(NULL) {}
+    typedef typename AllocatorTraits::pointer pointer;
+    typedef typename AllocatorTraits::size_type size_type;
+
+    STLCountingAllocator() {}
     STLCountingAllocator(int64* b) : bytes_used_(b) {} // TODO(user): explicit?
 
     // Constructor used for rebinding
     template <class U>
     STLCountingAllocator(const STLCountingAllocator<U>& x) : Alloc(x), bytes_used_(x.bytes_used()) {}
 
-    pointer allocate(size_type n, std::allocator<void>::const_pointer hint = 0) {
+    pointer allocate(size_type n) {
         assert(bytes_used_ != NULL);
         *bytes_used_ += n * sizeof(T);
-        return Alloc::allocate(n, hint);
+        return Alloc::allocate(n);
     }
 
     void deallocate(pointer p, size_type n) {
@@ -788,7 +789,7 @@ public:
     int64* bytes_used() const { return bytes_used_; }
 
 private:
-    int64* bytes_used_;
+    int64* bytes_used_{nullptr};
 };
 
 // Even though a struct has no data members, it cannot have zero size
@@ -883,5 +884,3 @@ T* release_ptr(T** ptr) {
     *ptr = NULL;
     return tmp;
 }
-
-#endif // UTIL_GTL_STL_UTIL_H_

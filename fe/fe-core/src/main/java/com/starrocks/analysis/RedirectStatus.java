@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/analysis/RedirectStatus.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -22,25 +18,21 @@
 package com.starrocks.analysis;
 
 public class RedirectStatus {
-    private boolean isForwardToMaster;
+    private final boolean isForwardToLeader;
     private boolean needToWaitJournalSync;
 
     public RedirectStatus() {
-        isForwardToMaster = true;
+        isForwardToLeader = true;
         needToWaitJournalSync = true;
     }
 
-    public RedirectStatus(boolean isForwardToMaster, boolean needToWaitJournalSync) {
-        this.isForwardToMaster = isForwardToMaster;
+    public RedirectStatus(boolean isForwardToLeader, boolean needToWaitJournalSync) {
+        this.isForwardToLeader = isForwardToLeader;
         this.needToWaitJournalSync = needToWaitJournalSync;
     }
 
-    public boolean isForwardToMaster() {
-        return isForwardToMaster;
-    }
-
-    public void setForwardToMaster(boolean isForwardToMaster) {
-        this.isForwardToMaster = isForwardToMaster;
+    public boolean isForwardToLeader() {
+        return isForwardToLeader;
     }
 
     public boolean isNeedToWaitJournalSync() {

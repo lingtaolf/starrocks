@@ -1,4 +1,17 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package com.starrocks.sql.optimizer;
 
 /**
@@ -82,27 +95,79 @@ public abstract class OptExpressionVisitor<R, C> {
         return visit(optExpression, context);
     }
 
+    public R visitLogicalTreeAnchor(OptExpression optExpression, C context) {
+        return visit(optExpression, context);
+    }
+
+    public R visitLogicalCTEAnchor(OptExpression optExpression, C context) {
+        return visit(optExpression, context);
+    }
+
+    public R visitLogicalCTEProduce(OptExpression optExpression, C context) {
+        return visit(optExpression, context);
+    }
+
+    public R visitLogicalCTEConsume(OptExpression optExpression, C context) {
+        return visit(optExpression, context);
+    }
+
     /**
      * Physical operator visitor
      */
-    public R visitPhysicalOlapScan(OptExpression optExpression, C context) {
+    public R visitPhysicalScan(OptExpression optExpression, C context) {
         return visit(optExpression, context);
+    }
+
+    public R visitPhysicalOlapScan(OptExpression optExpression, C context) {
+        return visitPhysicalScan(optExpression, context);
     }
 
     public R visitPhysicalHiveScan(OptExpression optExpression, C context) {
-        return visit(optExpression, context);
+        return visitPhysicalScan(optExpression, context);
+    }
+
+    public R visitPhysicalFileScan(OptExpression optExpression, C context) {
+        return visitPhysicalScan(optExpression, context);
+    }
+
+    public R visitPhysicalIcebergScan(OptExpression optExpression, C context) {
+        return visitPhysicalScan(optExpression, context);
+    }
+
+    public R visitPhysicalHudiScan(OptExpression optExpression, C context) {
+        return visitPhysicalScan(optExpression, context);
+    }
+
+    public R visitPhysicalDeltaLakeScan(OptExpression optExpression, C context) {
+        return visitPhysicalScan(optExpression, context);
+    }
+
+    public R visitPhysicalPaimonScan(OptExpression optExpression, C context) {
+        return visitPhysicalScan(optExpression, context);
+    }
+
+    public R visitPhysicalOdpsScan(OptExpression optExpression, C context) {
+        return visitPhysicalScan(optExpression, context);
     }
 
     public R visitPhysicalSchemaScan(OptExpression optExpression, C context) {
-        return visit(optExpression, context);
+        return visitPhysicalScan(optExpression, context);
     }
 
     public R visitPhysicalMysqlScan(OptExpression optExpression, C context) {
-        return visit(optExpression, context);
+        return visitPhysicalScan(optExpression, context);
     }
 
     public R visitPhysicalEsScan(OptExpression optExpression, C context) {
-        return visit(optExpression, context);
+        return visitPhysicalScan(optExpression, context);
+    }
+
+    public R visitPhysicalMetaScan(OptExpression optExpression, C context) {
+        return visitPhysicalScan(optExpression, context);
+    }
+
+    public R visitPhysicalJDBCScan(OptExpression optExpression, C context) {
+        return visitPhysicalScan(optExpression, context);
     }
 
     public R visitPhysicalProject(OptExpression optExpression, C context) {
@@ -122,7 +187,19 @@ public abstract class OptExpressionVisitor<R, C> {
     }
 
     public R visitPhysicalHashJoin(OptExpression optExpression, C context) {
+        return visitPhysicalJoin(optExpression, context);
+    }
+
+    public R visitPhysicalMergeJoin(OptExpression optExpression, C context) {
+        return visitPhysicalJoin(optExpression, context);
+    }
+
+    public R visitPhysicalJoin(OptExpression optExpression, C context) {
         return visit(optExpression, context);
+    }
+
+    public R visitPhysicalNestLoopJoin(OptExpression optExpression, C context) {
+        return visitPhysicalJoin(optExpression, context);
     }
 
     public R visitPhysicalAssertOneRow(OptExpression optExpression, C context) {
@@ -158,6 +235,46 @@ public abstract class OptExpressionVisitor<R, C> {
     }
 
     public R visitPhysicalTableFunction(OptExpression optExpression, C context) {
+        return visit(optExpression, context);
+    }
+
+    public R visitPhysicalDecode(OptExpression optExpression, C context) {
+        return visit(optExpression, context);
+    }
+
+    public R visitPhysicalLimit(OptExpression optExpression, C context) {
+        return visit(optExpression, context);
+    }
+
+    public R visitPhysicalCTEAnchor(OptExpression optExpression, C context) {
+        return visit(optExpression, context);
+    }
+
+    public R visitPhysicalCTEConsume(OptExpression optExpression, C context) {
+        return visit(optExpression, context);
+    }
+
+    public R visitPhysicalCTEProduce(OptExpression optExpression, C context) {
+        return visit(optExpression, context);
+    }
+
+    public R visitPhysicalNoCTE(OptExpression optExpression, C context) {
+        return visit(optExpression, context);
+    }
+
+    public R visitPhysicalStreamScan(OptExpression optExpression, C context) {
+        return visit(optExpression, context);
+    }
+
+    public R visitPhysicalStreamJoin(OptExpression optExpression, C context) {
+        return visit(optExpression, context);
+    }
+
+    public R visitPhysicalStreamAgg(OptExpression optExpression, C context) {
+        return visit(optExpression, context);
+    }
+
+    public R visitPhysicalTableFunctionTableScan(OptExpression optExpression, C context) {
         return visit(optExpression, context);
     }
 }

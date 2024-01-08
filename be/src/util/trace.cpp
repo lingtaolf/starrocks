@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/util/trace.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -37,7 +33,6 @@
 #include "gutil/strings/substitute.h"
 #include "gutil/walltime.h"
 #include "util/logging.h"
-//#include "util/memory/arena.h"
 
 using std::pair;
 using std::string;
@@ -49,9 +44,8 @@ namespace starrocks {
 __thread Trace* Trace::threadlocal_trace_;
 
 Trace::Trace()
-        : // arena_(new ThreadSafeArena(1024)),
-          entries_head_(nullptr),
-          entries_tail_(nullptr) {
+
+{
     // We expect small allocations from our Arena so no need to have
     // a large arena component. Small allocations are more likely to
     // come out of thread cache and be fast.
@@ -108,8 +102,8 @@ void Trace::SubstituteAndTrace(const char* file_path, int line_number, StringPie
 TraceEntry* Trace::NewEntry(int msg_len, const char* file_path, int line_number) {
     int size = sizeof(TraceEntry) + msg_len;
     //uint8_t* dst = reinterpret_cast<uint8_t*>(arena_->AllocateBytes(size));
-    uint8_t* dst = reinterpret_cast<uint8_t*>(malloc(size));
-    TraceEntry* entry = reinterpret_cast<TraceEntry*>(dst);
+    auto* dst = reinterpret_cast<uint8_t*>(malloc(size));
+    auto* entry = reinterpret_cast<TraceEntry*>(dst);
     entry->timestamp_micros = GetCurrentTimeMicros();
     entry->message_len = msg_len;
     entry->file_path = file_path;

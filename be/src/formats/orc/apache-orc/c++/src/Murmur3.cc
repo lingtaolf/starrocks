@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/Murmur3.cc
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -55,7 +51,7 @@ uint64_t Murmur3::hash64(const uint8_t* data, uint32_t len, uint32_t seed) {
     uint64_t h = seed;
     uint32_t blocks = len >> 3;
 
-    const uint64_t* src = reinterpret_cast<const uint64_t*>(data);
+    const auto* src = reinterpret_cast<const uint64_t*>(data);
     uint64_t c1 = 0x87c37b91114253d5L;
     uint64_t c2 = 0x4cf5ad432745937fL;
     for (uint32_t i = 0; i < blocks; i++) {

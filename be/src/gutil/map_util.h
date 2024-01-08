@@ -59,12 +59,11 @@
 // has a key of "foo" (type: string) with a value of 3 (type: int).
 //
 
-#ifndef UTIL_GTL_MAP_UTIL_H_
-#define UTIL_GTL_MAP_UTIL_H_
+#pragma once
 
 #include <glog/logging.h>
-#include <stddef.h>
 
+#include <cstddef>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -416,10 +415,10 @@ bool EmplaceOrUpdate(Collection* const collection, const typename Collection::ke
     typedef typename Collection::mapped_type mapped_type;
     auto it = collection->find(key);
     if (it == collection->end()) {
-        collection->emplace(key, std::forward<mapped_type>(value));
+        collection->emplace(key, std::move(value));
         return true;
     }
-    it->second = std::forward<mapped_type>(value);
+    it->second = std::move(value);
     return false;
 }
 
@@ -846,5 +845,3 @@ typename MapContainer::mapped_type* const ComputePairIfAbsent(MapContainer* cont
                                                               Function compute_pair_func) {
     return ComputePairIfAbsentReturnAbsense<MapContainer, Function>(container, key, compute_pair_func).first;
 };
-
-#endif // UTIL_GTL_MAP_UTIL_H_

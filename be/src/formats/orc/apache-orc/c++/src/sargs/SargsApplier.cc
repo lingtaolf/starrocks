@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/orc/tree/main/c++/src/sargs/SargsApplier.cc
 
@@ -29,7 +42,8 @@ namespace orc {
 // find column id from column name
 uint64_t SargsApplier::findColumn(const Type& type, const std::string& colName) {
     for (uint64_t i = 0; i != type.getSubtypeCount(); ++i) {
-        if (i < type.getFieldNamesCount() && (type.getFieldName(i) == colName)) {
+        // Only STRUCT type has field names
+        if (type.getKind() == STRUCT && i < type.getFieldNamesCount() && type.getFieldName(i) == colName) {
             return type.getSubtype(i)->getColumnId();
         } else {
             uint64_t ret = findColumn(*type.getSubtype(i), colName);
@@ -42,24 +56,26 @@ uint64_t SargsApplier::findColumn(const Type& type, const std::string& colName) 
 }
 
 SargsApplier::SargsApplier(const Type& type, const SearchArgument* searchArgument, uint64_t rowIndexStride,
-                           WriterVersion writerVersion)
-        : SargsApplier(type, searchArgument, nullptr, rowIndexStride, writerVersion) {}
-
-SargsApplier::SargsApplier(const Type& type, const SearchArgument* searchArgument, RowReaderFilter* rowReaderFilter,
-                           uint64_t rowIndexStride, WriterVersion writerVersion)
+                           WriterVersion writerVersion, ReaderMetrics* metrics, RowReaderFilter* rowReaderFilter)
         : mType(type),
           mSearchArgument(searchArgument),
           mRowReaderFilter(rowReaderFilter),
           mRowIndexStride(rowIndexStride),
           mWriterVersion(writerVersion),
-          mStats(0, 0) {
-    const SearchArgumentImpl* sargs = dynamic_cast<const SearchArgumentImpl*>(mSearchArgument);
+          mHasEvaluatedFileStats(false),
+          mFileStatsEvalResult(true),
+          mMetrics(metrics) {
+    const auto* sargs = dynamic_cast<const SearchArgumentImpl*>(mSearchArgument);
 
     // find the mapping from predicate leaves to columns
     const std::vector<PredicateLeaf>& leaves = sargs->getLeaves();
     mFilterColumns.resize(leaves.size(), INVALID_COLUMN_ID);
     for (size_t i = 0; i != mFilterColumns.size(); ++i) {
-        mFilterColumns[i] = findColumn(type, leaves[i].getColumnName());
+        if (leaves[i].hasColumnName()) {
+            mFilterColumns[i] = findColumn(type, leaves[i].getColumnName());
+        } else {
+            mFilterColumns[i] = leaves[i].getColumnId();
+        }
     }
 }
 
@@ -67,13 +83,17 @@ bool SargsApplier::pickRowGroups(uint64_t rowsInStripe, const std::unordered_map
                                  const std::map<uint32_t, BloomFilterIndex>& bloomFilters) {
     // init state of each row group
     uint64_t groupsInStripe = (rowsInStripe + mRowIndexStride - 1) / mRowIndexStride;
-    mRowGroups.resize(groupsInStripe, true);
+    mNextSkippedRows.resize(groupsInStripe);
     mTotalRowsInStripe = rowsInStripe;
 
+    // NOTE(yanz): We can skip following steps if rowIndexes.empty.
+    // Because we have to set right values into `mNextSkippedRows` and
+    // those values will be used in `hasSelectedFrom`.
+
     // row indexes do not exist, simply read all rows
-    if (rowIndexes.empty()) {
-        return true;
-    }
+    // if (rowIndexes.empty()) {
+    //     return true;
+    // }
 
     if (mRowReaderFilter) {
         mRowReaderFilter->onStartingPickRowGroups();
@@ -83,7 +103,10 @@ bool SargsApplier::pickRowGroups(uint64_t rowsInStripe, const std::unordered_map
     std::vector<TruthValue> leafValues(leaves.size(), TruthValue::YES_NO_NULL);
     mHasSelected = false;
     mHasSkipped = false;
-    for (size_t rowGroup = 0; rowGroup != groupsInStripe; ++rowGroup) {
+    uint64_t nextSkippedRowGroup = groupsInStripe;
+    size_t rowGroup = groupsInStripe;
+    do {
+        --rowGroup;
         for (size_t pred = 0; pred != leaves.size(); ++pred) {
             uint64_t columnIdx = mFilterColumns[pred];
             auto rowIndexIter = rowIndexes.find(columnIdx);
@@ -105,29 +128,89 @@ bool SargsApplier::pickRowGroups(uint64_t rowsInStripe, const std::unordered_map
                 leafValues[pred] = leaves[pred].evaluate(mWriterVersion, statistics, bloomFilter.get());
             }
         }
-        mRowGroups[rowGroup] = isNeeded(mSearchArgument->evaluate(leafValues));
 
+        bool needed = isNeeded(mSearchArgument->evaluate(leafValues));
         // I guess cost of evaluating search argument is lower than our customized filter.
         // so better to put it ahead of our customized filter.
-        if (mRowReaderFilter && mRowGroups[rowGroup] &&
-            mRowReaderFilter->filterOnPickRowGroup(rowGroup, rowIndexes, bloomFilters)) {
-            mRowGroups[rowGroup] = false;
+        if (mRowReaderFilter && needed && mRowReaderFilter->filterOnPickRowGroup(rowGroup, rowIndexes, bloomFilters)) {
+            needed = false;
         }
 
-        mHasSelected = mHasSelected || mRowGroups[rowGroup];
-        mHasSkipped = mHasSkipped || (!mRowGroups[rowGroup]);
-    }
+        if (!needed) {
+            mNextSkippedRows[rowGroup] = 0;
+            nextSkippedRowGroup = rowGroup;
+        } else {
+            mNextSkippedRows[rowGroup] =
+                    (nextSkippedRowGroup == groupsInStripe) ? rowsInStripe : (nextSkippedRowGroup * mRowIndexStride);
+        }
+        mHasSelected |= needed;
+        mHasSkipped |= !needed;
+    } while (rowGroup != 0);
 
     if (mRowReaderFilter) {
         mRowReaderFilter->onEndingPickRowGroups();
     }
 
     // update stats
-    mStats.first = std::accumulate(mRowGroups.cbegin(), mRowGroups.cend(), mStats.first,
-                                   [](bool rg, uint64_t s) { return rg ? 1 : 0 + s; });
-    mStats.second += groupsInStripe;
+    uint64_t selectedRGs =
+            std::accumulate(mNextSkippedRows.cbegin(), mNextSkippedRows.cend(), 0UL,
+                            [](uint64_t initVal, uint64_t rg) { return rg > 0 ? initVal + 1 : initVal; });
+    if (mMetrics != nullptr) {
+        mMetrics->SelectedRowGroupCount.fetch_add(selectedRGs);
+        mMetrics->EvaluatedRowGroupCount.fetch_add(groupsInStripe);
+    }
 
     return mHasSelected;
+}
+
+bool SargsApplier::evaluateColumnStatistics(const PbColumnStatistics& colStats) const {
+    const auto* sargs = dynamic_cast<const SearchArgumentImpl*>(mSearchArgument);
+    if (sargs == nullptr) {
+        throw InvalidArgument("Failed to cast to SearchArgumentImpl");
+    }
+
+    const std::vector<PredicateLeaf>& leaves = sargs->getLeaves();
+    std::vector<TruthValue> leafValues(leaves.size(), TruthValue::YES_NO_NULL);
+
+    for (size_t pred = 0; pred != leaves.size(); ++pred) {
+        uint64_t columnId = mFilterColumns[pred];
+        if (columnId != INVALID_COLUMN_ID && colStats.size() > static_cast<int>(columnId)) {
+            leafValues[pred] = leaves[pred].evaluate(mWriterVersion, colStats.Get(static_cast<int>(columnId)), nullptr);
+        }
+    }
+
+    return isNeeded(mSearchArgument->evaluate(leafValues));
+}
+
+bool SargsApplier::evaluateStripeStatistics(const proto::StripeStatistics& stripeStats, uint64_t stripeRowGroupCount) {
+    if (stripeStats.colstats_size() == 0) {
+        return true;
+    }
+
+    bool ret = evaluateColumnStatistics(stripeStats.colstats());
+    if (!ret) {
+        // reset mNextSkippedRows when the current stripe does not satisfy the PPD
+        mNextSkippedRows.clear();
+        if (mMetrics != nullptr) {
+            mMetrics->EvaluatedRowGroupCount.fetch_add(stripeRowGroupCount);
+        }
+    }
+    return ret;
+}
+
+bool SargsApplier::evaluateFileStatistics(const proto::Footer& footer, uint64_t numRowGroupsInStripeRange) {
+    if (!mHasEvaluatedFileStats) {
+        if (footer.statistics_size() == 0) {
+            mFileStatsEvalResult = true;
+        } else {
+            mFileStatsEvalResult = evaluateColumnStatistics(footer.statistics());
+            if (!mFileStatsEvalResult && mMetrics != nullptr) {
+                mMetrics->EvaluatedRowGroupCount.fetch_add(numRowGroupsInStripeRange);
+            }
+        }
+        mHasEvaluatedFileStats = true;
+    }
+    return mFileStatsEvalResult;
 }
 
 } // namespace orc

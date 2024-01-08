@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/http/http_channel.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,11 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_COMMON_UTIL_HTTP_CHANNEL_H
-#define STARROCKS_BE_SRC_COMMON_UTIL_HTTP_CHANNEL_H
+#pragma once
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 #include "http/http_status.h"
 
@@ -41,17 +37,15 @@ public:
     static void send_error(HttpRequest* request, HttpStatus status);
 
     // send 200(OK) reply with content
-    static inline void send_reply(HttpRequest* request, const std::string& content) {
+    static void send_reply(HttpRequest* request, std::string_view content) {
         send_reply(request, HttpStatus::OK, content);
     }
 
     static void send_reply(HttpRequest* request, HttpStatus status = HttpStatus::OK);
 
-    static void send_reply(HttpRequest* request, HttpStatus status, const std::string& content);
+    static void send_reply(HttpRequest* request, HttpStatus status, std::string_view content);
 
     static void send_file(HttpRequest* request, int fd, size_t off, size_t size);
 };
 
 } // namespace starrocks
-
-#endif

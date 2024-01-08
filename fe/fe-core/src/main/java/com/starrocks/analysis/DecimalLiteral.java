@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/analysis/DecimalLiteral.java
 
@@ -30,32 +43,49 @@ import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Config;
 import com.starrocks.common.NotImplementedException;
 import com.starrocks.common.io.Text;
-import com.starrocks.qe.ConnectContext;
+import com.starrocks.sql.common.ErrorType;
+import com.starrocks.sql.optimizer.validate.ValidateException;
+import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.thrift.TDecimalLiteral;
 import com.starrocks.thrift.TExprNode;
 import com.starrocks.thrift.TExprNodeType;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.math.RoundingMode;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Objects;
 
 public class DecimalLiteral extends LiteralExpr {
+
+    private static final Logger LOG = LogManager.getLogger(DecimalLiteral.class);
     private BigDecimal value;
 
     public DecimalLiteral() {
     }
 
     public DecimalLiteral(BigDecimal value) {
+        this(value, NodePosition.ZERO);
+    }
+
+    public DecimalLiteral(BigDecimal value, NodePosition pos) {
+        super(pos);
         init(value);
         analysisDone();
     }
 
     public DecimalLiteral(String value) throws AnalysisException {
+        this(value, NodePosition.ZERO);
+    }
+
+    public DecimalLiteral(String value, NodePosition pos) throws AnalysisException {
+        super(pos);
         BigDecimal v = null;
         try {
             v = new BigDecimal(value);
@@ -120,11 +150,9 @@ public class DecimalLiteral extends LiteralExpr {
         // So we remove exponent field here.
         this.value = new BigDecimal(value.toPlainString());
 
-        ConnectContext ctx = ConnectContext.get();
         if (!Config.enable_decimal_v3) {
             type = ScalarType.DECIMALV2;
         } else {
-            this.value = value.stripTrailingZeros();
             int precision = getRealPrecision(this.value);
             int scale = getRealScale(this.value);
             int integerPartWidth = precision - scale;
@@ -149,7 +177,6 @@ public class DecimalLiteral extends LiteralExpr {
         ScalarType scalarType = (ScalarType) type;
         this.value = new BigDecimal(value.toPlainString());
         if (type.isDecimalV3()) {
-            this.value = value.stripTrailingZeros();
             int precision = scalarType.getScalarPrecision();
             int scale = scalarType.getScalarScale();
             int realPrecision = getRealPrecision(this.value);
@@ -233,6 +260,40 @@ public class DecimalLiteral extends LiteralExpr {
         }
     }
 
+    // pack an int32/64/128 value into ByteBuffer in little endian
+    ByteBuffer packDecimal() {
+        ByteBuffer buffer = ByteBuffer.allocate(type.getTypeSize());
+        buffer.order(ByteOrder.LITTLE_ENDIAN);
+        int scale = ((ScalarType) type).getScalarScale();
+        BigDecimal scaledValue = value.multiply(SCALE_FACTOR[scale]);
+        switch (type.getPrimitiveType()) {
+            case DECIMAL32:
+                buffer.putInt(scaledValue.intValue());
+                break;
+            case DECIMAL64:
+                buffer.putLong(scaledValue.longValue());
+                break;
+            case DECIMAL128:
+            case DECIMALV2:
+                // BigInteger::toByteArray returns a big-endian byte[], so copy in reverse order one by one byte.
+                byte[] bytes = scaledValue.toBigInteger().toByteArray();
+                for (int i = bytes.length - 1; i >= 0; --i) {
+                    buffer.put(bytes[i]);
+                }
+                // pad with sign bits
+                byte prefixByte = scaledValue.signum() >= 0 ? (byte) 0 : (byte) 0xff;
+                int numPaddingBytes = 16 - bytes.length;
+                for (int i = 0; i < numPaddingBytes; ++i) {
+                    buffer.put(prefixByte);
+                }
+                break;
+            default:
+                Preconditions.checkArgument(false, "Type bust be decimal type");
+        }
+        buffer.flip();
+        return buffer;
+    }
+
     @Override
     public ByteBuffer getHashValue(Type type) {
         ByteBuffer buffer;
@@ -301,7 +362,7 @@ public class DecimalLiteral extends LiteralExpr {
     }
 
     @Override
-    public Object getRealValue() {
+    public Object getRealObjectValue() {
         return value;
     }
 
@@ -323,7 +384,12 @@ public class DecimalLiteral extends LiteralExpr {
         // use BigDecimal.toPlainString() instead of BigDecimal.toString()
         // to avoid outputting scientific representation which cannot be
         // parsed in BE that uses regex to validation decimals in string format.
-        return value.toPlainString();
+        // Different print styles help us distinguish decimalV2 and decimalV3 in plan.
+        if (type.isDecimalV2()) {
+            return value.stripTrailingZeros().toPlainString();
+        } else {
+            return value.toPlainString();
+        }
     }
 
     @Override
@@ -339,9 +405,11 @@ public class DecimalLiteral extends LiteralExpr {
     @Override
     protected void toThrift(TExprNode msg) {
         // TODO(hujie01) deal with loss information
-        msg.node_type = TExprNodeType.DECIMAL_LITERAL;
-        BigDecimal v = new BigDecimal(value.toBigInteger());
-        msg.decimal_literal = new TDecimalLiteral(value.toPlainString());
+        msg.setNode_type(TExprNodeType.DECIMAL_LITERAL);
+        TDecimalLiteral decimalLiteral = new TDecimalLiteral();
+        decimalLiteral.setValue(value.toPlainString());
+        decimalLiteral.setInteger_value(packDecimal());
+        msg.setDecimal_literal(decimalLiteral);
     }
 
     @Override
@@ -378,15 +446,21 @@ public class DecimalLiteral extends LiteralExpr {
         return fracPart.intValue();
     }
 
-    public static void checkLiteralOverflow(BigDecimal value, ScalarType scalarType) throws AnalysisException {
+    // check decimal overflow in binary style, used in ArithmeticExpr and CastExpr.
+    // binary-style overflow checking is high-performance, because it just check ALU flags
+    // after computation.
+    public static void checkLiteralOverflowInBinaryStyle(BigDecimal value, ScalarType scalarType)
+            throws AnalysisException {
         int realPrecision = getRealPrecision(value);
         int realScale = getRealScale(value);
-        int realIntegerPartWidth = realPrecision - realScale;
-        int precision = scalarType.getScalarPrecision();
-        int scale = scalarType.getScalarScale();
-        int maxIntegerPartWidth = precision - scale;
-        // integer part of decimal literal should not exceed precision - scale
-        if (realIntegerPartWidth > maxIntegerPartWidth) {
+        BigInteger underlyingInt = value.setScale(scalarType.getScalarScale(), RoundingMode.HALF_UP).unscaledValue();
+        int numBytes = scalarType.getPrimitiveType().getTypeSize();
+        // In BE, Overflow checking uses maximum/minimum binary values instead of maximum/minimum decimal values.
+        // for instance: if PrimitiveType is decimal32, then 2147483647/-2147483648 is used instead of
+        // 999999999/-999999999.
+        BigInteger maxBinary = BigInteger.ONE.shiftLeft(numBytes * 8 - 1).subtract(BigInteger.ONE);
+        BigInteger minBinary = BigInteger.ONE.shiftLeft(numBytes * 8 - 1).negate();
+        if (underlyingInt.compareTo(minBinary) < 0 || underlyingInt.compareTo(maxBinary) > 0) {
             String errMsg = String.format(
                     "Typed decimal literal(%s) is overflow, value='%s' (precision=%d, scale=%d)",
                     scalarType.toString(), value.toPlainString(), realPrecision, realScale);
@@ -394,11 +468,37 @@ public class DecimalLiteral extends LiteralExpr {
         }
     }
 
+    // check overflow overflow in decimal style, used in Predicates processing or Predicates reducing. it
+    // is less efficient that its binary-style counterpart(cost 2.5X ~ 3.X).
+    // for Predicates that contain constant operators of decimal type, the constant value is transferred to
+    // to BE in string type, and in BE, an corresponding VectorizedLiteral is constructed after string value
+    // is converted to decimal via the string-to-decimal casting function who checks decimal overflowing in
+    // decimal style. but in FE, checking decimal overflow in binary style instead of decimal style would
+    // given an incorrect result that overflow checking should fail(in decimal style) expectedly but succeeds
+    // (in decimal style)actually. When checkLiteralOverflowInDecimalStyle fails, proper cast exprs are interpolated
+    // into Predicates to cast the type of decimal constant value to a type wider enough to holds the value.
+    public static boolean checkLiteralOverflowInDecimalStyle(BigDecimal value, ScalarType scalarType) {
+        int realPrecision = getRealPrecision(value);
+        int realScale = getRealScale(value);
+        BigInteger underlyingInt = value.setScale(scalarType.getScalarScale(), RoundingMode.HALF_UP).unscaledValue();
+        BigInteger maxDecimal = BigInteger.TEN.pow(scalarType.decimalPrecision());
+        BigInteger minDecimal = BigInteger.TEN.pow(scalarType.decimalPrecision()).negate();
+
+        if (underlyingInt.compareTo(minDecimal) <= 0 || underlyingInt.compareTo(maxDecimal) >= 0) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Typed decimal literal({}) is overflow, value='{}' (precision={}, scale={})",
+                        scalarType, value.toPlainString(), realPrecision, realScale);
+            }
+            return false;
+        }
+        return true;
+    }
+
     @Override
     public Expr uncheckedCastTo(Type targetType) throws AnalysisException {
         if (targetType.getPrimitiveType().isDecimalV3Type()) {
             this.type = targetType;
-            checkLiteralOverflow(this.value, (ScalarType) targetType);
+            checkLiteralOverflowInBinaryStyle(this.value, (ScalarType) targetType);
             // round
             int realScale = getRealScale(value);
             int scale = ((ScalarType) targetType).getScalarScale();
@@ -421,6 +521,26 @@ public class DecimalLiteral extends LiteralExpr {
 
     @Override
     public int hashCode() {
-        return 31 * super.hashCode() + Objects.hashCode(value);
+        return Objects.hash(super.hashCode(), value);
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        return super.equals(obj);
+    }
+
+    @Override
+    public void parseMysqlParam(ByteBuffer data) {
+        int len = getParamLen(data);
+        BigDecimal v;
+        try {
+            byte[] bytes = new byte[len];
+            data.get(bytes);
+            String value = new String(bytes);
+            v = new BigDecimal(value);
+        } catch (NumberFormatException e) {
+            throw new ValidateException("Invalid floating literal: " + value, ErrorType.USER_ERROR);
+        }
+        init(v);
     }
 }

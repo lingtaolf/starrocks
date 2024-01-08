@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/persist/CreateTableInfoTest.java
 
@@ -23,9 +36,8 @@ package com.starrocks.persist;
 
 import com.google.common.collect.Lists;
 import com.starrocks.catalog.AggregateType;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Column;
-import com.starrocks.catalog.FakeCatalog;
+import com.starrocks.catalog.FakeGlobalStateMgr;
 import com.starrocks.catalog.KeysType;
 import com.starrocks.catalog.MaterializedIndex;
 import com.starrocks.catalog.MaterializedIndex.IndexState;
@@ -37,6 +49,7 @@ import com.starrocks.catalog.ScalarType;
 import com.starrocks.catalog.SinglePartitionInfo;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.jmockit.Deencapsulation;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.thrift.TStorageType;
 import org.junit.Assert;
 import org.junit.Before;
@@ -51,17 +64,17 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class CreateTableInfoTest {
-    private Catalog catalog;
+    private GlobalStateMgr globalStateMgr;
 
-    private FakeCatalog fakeCatalog;
+    private FakeGlobalStateMgr fakeGlobalStateMgr;
 
     @Before
     public void setUp() {
-        fakeCatalog = new FakeCatalog();
-        catalog = Deencapsulation.newInstance(Catalog.class);
+        fakeGlobalStateMgr = new FakeGlobalStateMgr();
+        globalStateMgr = Deencapsulation.newInstance(GlobalStateMgr.class);
 
-        FakeCatalog.setCatalog(catalog);
-        FakeCatalog.setMetaVersion(FeConstants.meta_version);
+        FakeGlobalStateMgr.setGlobalStateMgr(globalStateMgr);
+        FakeGlobalStateMgr.setMetaVersion(FeConstants.META_VERSION);
     }
 
     @Test
@@ -100,11 +113,11 @@ public class CreateTableInfoTest {
 
         List<Column> column = Lists.newArrayList();
         column.add(column2);
-        table.setIndexMeta(new Long(1), "test", column, 1, 1, shortKeyColumnCount,
+        table.setIndexMeta(1, "test", column, 1, 1, shortKeyColumnCount,
                 TStorageType.COLUMN, KeysType.AGG_KEYS);
         Deencapsulation.setField(table, "baseIndexId", 1000);
         table.addPartition(partition);
-        CreateTableInfo info = new CreateTableInfo("db1", table);
+        CreateTableInfo info = new CreateTableInfo("db1", table, "");
         info.write(dos);
 
         dos.flush();

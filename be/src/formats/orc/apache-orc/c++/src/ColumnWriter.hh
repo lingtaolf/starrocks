@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/ColumnWriter.hh
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -20,8 +16,7 @@
  * limitations under the License.
  */
 
-#ifndef ORC_COLUMN_WRITER_HH
-#define ORC_COLUMN_WRITER_HH
+#pragma once
 
 #include "BloomFilter.hh"
 #include "ByteRLE.hh"
@@ -52,11 +47,11 @@ std::unique_ptr<StreamsFactory> createStreamsFactory(const WriterOptions& option
    */
 class RowIndexPositionRecorder : public PositionRecorder {
 public:
-    virtual ~RowIndexPositionRecorder() override;
+    ~RowIndexPositionRecorder() override;
 
     RowIndexPositionRecorder(proto::RowIndexEntry& entry) : rowIndexEntry(entry) {}
 
-    virtual void add(uint64_t pos) override { rowIndexEntry.add_positions(pos); }
+    void add(uint64_t pos) override { rowIndexEntry.add_positions(pos); }
 
 private:
     proto::RowIndexEntry& rowIndexEntry;
@@ -195,6 +190,7 @@ protected:
     MemoryPool& memPool;
     std::unique_ptr<BufferedOutputStream> indexStream;
     std::unique_ptr<BufferedOutputStream> bloomFilterStream;
+    bool hasNullValue;
 };
 
 /**
@@ -203,5 +199,3 @@ protected:
 std::unique_ptr<ColumnWriter> buildWriter(const Type& type, const StreamsFactory& factory,
                                           const WriterOptions& options);
 } // namespace orc
-
-#endif

@@ -1,76 +1,87 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "storage/update_compaction_state.h"
 
+#include "gutil/strings/substitute.h"
+#include "storage/chunk_helper.h"
 #include "storage/primary_key_encoder.h"
-#include "storage/rowset/beta_rowset.h"
 #include "storage/rowset/rowset.h"
 #include "storage/storage_engine.h"
 #include "storage/update_manager.h"
-#include "storage/vectorized/chunk_helper.h"
+#include "util/stack_util.h"
 
 namespace starrocks {
 
-namespace vectorized {
-
-CompactionState::CompactionState() {}
+CompactionState::CompactionState() = default;
 
 CompactionState::~CompactionState() {
     StorageEngine::instance()->update_manager()->compaction_state_mem_tracker()->release(_memory_usage);
+    if (!_status.ok()) {
+        LOG(WARNING) << "bad CompactionState, status:" << _status;
+    }
 }
 
 Status CompactionState::load(Rowset* rowset) {
     if (UNLIKELY(!_status.ok())) {
         return _status;
     }
-    std::call_once(_load_once_flag, [&] { _status = _do_load(rowset); });
+    std::call_once(_load_once_flag, [&] {
+        _status = _do_load(rowset);
+        if (!_status.ok()) {
+            LOG(WARNING) << "load CompactionState error: " << _status
+                         << " tablet:" << rowset->rowset_meta()->tablet_id() << " stack:\n"
+                         << get_stack_trace();
+            if (_status.is_mem_limit_exceeded()) {
+                LOG(WARNING) << CurrentThread::mem_tracker()->debug_string();
+            }
+        }
+    });
     return _status;
+}
+
+Status CompactionState::load_segments(Rowset* rowset, uint32_t segment_id) {
+    if (segment_id >= pk_cols.size() && pk_cols.size() != 0) {
+        std::string msg = strings::Substitute("Error segment id: $0 vs $1", segment_id, pk_cols.size());
+        LOG(WARNING) << msg;
+        return Status::InternalError(msg);
+    }
+    if (pk_cols.size() == 0 || pk_cols[segment_id] != nullptr) {
+        return Status::OK();
+    }
+    return _load_segments(rowset, segment_id);
 }
 
 static const size_t large_compaction_memory_threshold = 1000000000;
 
-Status CompactionState::_do_load(Rowset* rowset) {
-    auto& schema = rowset->schema();
+Status CompactionState::_load_segments(Rowset* rowset, uint32_t segment_id) {
+    const auto& schema = rowset->schema();
     vector<uint32_t> pk_columns;
-    for (size_t i = 0; i < schema.num_key_columns(); i++) {
+    for (size_t i = 0; i < schema->num_key_columns(); i++) {
         pk_columns.push_back(static_cast<uint32_t>(i));
     }
 
-    vectorized::Schema pkey_schema = ChunkHelper::convert_schema_to_format_v2(schema, pk_columns);
+    Schema pkey_schema = ChunkHelper::convert_schema(schema, pk_columns);
 
-    std::unique_ptr<vectorized::Column> pk_column;
-    if (!PrimaryKeyEncoder::create_column(pkey_schema, &pk_column).ok()) {
+    std::unique_ptr<Column> pk_column;
+    if (!PrimaryKeyEncoder::create_column(pkey_schema, &pk_column, true).ok()) {
         CHECK(false) << "create column for primary key encoder failed";
-    }
-
-    auto update_manager = StorageEngine::instance()->update_manager();
-    auto tracker = update_manager->compaction_state_mem_tracker();
-    segment_states.resize(rowset->num_segments());
-    for (auto i = 0; i < rowset->num_segments(); i++) {
-        std::unique_ptr<fs::ReadableBlock> rblock;
-        std::string rssid_file = BetaRowset::segment_srcrssid_file_path(rowset->rowset_path(), rowset->rowset_id(), i);
-        RETURN_IF_ERROR(fs::fs_util::block_manager()->open_block(rssid_file, &rblock));
-        uint64_t file_size = 0;
-        RETURN_IF_ERROR(rblock->size(&file_size));
-        std::vector<uint32_t>& src_rssids = segment_states[i].src_rssids;
-        src_rssids.resize(file_size / sizeof(uint32_t));
-        _memory_usage += file_size;
-        tracker->consume(file_size);
-        if (tracker->any_limit_exceeded()) {
-            // currently we can only log error here, and allow memory over usage
-            LOG(ERROR) << " memory limit exceeded when loading compaction state rssid tablet_id:"
-                       << rowset->rowset_meta()->tablet_id() << " rowset #rows:" << rowset->num_rows()
-                       << " size:" << rowset->data_disk_size() << " seg:" << i << " memory:" << _memory_usage
-                       << " stats:" << update_manager->memory_stats();
-        }
-        Slice read_slice(reinterpret_cast<const char*>(src_rssids.data()), file_size);
-        RETURN_IF_ERROR(rblock->read(0, read_slice));
     }
 
     RowsetReleaseGuard guard(rowset->shared_from_this());
     OlapReaderStatistics stats;
-    auto beta_rowset = down_cast<BetaRowset*>(rowset);
-    auto res = beta_rowset->get_segment_iterators2(pkey_schema, NULL, 0, &stats);
+    auto res = rowset->get_segment_iterators2(pkey_schema, schema, nullptr, 0, &stats);
     if (!res.ok()) {
         return res.status();
     }
@@ -78,18 +89,21 @@ Status CompactionState::_do_load(Rowset* rowset) {
     auto& itrs = res.value();
     CHECK(itrs.size() == rowset->num_segments()) << "itrs.size != num_segments";
 
+    auto update_manager = StorageEngine::instance()->update_manager();
+    auto tracker = update_manager->compaction_state_mem_tracker();
+
     // only hold pkey, so can use larger chunk size
     auto chunk_shared_ptr = ChunkHelper::new_chunk(pkey_schema, config::vector_chunk_size);
     auto chunk = chunk_shared_ptr.get();
 
-    for (size_t i = 0; i < itrs.size(); i++) {
-        auto itr = itrs[i].get();
-        if (itr == NULL) {
-            continue;
-        }
-        auto& dest = segment_states[i].pkeys;
-        auto col = pk_column->clone();
-        auto num_rows = beta_rowset->segments()[i]->num_rows();
+    auto itr = itrs[segment_id].get();
+    if (itr == nullptr) {
+        return Status::OK();
+    }
+    auto& dest = pk_cols[segment_id];
+    auto col = pk_column->clone();
+    if (itr != nullptr) {
+        const auto num_rows = rowset->segments()[segment_id]->num_rows();
         col->reserve(num_rows);
         while (true) {
             chunk->reset();
@@ -104,26 +118,48 @@ Status CompactionState::_do_load(Rowset* rowset) {
         }
         itr->close();
         CHECK(col->size() == num_rows) << "read segment: iter rows != num rows";
-        dest = std::move(col);
-        _memory_usage += dest->memory_usage();
-        tracker->consume(dest->memory_usage());
-        if (tracker->any_limit_exceeded()) {
-            // currently we can only log error here, and allow memory over usage
-            LOG(ERROR) << " memory limit exceeded when loading compaction state pk tablet_id:"
-                       << rowset->rowset_meta()->tablet_id() << " rowset #rows:" << rowset->num_rows()
-                       << " size:" << rowset->data_disk_size() << " seg:" << i << " memory:" << _memory_usage
-                       << " stats:" << update_manager->memory_stats();
-        }
+    }
+    dest = std::move(col);
+    dest->raw_data();
+    _memory_usage += dest->memory_usage();
+    tracker->consume(dest->memory_usage());
+
+    if (tracker->any_limit_exceeded()) {
+        // currently we can only log error here, and allow memory over usage
+        LOG(ERROR) << " memory limit exceeded when loading compaction state pk tablet_id:"
+                   << rowset->rowset_meta()->tablet_id() << " rowset #rows:" << rowset->num_rows()
+                   << " size:" << rowset->data_disk_size() << " seg:" << segment_id << "/" << rowset->num_segments()
+                   << " #rows:" << rowset->segments()[segment_id]->num_rows() << " memory:" << _memory_usage
+                   << " stats:" << update_manager->memory_stats();
     }
 
     if (_memory_usage > large_compaction_memory_threshold) {
         LOG(INFO) << " loading large compaction state tablet_id:" << rowset->rowset_meta()->tablet_id()
                   << " rowset #rows:" << rowset->num_rows() << " size:" << rowset->data_disk_size()
-                  << " memory:" << _memory_usage << " stats:" << update_manager->memory_stats();
+                  << " seg:" << segment_id << "/" << rowset->num_segments()
+                  << " #rows:" << rowset->segments()[segment_id]->num_rows() << " memory:" << _memory_usage
+                  << " stats:" << update_manager->memory_stats();
     }
     return Status::OK();
 }
 
-} // namespace vectorized
+void CompactionState::release_segment(uint32_t segment_id) {
+    if (segment_id >= pk_cols.size() || pk_cols[segment_id] == nullptr) {
+        return;
+    }
+    auto update_manager = StorageEngine::instance()->update_manager();
+    auto tracker = update_manager->compaction_state_mem_tracker();
+    _memory_usage -= pk_cols[segment_id]->memory_usage();
+    tracker->release(pk_cols[segment_id]->memory_usage());
+    pk_cols[segment_id].reset();
+}
+
+Status CompactionState::_do_load(Rowset* rowset) {
+    if (rowset->num_segments() == 0) {
+        return Status::OK();
+    }
+    pk_cols.resize(rowset->num_segments());
+    return _load_segments(rowset, 0);
+}
 
 } // namespace starrocks

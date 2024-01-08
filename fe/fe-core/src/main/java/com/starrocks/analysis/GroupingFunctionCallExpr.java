@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/analysis/GroupingFunctionCallExpr.java
 
@@ -21,10 +34,9 @@
 
 package com.starrocks.analysis;
 
-import com.starrocks.catalog.Function;
-import com.starrocks.catalog.Type;
 import com.starrocks.common.AnalysisException;
-import com.starrocks.sql.analyzer.ExprVisitor;
+import com.starrocks.sql.ast.AstVisitor;
+import com.starrocks.sql.parser.NodePosition;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -38,7 +50,11 @@ public class GroupingFunctionCallExpr extends FunctionCallExpr {
     private List<Expr> realChildren;
 
     public GroupingFunctionCallExpr(String functionName, List<Expr> params) {
-        super(functionName, params);
+        this(functionName, params, NodePosition.ZERO);
+    }
+
+    public GroupingFunctionCallExpr(String functionName, List<Expr> params, NodePosition pos) {
+        super(functionName, params, pos);
         childrenReseted = false;
     }
 
@@ -59,21 +75,6 @@ public class GroupingFunctionCallExpr extends FunctionCallExpr {
 
     @Override
     public void analyzeImpl(Analyzer analyzer) throws AnalysisException {
-        if (children.size() < 1) {
-            throw new AnalysisException("GROUPING functions required at least one parameters");
-        }
-
-        for (Expr child : children) {
-            if (!(child instanceof SlotRef)) {
-                throw new AnalysisException("GROUPING functions only support column");
-            }
-        }
-
-        Type[] childTypes = new Type[1];
-        childTypes[0] = Type.BIGINT;
-        fn = getBuiltinFunction(analyzer, getFnName().getFunction(), childTypes,
-                Function.CompareMode.IS_IDENTICAL);
-        this.type = fn.getReturnType();
     }
 
     // set child to virtual slot
@@ -112,7 +113,7 @@ public class GroupingFunctionCallExpr extends FunctionCallExpr {
      * Below function is added by new analyzer
      */
     @Override
-    public <R, C> R accept(ExprVisitor<R, C> visitor, C context) {
+    public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
         return visitor.visitGroupingFunctionCall(this, context);
     }
 }

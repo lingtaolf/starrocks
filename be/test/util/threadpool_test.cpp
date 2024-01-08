@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/test/util/threadpool_test.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -72,7 +68,7 @@ static const char* kDefaultPoolName = "test";
 
 class ThreadPoolTest : public ::testing::Test {
 public:
-    virtual void SetUp() override { ASSERT_TRUE(ThreadPoolBuilder(kDefaultPoolName).build(&_pool).ok()); }
+    void SetUp() override { ASSERT_TRUE(ThreadPoolBuilder(kDefaultPoolName).build(&_pool).ok()); }
 
     Status rebuild_pool_with_builder(const ThreadPoolBuilder& builder) { return builder.build(&_pool); }
 
@@ -169,7 +165,7 @@ TEST_F(ThreadPoolTest, TestThreadPoolWithNoMaxThreads) {
     // By default a threadpool's max_threads is set to the number of CPUs, so
     // this test submits more tasks than that to ensure that the number of CPUs
     // isn't some kind of upper bound.
-    const int kNumCPUs = base::NumCPUs();
+    const int kNumCPUs = CpuInfo::num_cores();
 
     // Build a threadpool with no limit on the maximum number of threads.
     ASSERT_TRUE(rebuild_pool_with_builder(
@@ -259,6 +255,59 @@ TEST_F(ThreadPoolTest, TestVariableSizeThreadPool) {
     ASSERT_EQ(0, _pool->num_threads());
 }
 
+TEST_F(ThreadPoolTest, TestIncMaxThreadPool) {
+    ASSERT_TRUE(rebuild_pool_with_builder(ThreadPoolBuilder(kDefaultPoolName)
+                                                  .set_min_threads(1)
+                                                  .set_max_threads(4)
+                                                  .set_idle_timeout(MonoDelta::FromMilliseconds(1)))
+                        .ok());
+
+    // There is 1 thread to start with.
+    ASSERT_EQ(1, _pool->num_threads());
+    // We get up to 4 threads when submitting work.
+    CountDownLatch latch(1);
+    ASSERT_TRUE(_pool->submit(SlowTask::new_slow_task(&latch)).ok());
+    ASSERT_EQ(1, _pool->num_threads());
+    ASSERT_TRUE(_pool->submit(SlowTask::new_slow_task(&latch)).ok());
+    ASSERT_EQ(2, _pool->num_threads());
+    ASSERT_TRUE(_pool->submit(SlowTask::new_slow_task(&latch)).ok());
+    ASSERT_EQ(3, _pool->num_threads());
+    ASSERT_TRUE(_pool->submit(SlowTask::new_slow_task(&latch)).ok());
+    ASSERT_EQ(4, _pool->num_threads());
+    // The 5th piece of work gets queued.
+    ASSERT_TRUE(_pool->submit(SlowTask::new_slow_task(&latch)).ok());
+    ASSERT_EQ(4, _pool->num_threads());
+    // Finish all work
+    latch.count_down();
+    _pool->wait();
+    ASSERT_EQ(0, _pool->_active_threads);
+    // inc max threads to 6
+    _pool->update_max_threads(6);
+    CountDownLatch latch2(1);
+    ASSERT_TRUE(_pool->submit(SlowTask::new_slow_task(&latch2)).ok());
+    ASSERT_EQ(4, _pool->num_threads());
+    ASSERT_TRUE(_pool->submit(SlowTask::new_slow_task(&latch2)).ok());
+    ASSERT_EQ(4, _pool->num_threads());
+    ASSERT_TRUE(_pool->submit(SlowTask::new_slow_task(&latch2)).ok());
+    ASSERT_EQ(4, _pool->num_threads());
+    ASSERT_TRUE(_pool->submit(SlowTask::new_slow_task(&latch2)).ok());
+    ASSERT_EQ(4, _pool->num_threads());
+    ASSERT_TRUE(_pool->submit(SlowTask::new_slow_task(&latch2)).ok());
+    ASSERT_EQ(5, _pool->num_threads());
+    ASSERT_TRUE(_pool->submit(SlowTask::new_slow_task(&latch2)).ok());
+    ASSERT_EQ(6, _pool->num_threads());
+    // The 7th piece of work gets queued.
+    ASSERT_TRUE(_pool->submit(SlowTask::new_slow_task(&latch2)).ok());
+    ASSERT_EQ(6, _pool->num_threads());
+    // Finish all work
+    latch2.count_down();
+    _pool->wait();
+    ASSERT_EQ(0, _pool->_active_threads);
+
+    _pool->shutdown();
+    ASSERT_EQ(0, _pool->num_threads());
+}
+
 TEST_F(ThreadPoolTest, TestMaxQueueSize) {
     ASSERT_TRUE(rebuild_pool_with_builder(
                         ThreadPoolBuilder(kDefaultPoolName).set_min_threads(1).set_max_threads(1).set_max_queue_size(1))
@@ -330,7 +379,7 @@ class SlowDestructorRunnable : public Runnable {
 public:
     void run() override {}
 
-    virtual ~SlowDestructorRunnable() { SleepFor(MonoDelta::FromMilliseconds(100)); }
+    ~SlowDestructorRunnable() override { SleepFor(MonoDelta::FromMilliseconds(100)); }
 };
 
 // Test that if a tasks's destructor is slow, it doesn't cause serialization of the tasks
@@ -367,7 +416,7 @@ TEST_P(ThreadPoolTestTokenTypes, TestTokenSubmitAndWait) {
 
 TEST_F(ThreadPoolTest, TestTokenSubmitsProcessedSerially) {
     std::unique_ptr<ThreadPoolToken> t = _pool->new_token(ThreadPool::ExecutionMode::SERIAL);
-    int32_t seed = static_cast<int32_t>(GetCurrentTimeMicros());
+    auto seed = static_cast<int32_t>(GetCurrentTimeMicros());
     srand(seed);
     Random r(seed);
     string result;
@@ -466,7 +515,7 @@ TEST_P(ThreadPoolTestTokenTypes, TestTokenShutdown) {
 TEST_P(ThreadPoolTestTokenTypes, TestTokenWaitForAll) {
     const int kNumTokens = 3;
     const int kNumSubmissions = 20;
-    int32_t seed = static_cast<int32_t>(GetCurrentTimeMicros());
+    auto seed = static_cast<int32_t>(GetCurrentTimeMicros());
     srand(seed);
     Random r(seed);
     std::vector<std::unique_ptr<ThreadPoolToken>> tokens;
@@ -499,7 +548,7 @@ TEST_P(ThreadPoolTestTokenTypes, TestTokenWaitForAll) {
 
 TEST_F(ThreadPoolTest, TestFuzz) {
     const int kNumOperations = 1000;
-    int32_t seed = static_cast<int32_t>(GetCurrentTimeMicros());
+    auto seed = static_cast<int32_t>(GetCurrentTimeMicros());
     srand(seed);
     Random r(seed);
     std::vector<std::unique_ptr<ThreadPoolToken>> tokens;
@@ -602,7 +651,7 @@ TEST_F(ThreadPoolTest, TestTokenConcurrency) {
     const int kSubmitThreads = 8;
 
     std::vector<shared_ptr<ThreadPoolToken>> tokens;
-    int32_t seed = static_cast<int32_t>(GetCurrentTimeMicros());
+    auto seed = static_cast<int32_t>(GetCurrentTimeMicros());
     srand(seed);
     Random rng(seed);
 

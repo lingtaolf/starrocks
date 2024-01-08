@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/analysis/DescriptorTable.java
 
@@ -28,8 +41,6 @@ import com.starrocks.catalog.PartitionKey;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.IdGenerator;
 import com.starrocks.thrift.TDescriptorTable;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -44,7 +55,6 @@ import java.util.Map;
  * them unique ids..
  */
 public class DescriptorTable {
-    private static final Logger LOG = LogManager.getLogger(DescriptorTable.class);
 
     private final HashMap<TupleId, TupleDescriptor> tupleDescs = new HashMap<TupleId, TupleDescriptor>();
     // List of referenced tables with no associated TupleDescriptor to ship to the BE.
@@ -85,22 +95,6 @@ public class DescriptorTable {
         }
         slotDescs.put(result.getId(), result);
         return result;
-    }
-
-    /**
-     * Create copy of src with new id. The returned descriptor has its mem layout
-     * computed.
-     */
-    public TupleDescriptor copyTupleDescriptor(TupleId srcId, String debugName) {
-        TupleDescriptor d = new TupleDescriptor(tupleIdGenerator_.getNextId(), debugName);
-        tupleDescs.put(d.getId(), d);
-        // create copies of slots
-        TupleDescriptor src = tupleDescs.get(srcId);
-        for (SlotDescriptor slot : src.getSlots()) {
-            copySlotDescriptor(d, slot);
-        }
-        d.computeMemLayout();
-        return d;
     }
 
     /**
@@ -157,7 +151,7 @@ public class DescriptorTable {
 
     public TDescriptorTable toThrift() {
         TDescriptorTable result = new TDescriptorTable();
-        HashSet<Table> referencedTbls = Sets.newHashSet();
+        Map<Long, Table> referencedTbls = Maps.newHashMap();
         for (TupleDescriptor tupleD : tupleDescs.values()) {
             // inline view of a non-constant select has a non-materialized tuple descriptor
             // in the descriptor table just for type checking, which we need to skip
@@ -167,7 +161,7 @@ public class DescriptorTable {
                 // but its table has no id
                 if (tupleD.getTable() != null
                         && tupleD.getTable().getId() >= 0) {
-                    referencedTbls.add(tupleD.getTable());
+                    referencedTbls.putIfAbsent(tupleD.getTable().getId(), tupleD.getTable());
                 }
                 for (SlotDescriptor slotD : tupleD.getMaterializedSlots()) {
                     result.addToSlotDescriptors(slotD.toThrift());
@@ -175,49 +169,30 @@ public class DescriptorTable {
             }
         }
 
-        for (Table table : referencedTables) {
-            referencedTbls.add(table);
+        for (Table tbl : referencedTables) {
+            referencedTbls.putIfAbsent(tbl.getId(), tbl);
         }
 
-        for (Table tbl : referencedTbls) {
+        for (Table tbl : referencedTbls.values()) {
             result.addToTableDescriptors(
                     tbl.toThrift(referencedPartitionsPerTable.getOrDefault(tbl, Lists.newArrayList())));
         }
         return result;
     }
 
-    public String debugString() {
-        StringBuilder out = new StringBuilder();
-        out.append("tuples:\n");
-        for (TupleDescriptor desc : tupleDescs.values()) {
-            out.append(desc + "\n");
-        }
-        out.append("\n ");
-        out.append("slotDesc size: " + slotDescs.size() + "\n");
-        for (SlotDescriptor desc : slotDescs.values()) {
-            out.append(desc.debugString());
-            out.append("\n");
-        }
-        out.append("\n ");
-        return out.toString();
-    }
-
-    public String getExplainString() {
-        StringBuilder out = new StringBuilder();
-        out.append("\nTuples:\n");
-        for (TupleDescriptor desc : tupleDescs.values()) {
-            out.append(desc.getExplainString() + "\n");
-        }
-        return out.toString();
-    }
-
     public static class ReferencedPartitionInfo {
         private long id;
         private PartitionKey key;
+        private String path;
 
-        public ReferencedPartitionInfo(long id, PartitionKey key) {
+        public ReferencedPartitionInfo(long id, PartitionKey key, String path) {
             this.id = id;
             this.key = key;
+            this.path = path;
+        }
+
+        public ReferencedPartitionInfo(long id, PartitionKey key) {
+            this(id, key, "");
         }
 
         public long getId() {
@@ -226,6 +201,10 @@ public class DescriptorTable {
 
         public PartitionKey getKey() {
             return key;
+        }
+
+        public String getPath() {
+            return path;
         }
     }
 }

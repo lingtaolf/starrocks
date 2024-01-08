@@ -9,9 +9,7 @@
 
 #include "util/utf8_check.h"
 
-#include <cstdlib>
-
-#if defined(__i386) || defined(__x86_64__)
+#if defined(__x86_64__) && defined(__SSE4_2__)
 #include "util/simdutf8check.h"
 #elif defined(__aarch64__)
 #include <arm_neon.h>
@@ -102,9 +100,13 @@ bool validate_utf8_naive(const char* data, size_t len) {
     return true;
 }
 
-#if defined(__i386) || defined(__x86_64__)
+#if defined(__x86_64__) && defined(__SSE4_2__)
 bool validate_utf8(const char* src, size_t len) {
     return validate_utf8_fast(src, len);
+}
+#elif defined(__x86_64__)
+bool validate_utf8(const char* src, size_t len) {
+    return validate_utf8_naive(src, len);
 }
 #elif defined(__aarch64__)
 /*

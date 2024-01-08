@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/mysql/privilege/MockedAuth.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,9 +17,9 @@
 
 package com.starrocks.mysql.privilege;
 
-import com.starrocks.analysis.UserIdentity;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.QueryState;
+import com.starrocks.sql.ast.UserIdentity;
 import mockit.Expectations;
 
 public class MockedAuth {
@@ -42,8 +38,6 @@ public class MockedAuth {
                 auth.checkTblPriv((ConnectContext) any, anyString, anyString, (PrivPredicate) any);
                 minTimes = 0;
                 result = true;
-
-                // auth.checkHasPriv((ConnectContext) any,, priv, levels)
             }
         };
     }
@@ -70,7 +64,6 @@ public class MockedAuth {
                 ctx.getCurrentUserIdentity();
                 minTimes = 0;
                 UserIdentity userIdentity = new UserIdentity(user, ip);
-                userIdentity.setIsAnalyzed();
                 result = userIdentity;
             }
         };

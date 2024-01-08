@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/catalog/ColocateTableTest.java
 
@@ -22,15 +35,18 @@
 package com.starrocks.catalog;
 
 import com.google.common.collect.Multimap;
-import com.starrocks.analysis.DropDbStmt;
 import com.starrocks.catalog.ColocateTableIndex.GroupId;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.DropDbStmt;
+import com.starrocks.system.SystemInfoService;
 import com.starrocks.utframe.StarRocksAssert;
 import com.starrocks.utframe.UtFrameUtils;
+import mockit.Mock;
+import mockit.MockUp;
 import org.junit.After;
-import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -38,18 +54,15 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 
-import java.io.File;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 public class ColocateTableTest {
-    private static String runningDir = "fe/mocked/ColocateTableTest" + UUID.randomUUID().toString() + "/";
-
     private static ConnectContext connectContext;
     private static String dbName = "testDb";
-    private static String fullDbName = "default_cluster:" + dbName;
+    private static String fullDbName = dbName;
     private static String tableName1 = "t1";
     private static String tableName2 = "t2";
     private static String groupName = "group1";
@@ -60,28 +73,22 @@ public class ColocateTableTest {
 
     @BeforeClass
     public static void beforeClass() throws Exception {
-        UtFrameUtils.createMinStarRocksCluster(runningDir);
+        UtFrameUtils.createMinStarRocksCluster();
         connectContext = UtFrameUtils.createDefaultCtx();
         starRocksAssert = new StarRocksAssert(connectContext);
-    }
-
-    @AfterClass
-    public static void tearDown() {
-        File file = new File(runningDir);
-        file.delete();
     }
 
     @Before
     public void createDb() throws Exception {
         starRocksAssert.withDatabase(dbName).useDatabase(dbName);
-        Catalog.getCurrentCatalog().setColocateTableIndex(new ColocateTableIndex());
+        GlobalStateMgr.getCurrentState().setColocateTableIndex(new ColocateTableIndex());
     }
 
     @After
     public void dropDb() throws Exception {
         String dropDbStmtStr = "drop database " + dbName;
-        DropDbStmt dropDbStmt = (DropDbStmt) UtFrameUtils.parseAndAnalyzeStmt(dropDbStmtStr, connectContext);
-        Catalog.getCurrentCatalog().dropDb(dropDbStmt);
+        DropDbStmt dropDbStmt = (DropDbStmt) UtFrameUtils.parseStmtWithNewParser(dropDbStmtStr, connectContext);
+        GlobalStateMgr.getCurrentState().getMetadata().dropDb(dropDbStmt.getDbName(), dropDbStmt.isForceDrop());
     }
 
     private static void createTable(String sql) throws Exception {
@@ -102,8 +109,8 @@ public class ColocateTableTest {
                 " \"colocate_with\" = \"" + groupName + "\"\n" +
                 ");");
 
-        ColocateTableIndex index = Catalog.getCurrentColocateIndex();
-        Database db = Catalog.getCurrentCatalog().getDb(fullDbName);
+        ColocateTableIndex index = GlobalStateMgr.getCurrentColocateIndex();
+        Database db = GlobalStateMgr.getCurrentState().getDb(fullDbName);
         long tableId = db.getTable(tableName1).getId();
 
         Assert.assertEquals(1, Deencapsulation.<Multimap<GroupId, Long>>getField(index, "group2Tables").size());
@@ -160,8 +167,8 @@ public class ColocateTableTest {
                 " \"colocate_with\" = \"" + groupName + "\"\n" +
                 ");");
 
-        ColocateTableIndex index = Catalog.getCurrentColocateIndex();
-        Database db = Catalog.getCurrentCatalog().getDb(fullDbName);
+        ColocateTableIndex index = GlobalStateMgr.getCurrentColocateIndex();
+        Database db = GlobalStateMgr.getCurrentState().getDb(fullDbName);
         long firstTblId = db.getTable(tableName1).getId();
         long secondTblId = db.getTable(tableName2).getId();
 
@@ -180,7 +187,7 @@ public class ColocateTableTest {
         Assert.assertTrue(index.isSameGroup(firstTblId, secondTblId));
 
         // drop first
-        index.removeTable(firstTblId);
+        index.removeTable(firstTblId, null, false);
         Assert.assertEquals(1, Deencapsulation.<Multimap<GroupId, Long>>getField(index, "group2Tables").size());
         Assert.assertEquals(1, index.getAllGroupIds().size());
         Assert.assertEquals(1, Deencapsulation.<Map<Long, GroupId>>getField(index, "table2Group").size());
@@ -193,7 +200,7 @@ public class ColocateTableTest {
         Assert.assertFalse(index.isSameGroup(firstTblId, secondTblId));
 
         // drop second
-        index.removeTable(secondTblId);
+        index.removeTable(secondTblId, null, false);
         Assert.assertEquals(0, Deencapsulation.<Multimap<GroupId, Long>>getField(index, "group2Tables").size());
         Assert.assertEquals(0, index.getAllGroupIds().size());
         Assert.assertEquals(0, Deencapsulation.<Map<Long, GroupId>>getField(index, "table2Group").size());
@@ -232,11 +239,11 @@ public class ColocateTableTest {
                 " \"replication_num\" = \"1\",\n" +
                 " \"colocate_with\" = \"" + groupName + "\"\n" +
                 ");");
-
     }
 
     @Test
     public void testReplicationNum() throws Exception {
+        
         createTable("create table " + dbName + "." + tableName1 + " (\n" +
                 " `k1` int NULL COMMENT \"\",\n" +
                 " `k2` varchar(10) NULL COMMENT \"\"\n" +
@@ -251,6 +258,14 @@ public class ColocateTableTest {
 
         expectedEx.expect(DdlException.class);
         expectedEx.expectMessage("Colocate tables must have same replication num: 1");
+
+        new MockUp<SystemInfoService>() {
+            @Mock
+            public List<Long> getAvailableBackendIds() {
+                return Arrays.asList(10001L, 10002L, 10003L);       
+            }
+        };
+
         createTable("create table " + dbName + "." + tableName2 + " (\n" +
                 " `k1` int NULL COMMENT \"\",\n" +
                 " `k2` varchar(10) NULL COMMENT \"\"\n" +
@@ -279,7 +294,7 @@ public class ColocateTableTest {
                 ");");
 
         expectedEx.expect(DdlException.class);
-        expectedEx.expectMessage("Colocate tables distribution columns size must be same : 2");
+        expectedEx.expectMessage("Colocate tables distribution columns size must be the same : 2");
         createTable("create table " + dbName + "." + tableName2 + " (\n" +
                 " `k1` int NULL COMMENT \"\",\n" +
                 " `k2` varchar(10) NULL COMMENT \"\"\n" +
@@ -308,7 +323,8 @@ public class ColocateTableTest {
                 ");");
 
         expectedEx.expect(DdlException.class);
-        expectedEx.expectMessage("Colocate tables distribution columns must have the same data type: k2 should be INT");
+        expectedEx.expectMessage("Colocate tables distribution columns must have the same data type");
+        expectedEx.expectMessage("current col: k2, should be: INT");
         createTable("create table " + dbName + "." + tableName2 + " (\n" +
                 " `k1` int NULL COMMENT \"\",\n" +
                 " `k2` varchar(10) NULL COMMENT \"\"\n" +

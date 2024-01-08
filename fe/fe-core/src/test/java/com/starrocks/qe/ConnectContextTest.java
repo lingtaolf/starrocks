@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/qe/ConnectContextTest.java
 
@@ -21,10 +34,11 @@
 
 package com.starrocks.qe;
 
-import com.starrocks.catalog.Catalog;
+import com.starrocks.common.util.TimeUtils;
 import com.starrocks.mysql.MysqlCapability;
 import com.starrocks.mysql.MysqlChannel;
 import com.starrocks.mysql.MysqlCommand;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.thrift.TUniqueId;
 import mockit.Expectations;
 import mockit.Mocked;
@@ -43,7 +57,7 @@ public class ConnectContextTest {
     @Mocked
     private SocketChannel socketChannel;
     @Mocked
-    private Catalog catalog;
+    private GlobalStateMgr globalStateMgr;
     @Mocked
     private ConnectScheduler connectScheduler;
 
@@ -62,7 +76,7 @@ public class ConnectContextTest {
                 minTimes = 0;
                 result = "192.168.1.1";
 
-                executor.cancel();
+                executor.cancel("set up");
                 minTimes = 0;
             }
         };
@@ -84,11 +98,6 @@ public class ConnectContextTest {
         Assert.assertFalse(ctx.isKilled());
         ctx.setKilled();
         Assert.assertTrue(ctx.isKilled());
-
-        // Current cluster
-        Assert.assertEquals("", ctx.getClusterName());
-        ctx.setCluster("testCluster");
-        Assert.assertEquals("testCluster", ctx.getClusterName());
 
         // Current db
         Assert.assertEquals("", ctx.getDatabase());
@@ -114,26 +123,30 @@ public class ConnectContextTest {
         ctx.setConnectionId(101);
         Assert.assertEquals(101, ctx.getConnectionId());
 
+        // set connect start time to now
+        ctx.resetConnectionStartTime();
+
         // command
         ctx.setCommand(MysqlCommand.COM_PING);
         Assert.assertEquals(MysqlCommand.COM_PING, ctx.getCommand());
 
         // Thread info
         Assert.assertNotNull(ctx.toThreadInfo());
-        List<String> row = ctx.toThreadInfo().toRow(1000, false);
-        Assert.assertEquals(9, row.size());
+        long currentTimeMillis = System.currentTimeMillis();
+        List<String> row = ctx.toThreadInfo().toRow(currentTimeMillis, false);
+        Assert.assertEquals(10, row.size());
         Assert.assertEquals("101", row.get(0));
         Assert.assertEquals("testUser", row.get(1));
         Assert.assertEquals("127.0.0.1:12345", row.get(2));
-        Assert.assertEquals("testCluster", row.get(3));
-        Assert.assertEquals("testDb", row.get(4));
-        Assert.assertEquals("Ping", row.get(5));
-        Assert.assertEquals("1", row.get(6));
-        Assert.assertEquals("", row.get(7));
+        Assert.assertEquals("testDb", row.get(3));
+        Assert.assertEquals("Ping", row.get(4));
+        Assert.assertEquals(TimeUtils.longToTimeString(ctx.getConnectionStartTime()), row.get(5));
+        Assert.assertEquals(Long.toString((currentTimeMillis - ctx.getConnectionStartTime()) / 1000), row.get(6));
+        Assert.assertEquals("OK", row.get(7));
         Assert.assertEquals("", row.get(8));
+        Assert.assertEquals("false", row.get(9));
 
         // Start time
-        Assert.assertEquals(0, ctx.getStartTime());
         ctx.setStartTime();
         Assert.assertNotSame(0, ctx.getStartTime());
 
@@ -141,10 +154,10 @@ public class ConnectContextTest {
         ctx.setExecutionId(new TUniqueId(100, 200));
         Assert.assertEquals(new TUniqueId(100, 200), ctx.getExecutionId());
 
-        // Catalog
-        Assert.assertNull(ctx.getCatalog());
-        ctx.setCatalog(catalog);
-        Assert.assertNotNull(ctx.getCatalog());
+        // GlobalStateMgr
+        Assert.assertNull(ctx.getGlobalStateMgr());
+        ctx.setGlobalStateMgr(globalStateMgr);
+        Assert.assertNotNull(ctx.getGlobalStateMgr());
 
         // clean up
         ctx.cleanup();
@@ -170,9 +183,9 @@ public class ConnectContextTest {
         Assert.assertTrue(ctx.isKilled());
 
         // Kill
-        ctx.kill(true);
+        ctx.kill(true, "sleep time out");
         Assert.assertTrue(ctx.isKilled());
-        ctx.kill(false);
+        ctx.kill(false, "sleep time out");
         Assert.assertTrue(ctx.isKilled());
 
         // clean up
@@ -196,7 +209,7 @@ public class ConnectContextTest {
         Assert.assertFalse(ctx.isKilled());
 
         // Kill
-        ctx.kill(true);
+        ctx.kill(true, "query timeout");
         Assert.assertTrue(ctx.isKilled());
 
         // clean up

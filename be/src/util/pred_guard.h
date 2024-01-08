@@ -1,4 +1,16 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #pragma once
 
@@ -10,21 +22,21 @@
 //
 // step#1: use DEF_PRED_GUARD produces codes as follows:
 // ```code
-// DEF_PRED_GUARD(DirectlyCopyable, is_directly_copyable, ArrowTypeId, AT, PrimitiveType, PT)
+// DEF_PRED_GUARD(DirectlyCopyable, is_directly_copyable, ArrowTypeId, AT, LogicalType, LT)
 // ```
 // produces codes as follows
 //
 // ```code
-// template <ArrowTypeId, AT, PrimitiveType, PT>
+// template <ArrowTypeId, AT, LogicalType, LT>
 // struct is_directly_copyable_struct {
 //     static constexpr bool value = false;
 // };
 //
-// template <ArrowTypeId, AT, PrimitiveType, PT>
-// constexpr bool is_directly_copyable = is_directly_copyable_struct<AT, PT>::value;
+// template <ArrowTypeId, AT, LogicalType, LT>
+// constexpr bool is_directly_copyable = is_directly_copyable_struct<AT, LT>::value;
 //
-// template <ArrowTypeId, AT, PrimitiveType, PT>
-// using DirectlyCopyableGuard = std::enable_if_t<is_directly_copyable<AT, PT>, guard::Guard>;
+// template <ArrowTypeId, AT, LogicalType, LT>
+// using DirectlyCopyableGuard = std::enable_if_t<is_directly_copyable<AT, LT>, guard::Guard>;
 // ```
 //
 // step#2: then, use DEF_PRED_CASE_CTOR define 2-ary constructor macro:
@@ -50,12 +62,12 @@
 // IS_DIRECTLY_COPYABLE(TYPE_FLOAT, ArrowTypeId::FLOAT);
 // IS_DIRECTLY_COPYABLE(TYPE_DOUBLE, ArrowTypeId::DOUBLE);
 // ```
-// then we can used if constexpr(is_directly_copyable<AT, PT>) in template to select the
+// then we can used if constexpr(is_directly_copyable<AT, LT>) in template to select the
 // the optimized branches in compile-time.
 // And we can also used to DirectlyCopyableGuard to define template specialization to
-// match (AT, PT) which satisfies is_directly_copyable predicate.
+// match (AT, LT) which satisfies is_directly_copyable predicate.
 //
-// More demos will be showed in src/exec/vectorized/arrow_converter.cpp in the PR following.
+// More demos will be showed in src/exec/arrow_converter.cpp in the PR following.
 
 #define PRED_GUARD(guard_name, predicate, ...)             \
     template <META_MACRO_PAIR_LIST_CONCAT_WS(__VA_ARGS__)> \

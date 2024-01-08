@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/util/thrift_client.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,7 +17,6 @@
 
 #include "util/thrift_client.h"
 
-#include <boost/assign.hpp>
 #include <ostream>
 #include <string>
 
@@ -81,14 +76,14 @@ Status ThriftClientImpl::open_with_retry(int num_tries, int wait_ms) {
 
 void ThriftClientImpl::close() {
     try {
-        if (_transport.get() != nullptr && _transport->isOpen()) _transport->close();
+        if (_transport != nullptr && _transport->isOpen()) _transport->close();
     } catch (const apache::thrift::transport::TTransportException& e) {
         LOG(INFO) << "Error closing connection to: " << ipaddress() << ":" << port() << ", ignoring (" << e.what()
                   << ")";
         // Forcibly close the socket (since the transport may have failed to get that far
         // during close())
         try {
-            if (_socket.get() != nullptr) _socket->close();
+            if (_socket != nullptr) _socket->close();
         } catch (const apache::thrift::transport::TTransportException& e) {
             LOG(INFO) << "Error closing socket to: " << ipaddress() << ":" << port() << ", ignoring (" << e.what()
                       << ")";

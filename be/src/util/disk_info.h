@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/disk_info.h
 
@@ -19,13 +32,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_COMMON_UTIL_DISK_INFO_H
-#define STARROCKS_BE_SRC_COMMON_UTIL_DISK_INFO_H
+#pragma once
 
 #include <boost/cstdint.hpp>
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 
 #include "common/logging.h"
 #include "common/status.h"
@@ -95,14 +108,15 @@ private:
 
         // 0 based index.  Does not map to anything in the system, useful to index into
         // our structures
-        int id;
+        int id{0};
 
         bool is_rotational = false;
 
-        Disk() : name(""), id(0) {}
-        Disk(const std::string& name) : name(name), id(0), is_rotational(true) {}
-        Disk(const std::string& name, int id) : name(name), id(id), is_rotational(true) {}
-        Disk(const std::string& name, int id, bool is_rotational) : name(name), id(id), is_rotational(is_rotational) {}
+        Disk() = default;
+        Disk(std::string name) : name(std::move(name)), is_rotational(true) {}
+        Disk(std::string name, int id) : name(std::move(name)), id(id), is_rotational(true) {}
+        Disk(std::string name, int id, bool is_rotational)
+                : name(std::move(name)), id(id), is_rotational(is_rotational) {}
     };
 
     // All disks
@@ -120,4 +134,3 @@ private:
 };
 
 } // namespace starrocks
-#endif

@@ -197,7 +197,7 @@ uint64 CityHash64WithSeeds(const char* s, size_t len, uint64 seed0, uint64 seed1
 
 // A subroutine for CityHash128().  Returns a decent 128-bit hash for strings
 // of any length representable in ssize_t.  Based on City and Murmur128.
-static uint128 CityMurmur(const char* s, size_t len, uint128 seed) {
+static uint128 CityMurmur(const char* s, size_t len, const uint128& seed) {
     uint64 a = Uint128Low64(seed);
     uint64 b = Uint128High64(seed);
     uint64 c = 0;
@@ -223,10 +223,10 @@ static uint128 CityMurmur(const char* s, size_t len, uint128 seed) {
     }
     a = HashLen16(a, c);
     b = HashLen16(d, b);
-    return uint128(a ^ b, HashLen16(b, a));
+    return {a ^ b, HashLen16(b, a)};
 }
 
-uint128 CityHash128WithSeed(const char* s, size_t len, uint128 seed) {
+uint128 CityHash128WithSeed(const char* s, size_t len, const uint128& seed) {
     // TODO(user): As of February 2011, there's a beta of Murmur3 that would
     // most likely be useful here.  E.g., if (len < 900) return Murmur3(...)
     if (len < 128) {
@@ -282,7 +282,7 @@ uint128 CityHash128WithSeed(const char* s, size_t len, uint128 seed) {
     // different 48-byte-to-8-byte hashes to get a 16-byte final result.
     x = HashLen16(x, v.first);
     y = HashLen16(y, w.first);
-    return uint128(HashLen16(x + v.second, w.second) + y, HashLen16(x + w.second, y + v.second));
+    return {HashLen16(x + v.second, w.second) + y, HashLen16(x + w.second, y + v.second)};
 }
 
 uint128 CityHash128(const char* s, size_t len) {

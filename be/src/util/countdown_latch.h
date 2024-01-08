@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/countdown_latch.h
 
@@ -19,8 +32,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_UTIL_COUNTDOWN_LATCH_H
-#define STARROCKS_BE_SRC_UTIL_COUNTDOWN_LATCH_H
+#pragma once
 
 #include <condition_variable>
 #include <mutex>
@@ -34,10 +46,11 @@ namespace starrocks {
 // This is a C++ implementation of the Java CountDownLatch
 // class.
 // See http://docs.oracle.com/javase/6/docs/api/java/util/concurrent/CountDownLatch.html
-class CountDownLatch {
+template <typename Lock, typename Cond>
+class GenericCountDownLatch {
 public:
     // Initialize the latch with the given initial count.
-    explicit CountDownLatch(int count) : cond_(), count_(count) {}
+    explicit GenericCountDownLatch(int count) : count_(count) {}
 
     // REQUIRES: amount >= 0.
     // Decrement the count of this latch by 'amount'.
@@ -76,12 +89,15 @@ public:
         }
     }
 
+    template <typename Duration>
+    bool wait_for(const Duration& dur) const {
+        std::unique_lock lock(lock_);
+        return cond_.wait_for(lock, dur, [&]() { return count_ <= 0; });
+    }
+
     // Waits for the count on the latch to reach zero, or until 'delta' time elapses.
     // Returns true if the count became zero, false otherwise.
-    bool wait_for(const MonoDelta& delta) const {
-        std::unique_lock lock(lock_);
-        return cond_.wait_for(lock, std::chrono::nanoseconds(delta.ToNanoseconds()), [&]() { return count_ <= 0; });
-    }
+    bool wait_for(const MonoDelta& delta) const { return wait_for(std::chrono::nanoseconds(delta.ToNanoseconds())); }
 
     // Reset the latch with the given count. This is equivalent to reconstructing
     // the latch. If 'count' is 0, and there are currently waiters, those waiters
@@ -101,25 +117,28 @@ public:
     }
 
 private:
-    mutable std::mutex lock_;
-    mutable std::condition_variable cond_;
+    mutable Lock lock_;
+    mutable Cond cond_;
 
     int64_t count_;
-    DISALLOW_COPY_AND_ASSIGN(CountDownLatch);
+    GenericCountDownLatch(const GenericCountDownLatch&) = delete;
+    const GenericCountDownLatch& operator=(const GenericCountDownLatch&) = delete;
 };
 
+using CountDownLatch = GenericCountDownLatch<std::mutex, std::condition_variable>;
+
 // Utility class which calls latch->CountDown() in its destructor.
+template <typename T>
 class CountDownOnScopeExit {
 public:
-    explicit CountDownOnScopeExit(CountDownLatch* latch) : latch_(latch) {}
+    explicit CountDownOnScopeExit(T* latch) : latch_(latch) {}
     ~CountDownOnScopeExit() { latch_->count_down(); }
 
 private:
-    DISALLOW_COPY_AND_ASSIGN(CountDownOnScopeExit);
+    CountDownOnScopeExit(const CountDownOnScopeExit&) = delete;
+    const CountDownOnScopeExit& operator=(const CountDownOnScopeExit&) = delete;
 
-    CountDownLatch* latch_;
+    T* latch_;
 };
 
 } // namespace starrocks
-
-#endif //STARROCKS_BE_SRC_UTIL_COUNTDOWN_LATCH_H

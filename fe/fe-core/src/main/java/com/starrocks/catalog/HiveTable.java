@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/HiveTable.java
 
@@ -21,8 +34,12 @@
 
 package com.starrocks.catalog;
 
+import com.google.common.base.Joiner;
+import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
@@ -30,104 +47,195 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.annotations.SerializedName;
 import com.starrocks.analysis.DescriptorTable.ReferencedPartitionInfo;
+import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.LiteralExpr;
-import com.starrocks.catalog.Resource.ResourceType;
-import com.starrocks.common.DdlException;
+import com.starrocks.common.Config;
 import com.starrocks.common.StarRocksFEMetaVersion;
 import com.starrocks.common.io.Text;
-import com.starrocks.external.hive.HiveColumnStats;
-import com.starrocks.external.hive.HivePartition;
-import com.starrocks.external.hive.HivePartitionStats;
-import com.starrocks.external.hive.HiveTableStats;
-import com.starrocks.external.hive.Utils;
+import com.starrocks.connector.RemoteFileInfo;
+import com.starrocks.connector.exception.StarRocksConnectorException;
+import com.starrocks.connector.hive.HiveStorageFormat;
+import com.starrocks.meta.lock.LockType;
+import com.starrocks.meta.lock.Locker;
+import com.starrocks.persist.ModifyTableColumnOperationLog;
+import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.CatalogMgr;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.thrift.TColumn;
 import com.starrocks.thrift.THdfsPartition;
 import com.starrocks.thrift.THdfsPartitionLocation;
 import com.starrocks.thrift.THdfsTable;
 import com.starrocks.thrift.TTableDescriptor;
 import com.starrocks.thrift.TTableType;
-import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
-import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-/**
- * External hive table
- * At the very beginning, hive table is only designed for spark load, and property hive.metastore.uris is used to
- * record hive metastore uris.
- * But when hive table supports query and there is a lot of hive tables,
- * using hive.resource property is more convenient to change hive config.
- * So we still remains the hive.metastore.uris property for compatible, but hive table only set hive.metastore.uris
- * dose not support query.
- */
-public class HiveTable extends Table {
+import static com.starrocks.server.CatalogMgr.ResourceMappingCatalog.getResourceMappingCatalogName;
+import static com.starrocks.server.CatalogMgr.ResourceMappingCatalog.isResourceMappingCatalog;
+
+public class HiveTable extends Table implements HiveMetaStoreTable {
+    public enum HiveTableType {
+        VIRTUAL_VIEW,
+        EXTERNAL_TABLE,
+        MANAGED_TABLE,
+        MATERIALIZED_VIEW,
+        UNKNOWN;
+
+        public static HiveTableType fromString(String hiveTableType) {
+            for (HiveTableType type : HiveTableType.values()) {
+                if (type.name().equalsIgnoreCase(hiveTableType)) {
+                    return type;
+                }
+            }
+            return UNKNOWN;
+        }
+    }
+
     private static final Logger LOG = LogManager.getLogger(HiveTable.class);
 
-    private static final String PROPERTY_MISSING_MSG =
-            "Hive %s is null. Please add properties('%s'='xxx') when create table";
     private static final String JSON_KEY_HIVE_DB = "hiveDb";
     private static final String JSON_KEY_HIVE_TABLE = "hiveTable";
     private static final String JSON_KEY_RESOURCE_NAME = "resourceName";
     private static final String JSON_KEY_HDFS_PATH = "hdfsPath";
     private static final String JSON_KEY_PART_COLUMN_NAMES = "partColumnNames";
+    private static final String JSON_KEY_DATA_COLUMN_NAMES = "dataColumnNames";
     private static final String JSON_KEY_HIVE_PROPERTIES = "hiveProperties";
 
-    private static final String HIVE_DB = "database";
-    private static final String HIVE_TABLE = "table";
-    private static final String HIVE_METASTORE_URIS = "hive.metastore.uris";
-    private static final String HIVE_RESOURCE = "resource";
+    public static final String HIVE_METASTORE_URIS = "hive.metastore.uris";
 
-    private String hiveDb;
-    private String hiveTable;
+    public static final String HIVE_TABLE_SERDE_LIB = "hive.table.serde.lib";
+
+    public static final String HIVE_TABLE_INPUT_FORMAT = "hive.table.input.format";
+
+    public static final String HIVE_TABLE_COLUMN_NAMES = "hive.table.column.names";
+
+    public static final String HIVE_TABLE_COLUMN_TYPES = "hive.table.column.types";
+
+    private String catalogName;
+    @SerializedName(value = "dn")
+    private String hiveDbName;
+    @SerializedName(value = "tn")
+    private String hiveTableName;
+    @SerializedName(value = "rn")
     private String resourceName;
-    private String hdfsPath;
+    @SerializedName(value = "tl")
+    private String tableLocation;
+    @SerializedName(value = "pcn")
     private List<String> partColumnNames = Lists.newArrayList();
+    // dataColumnNames stores all the non-partition columns of the hive table,
+    // consistent with the order defined in the hive table
+    @SerializedName(value = "dcn")
     private List<String> dataColumnNames = Lists.newArrayList();
+    @SerializedName(value = "prop")
     private Map<String, String> hiveProperties = Maps.newHashMap();
+    @SerializedName(value = "sp")
+    private Map<String, String> serdeProperties = Maps.newHashMap();
+
+    // For `insert into target_table select from hive_table, we set it to false when executing this kind of insert query.
+    // 1. `useMetadataCache` is false means that this query need to list all selected partitions files from hdfs/s3.
+    // 2. Insert into statement could ignore the additional overhead caused by list partitions.
+    // 3. The most import point is that query result may be wrong with cached and expired partition files, causing insert data is wrong.
+    // This error will happen when appending files to an existed partition on user side.
+    private boolean useMetadataCache = true;
+
+    private HiveTableType hiveTableType = HiveTableType.MANAGED_TABLE;
+
+    private HiveStorageFormat storageFormat;
 
     public HiveTable() {
         super(TableType.HIVE);
     }
 
-    public HiveTable(long id, String name, List<Column> schema, Map<String, String> properties) throws DdlException {
-        super(id, name, TableType.HIVE, schema);
-        validate(properties);
+    public HiveTable(long id, String name, List<Column> fullSchema, String resourceName, String catalog,
+                     String hiveDbName, String hiveTableName, String tableLocation, long createTime,
+                     List<String> partColumnNames, List<String> dataColumnNames, Map<String, String> properties,
+                     Map<String, String> serdeProperties, HiveStorageFormat storageFormat, HiveTableType hiveTableType) {
+        super(id, name, TableType.HIVE, fullSchema);
+        this.resourceName = resourceName;
+        this.catalogName = catalog;
+        this.hiveDbName = hiveDbName;
+        this.hiveTableName = hiveTableName;
+        this.tableLocation = tableLocation;
+        this.createTime = createTime;
+        this.partColumnNames = partColumnNames;
+        this.dataColumnNames = dataColumnNames;
+        this.hiveProperties = properties;
+        this.serdeProperties = serdeProperties;
+        this.storageFormat = storageFormat;
+        this.hiveTableType = hiveTableType;
     }
 
     public String getHiveDbTable() {
-        return String.format("%s.%s", hiveDb, hiveTable);
+        return String.format("%s.%s", hiveDbName, hiveTableName);
     }
 
+    @Override
     public String getResourceName() {
         return resourceName;
     }
 
-    public String getHiveDb() {
-        return hiveDb;
+    @Override
+    public String getCatalogName() {
+        return catalogName == null ? getResourceMappingCatalogName(resourceName, "hive") : catalogName;
     }
 
-    public String getHiveTable() {
-        return hiveTable;
+    public String getDbName() {
+        return hiveDbName;
     }
 
-    public List<Column> getPartitionColumns() {
-        List<Column> partColumns = Lists.newArrayList();
-        for (String columnName : partColumnNames) {
-            partColumns.add(nameToColumn.get(columnName));
+    @Override
+    public String getTableName() {
+        return hiveTableName;
+    }
+
+    public HiveStorageFormat getStorageFormat() {
+        return storageFormat;
+    }
+
+    public boolean isUseMetadataCache() {
+        if (ConnectContext.get() != null &&
+                ConnectContext.get().getSessionVariable().isEnableHiveMetadataCacheWithInsert()) {
+            return true;
+        } else {
+            return useMetadataCache;
         }
-        return partColumns;
     }
 
+    public void useMetadataCache(boolean useMetadataCache) {
+        if (!isResourceMappingCatalog(getCatalogName())) {
+            this.useMetadataCache = useMetadataCache;
+        }
+    }
+
+    @Override
+    public String getUUID() {
+        if (CatalogMgr.isExternalCatalog(catalogName)) {
+            return String.join(".", catalogName, hiveDbName, hiveTableName, Long.toString(createTime));
+        } else {
+            return Long.toString(id);
+        }
+    }
+
+    @Override
+    public List<Column> getPartitionColumns() {
+        return partColumnNames.stream()
+                .map(name -> nameToColumn.get(name))
+                .collect(Collectors.toList());
+    }
+
+    @Override
     public List<String> getPartitionColumnNames() {
         return partColumnNames;
     }
@@ -136,295 +244,77 @@ public class HiveTable extends Table {
         return dataColumnNames;
     }
 
-    public String getHdfsPath() {
-        return this.hdfsPath;
+    @Override
+    public boolean isUnPartitioned() {
+        return partColumnNames.size() == 0;
     }
 
-    public Map<String, String> getHiveProperties() {
-        return hiveProperties;
+    public String getTableLocation() {
+        return this.tableLocation;
     }
 
-    public Map<PartitionKey, Long> getPartitionKeys() throws DdlException {
-        List<Column> partColumns = getPartitionColumns();
-        return Catalog.getCurrentCatalog().getHiveRepository()
-                .getPartitionKeys(resourceName, hiveDb, hiveTable, partColumns);
+    @Override
+    public String getTableIdentifier() {
+        return Joiner.on(":").join(name, createTime);
     }
 
-    public HivePartition getPartition(PartitionKey partitionKey) throws DdlException {
-        return Catalog.getCurrentCatalog().getHiveRepository()
-                .getPartition(resourceName, hiveDb, hiveTable, partitionKey);
+    public HiveTableType getHiveTableType() {
+        return hiveTableType;
     }
 
-    public HiveTableStats getTableStats() throws DdlException {
-        return Catalog.getCurrentCatalog().getHiveRepository().getTableStats(resourceName, hiveDb, hiveTable);
-    }
-
-    public HivePartitionStats getPartitionStats(PartitionKey partitionKey) throws DdlException {
-        return Catalog.getCurrentCatalog().getHiveRepository()
-                .getPartitionStats(resourceName, hiveDb, hiveTable, partitionKey);
-    }
-
-    public Map<String, HiveColumnStats> getTableLevelColumnStats(List<String> columnNames) throws DdlException {
-        // NOTE: Using allColumns as param to get column stats, we will get the best cache effect.
-        List<String> allColumnNames = new ArrayList<>(this.nameToColumn.keySet());
-        Map<String, HiveColumnStats> allColumnStats = Catalog.getCurrentCatalog().getHiveRepository()
-                .getTableLevelColumnStats(resourceName, hiveDb, hiveTable, getPartitionColumns(), allColumnNames);
-        Map<String, HiveColumnStats> result = Maps.newHashMapWithExpectedSize(columnNames.size());
-        for (String columnName : columnNames) {
-            result.put(columnName, allColumnStats.get(columnName));
-        }
-        return result;
-    }
-
-    public void refreshTableCache() throws DdlException {
-        Catalog.getCurrentCatalog().getHiveRepository()
-                .refreshTableCache(resourceName, hiveDb, hiveTable, getPartitionColumns(),
-                        new ArrayList<>(nameToColumn.keySet()));
-    }
-
-    public void refreshPartCache(List<String> partNames) throws DdlException {
-        Catalog.getCurrentCatalog().getHiveRepository()
-                .refreshPartitionCache(resourceName, hiveDb, hiveTable, partNames);
-    }
-
-    /**
-     * 1. get from table stats
-     * 2. get from partition stats if table stats is missing
-     */
-    public long getRowCount() {
-        // from table stats
-        HiveTableStats tableStats = null;
-        try {
-            tableStats = getTableStats();
-        } catch (DdlException e) {
-            LOG.warn("table {} gets stats failed", name, e);
-            return 0;
-        }
-        long numRows = tableStats.getNumRows();
-        long tableTotalFileBytes = tableStats.getTotalFileBytes();
-        if (numRows < 0 || tableTotalFileBytes <= 0 || (numRows == 0 && tableTotalFileBytes != 0)) {
-            numRows = -1;
-        }
-        if (numRows != -1) {
-            return numRows;
-        }
-
-        // from partition stats
-        numRows = getPartitionStatsRowCount(null);
-        if (numRows != -1) {
-            return numRows;
-        }
-
-        return 0;
-    }
-
-    /**
-     * Returns an estimated row count for the given number of file bytes. The row count is
-     * extrapolated using the table-level row count and file bytes statistics.
-     */
-    public long getExtrapolatedRowCount(long totalPartitionFileBytes) {
-        if (totalPartitionFileBytes == 0) {
-            return 0;
-        }
-        if (totalPartitionFileBytes < 0) {
-            return -1;
-        }
-
-        HiveTableStats tableStats = null;
-        try {
-            tableStats = getTableStats();
-        } catch (DdlException e) {
-            LOG.warn("table {} gets stats failed", name, e);
-            return -1;
-        }
-        long numRows = tableStats.getNumRows();
-        long totalFileBytes = tableStats.getTotalFileBytes();
-        if (numRows < 0 || totalFileBytes <= 0 || (numRows == 0 && totalFileBytes != 0)) {
-            return -1;
-        }
-
-        double bytesPerRow = totalFileBytes / (double) numRows;
-        double extrapolatedNumRows = totalPartitionFileBytes / bytesPerRow;
-        return Math.max(1, Math.round(extrapolatedNumRows));
-    }
-
-    /**
-     * Computes and returns the number of rows scanned based on the per-partition row count stats
-     * TODO: consider missing or corrupted partition stats
-     */
-    public long getPartitionStatsRowCount(List<PartitionKey> partitions) {
-        if (partitions == null) {
-            try {
-                partitions = Lists.newArrayList(getPartitionKeys().keySet());
-            } catch (DdlException e) {
-                LOG.warn("table {} gets partitions failed.", name, e);
-                return -1;
-            }
-        }
-        if (partitions.isEmpty()) {
-            return 0;
-        }
-
-        long numRows = -1;
-        for (PartitionKey key : partitions) {
-            HivePartitionStats partitionStats = null;
-            try {
-                partitionStats = getPartitionStats(key);
-            } catch (DdlException e) {
-                LOG.warn("table {} gets partition {} stats failed.", name, key, e);
-                return -1;
-            }
-
-            long partNumRows = partitionStats.getNumRows();
-            long partTotalFileBytes = partitionStats.getTotalFileBytes();
-            // -1: missing stats
-            if (partNumRows > -1) {
-                if (numRows == -1) {
-                    numRows = 0;
-                }
-                numRows += partNumRows;
-            } else {
-                LOG.debug("table {} partition {} stats abnormal. num rows: {}, total file bytes: {}",
-                        name, key, partNumRows, partTotalFileBytes);
-            }
-        }
-        return numRows;
-    }
-
-    private void validate(Map<String, String> properties) throws DdlException {
-        if (properties == null) {
-            throw new DdlException("Please set properties of hive table, "
-                    + "they are: database, table and 'hive.metastore.uris'");
-        }
-
-        Map<String, String> copiedProps = Maps.newHashMap(properties);
-        hiveDb = copiedProps.get(HIVE_DB);
-        if (Strings.isNullOrEmpty(hiveDb)) {
-            throw new DdlException(String.format(PROPERTY_MISSING_MSG, HIVE_DB, HIVE_DB));
-        }
-        copiedProps.remove(HIVE_DB);
-
-        hiveTable = copiedProps.get(HIVE_TABLE);
-        if (Strings.isNullOrEmpty(hiveTable)) {
-            throw new DdlException(String.format(PROPERTY_MISSING_MSG, HIVE_TABLE, HIVE_TABLE));
-        }
-        copiedProps.remove(HIVE_TABLE);
-
-        // check hive properties
-        // hive.metastore.uris or hive.resource must be set
-        String hiveMetastoreUris = copiedProps.get(HIVE_METASTORE_URIS);
-        String resourceName = copiedProps.get(HIVE_RESOURCE);
-        if (Strings.isNullOrEmpty(hiveMetastoreUris) && Strings.isNullOrEmpty(resourceName)) {
-            throw new DdlException("property " + HIVE_METASTORE_URIS + " or " + HIVE_RESOURCE + " must be set");
-        }
-
-        if (!Strings.isNullOrEmpty(hiveMetastoreUris)) {
-            copiedProps.remove(HIVE_METASTORE_URIS);
-            hiveProperties.put(HIVE_METASTORE_URIS, hiveMetastoreUris);
-        }
-
-        if (!Strings.isNullOrEmpty(resourceName)) {
-            copiedProps.remove(HIVE_RESOURCE);
-            Resource resource = Catalog.getCurrentCatalog().getResourceMgr().getResource(resourceName);
-            if (resource == null) {
-                throw new DdlException("hive resource [" + resourceName + "] not exists");
-            }
-            if (resource.getType() != ResourceType.HIVE) {
-                throw new DdlException("resource [" + resourceName + "] is not hive resource");
-            }
+    @Override
+    public Map<String, String> getProperties() {
+        // The user may alter the resource properties
+        // So we do this to get the fresh properties
+        Resource resource = GlobalStateMgr.getCurrentState().getResourceMgr().getResource(resourceName);
+        if (resource != null) {
             HiveResource hiveResource = (HiveResource) resource;
             hiveProperties.put(HIVE_METASTORE_URIS, hiveResource.getHiveMetastoreURIs());
-            this.resourceName = resourceName;
-
-            // check column
-            // 1. check column exists in hive table
-            // 2. check column type mapping
-            // 3. check hive partition column exists in table column list
-            org.apache.hadoop.hive.metastore.api.Table hiveTable = Catalog.getCurrentCatalog().getHiveRepository()
-                    .getTable(resourceName, this.hiveDb, this.hiveTable);
-            List<FieldSchema> unPartHiveColumns = hiveTable.getSd().getCols();
-            List<FieldSchema> partHiveColumns = hiveTable.getPartitionKeys();
-            Map<String, FieldSchema> allHiveColumns = unPartHiveColumns.stream()
-                    .collect(Collectors.toMap(FieldSchema::getName, fieldSchema -> fieldSchema));
-            for (FieldSchema hiveColumn : partHiveColumns) {
-                allHiveColumns.put(hiveColumn.getName(), hiveColumn);
-            }
-            for (Column column : this.fullSchema) {
-                FieldSchema hiveColumn = allHiveColumns.get(column.getName());
-                if (hiveColumn == null) {
-                    throw new DdlException("column [" + column.getName() + "] not exists in hive");
-                }
-                Set<PrimitiveType> validColumnTypes = getValidColumnType(hiveColumn.getType());
-                if (!validColumnTypes.contains(column.getPrimitiveType())) {
-                    throw new DdlException("can not convert hive column type [" + hiveColumn.getType() + "] to " +
-                            "starrocks type [" + column.getPrimitiveType() + "]");
-                }
-            }
-            for (FieldSchema partHiveColumn : partHiveColumns) {
-                String columnName = partHiveColumn.getName();
-                Column partColumn = this.nameToColumn.get(columnName);
-                if (partColumn == null) {
-                    throw new DdlException("partition column [" + columnName + "] must exist in column list");
-                } else {
-                    this.partColumnNames.add(columnName);
-                }
-            }
-
-            for (FieldSchema s : unPartHiveColumns) {
-                this.dataColumnNames.add(s.getName());
-            }
-
-            // set hdfs path
-            // todo hdfs ip may change, store it in cache?
-            this.hdfsPath = hiveTable.getSd().getLocation();
         }
-
-        if (!copiedProps.isEmpty()) {
-            throw new DdlException("Unknown table properties: " + copiedProps.toString());
-        }
+        return hiveProperties == null ? new HashMap<>() : hiveProperties;
     }
 
-    private Set<PrimitiveType> getValidColumnType(String hiveType) {
-        if (hiveType == null) {
-            return Sets.newHashSet();
-        }
+    public boolean hasBooleanTypePartitionColumn() {
+        return getPartitionColumns().stream().anyMatch(column -> column.getType().isBoolean());
+    }
 
-        // for type with length, like char(10), we only check the type and ignore the length
-        hiveType = Utils.getTypeKeyword(hiveType);
-        String typeUpperCase = hiveType.toUpperCase();
-        switch (typeUpperCase) {
-            case "TINYINT":
-                return Sets.newHashSet(PrimitiveType.TINYINT);
-            case "SMALLINT":
-                return Sets.newHashSet(PrimitiveType.SMALLINT);
-            case "INT":
-            case "INTEGER":
-                return Sets.newHashSet(PrimitiveType.INT);
-            case "BIGINT":
-                return Sets.newHashSet(PrimitiveType.BIGINT);
-            case "FLOAT":
-                return Sets.newHashSet(PrimitiveType.FLOAT);
-            case "DOUBLE":
-            case "DOUBLE PRECISION":
-                return Sets.newHashSet(PrimitiveType.DOUBLE);
-            case "DECIMAL":
-            case "NUMERIC":
-                return Sets.newHashSet(PrimitiveType.DECIMALV2, PrimitiveType.DECIMAL32, PrimitiveType.DECIMAL64,
-                        PrimitiveType.DECIMAL128);
-            case "TIMESTAMP":
-                return Sets.newHashSet(PrimitiveType.DATETIME);
-            case "DATE":
-                return Sets.newHashSet(PrimitiveType.DATE);
-            case "STRING":
-            case "VARCHAR":
-            case "BINARY":
-                return Sets.newHashSet(PrimitiveType.VARCHAR);
-            case "CHAR":
-                return Sets.newHashSet(PrimitiveType.CHAR);
-            case "BOOLEAN":
-                return Sets.newHashSet(PrimitiveType.BOOLEAN);
-            default:
-                return Sets.newHashSet();
+    public void modifyTableSchema(String dbName, String tableName, HiveTable updatedTable) {
+        ImmutableList.Builder<Column> fullSchemaTemp = ImmutableList.builder();
+        ImmutableMap.Builder<String, Column> nameToColumnTemp = ImmutableMap.builder();
+        ImmutableList.Builder<String> dataColumnNamesTemp = ImmutableList.builder();
+
+        updatedTable.nameToColumn.forEach((colName, column) -> {
+            Column baseColumn = nameToColumn.get(colName);
+            if (baseColumn != null) {
+                column.setComment(baseColumn.getComment());
+            }
+        });
+
+        fullSchemaTemp.addAll(updatedTable.fullSchema);
+        nameToColumnTemp.putAll(updatedTable.nameToColumn);
+        dataColumnNamesTemp.addAll(updatedTable.dataColumnNames);
+
+        Database db = GlobalStateMgr.getCurrentState().getDb(dbName);
+        if (db == null) {
+            throw new StarRocksConnectorException("Not found database " + dbName);
+        }
+        Locker locker = new Locker();
+        locker.lockDatabase(db, LockType.WRITE);
+        try {
+            this.fullSchema.clear();
+            this.nameToColumn.clear();
+            this.dataColumnNames.clear();
+
+            this.fullSchema.addAll(fullSchemaTemp.build());
+            this.nameToColumn.putAll(nameToColumnTemp.build());
+            this.dataColumnNames.addAll(dataColumnNamesTemp.build());
+
+            if (GlobalStateMgr.getCurrentState().isLeader()) {
+                ModifyTableColumnOperationLog log = new ModifyTableColumnOperationLog(dbName, tableName, fullSchema);
+                GlobalStateMgr.getCurrentState().getEditLog().logModifyTableColumn(log);
+            }
+        } finally {
+            locker.unLockDatabase(db, LockType.WRITE);
         }
     }
 
@@ -433,12 +323,13 @@ public class HiveTable extends Table {
         Preconditions.checkNotNull(partitions);
 
         THdfsTable tHdfsTable = new THdfsTable();
-        tHdfsTable.setHdfs_base_dir(hdfsPath);
+        tHdfsTable.setHdfs_base_dir(tableLocation);
 
         // columns and partition columns
         Set<String> partitionColumnNames = Sets.newHashSet();
         List<TColumn> tPartitionColumns = Lists.newArrayList();
         List<TColumn> tColumns = Lists.newArrayList();
+
         for (Column column : getPartitionColumns()) {
             tPartitionColumns.add(column.toThrift());
             partitionColumnNames.add(column.getName());
@@ -455,34 +346,46 @@ public class HiveTable extends Table {
         }
 
         // partitions
-        for (ReferencedPartitionInfo info : partitions) {
+        List<PartitionKey> partitionKeys = Lists.newArrayList();
+        for (ReferencedPartitionInfo partition : partitions) {
+            partitionKeys.add(partition.getKey());
+        }
+        List<RemoteFileInfo> hivePartitions;
+        try {
+            useMetadataCache = true;
+            hivePartitions = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                    .getRemoteFileInfos(getCatalogName(), this, partitionKeys);
+        } catch (StarRocksConnectorException e) {
+            LOG.warn("table {} gets partition info failed.", name, e);
+            return null;
+        }
+
+        for (int i = 0; i < hivePartitions.size(); i++) {
+            ReferencedPartitionInfo info = partitions.get(i);
             PartitionKey key = info.getKey();
             long partitionId = info.getId();
 
-            HivePartition hivePartition = null;
-            try {
-                hivePartition = getPartition(key);
-            } catch (DdlException e) {
-                LOG.warn("table {} gets partition {} failed.", name, key, e);
-                return null;
-            }
-
             THdfsPartition tPartition = new THdfsPartition();
-            tPartition.setFile_format(hivePartition.getFormat().toThrift());
+            tPartition.setFile_format(hivePartitions.get(i).getFormat().toThrift());
 
             List<LiteralExpr> keys = key.getKeys();
-            keys.stream().forEach(v -> v.setUseVectorized(true));
-            tPartition.setPartition_key_exprs(keys.stream().map(v -> v.treeToThrift()).collect(Collectors.toList()));
+            tPartition.setPartition_key_exprs(keys.stream().map(Expr::treeToThrift).collect(Collectors.toList()));
 
             THdfsPartitionLocation tPartitionLocation = new THdfsPartitionLocation();
             tPartitionLocation.setPrefix_index(-1);
-            tPartitionLocation.setSuffix(hivePartition.getFullPath());
+            tPartitionLocation.setSuffix(hivePartitions.get(i).getFullPath());
             tPartition.setLocation(tPartitionLocation);
             tHdfsTable.putToPartitions(partitionId, tPartition);
         }
 
+        tHdfsTable.setSerde_lib(hiveProperties.get(HIVE_TABLE_SERDE_LIB));
+        tHdfsTable.setInput_format(hiveProperties.get(HIVE_TABLE_INPUT_FORMAT));
+        tHdfsTable.setHive_column_names(hiveProperties.get(HIVE_TABLE_COLUMN_NAMES));
+        tHdfsTable.setHive_column_types(hiveProperties.get(HIVE_TABLE_COLUMN_TYPES));
+        tHdfsTable.setSerde_properties(serdeProperties);
+
         TTableDescriptor tTableDescriptor = new TTableDescriptor(id, TTableType.HDFS_TABLE, fullSchema.size(),
-                0, hiveTable, hiveDb);
+                0, hiveTableName, hiveDbName);
         tTableDescriptor.setHdfsTable(tHdfsTable);
         return tTableDescriptor;
     }
@@ -492,13 +395,13 @@ public class HiveTable extends Table {
         super.write(out);
 
         JsonObject jsonObject = new JsonObject();
-        jsonObject.addProperty(JSON_KEY_HIVE_DB, hiveDb);
-        jsonObject.addProperty(JSON_KEY_HIVE_TABLE, hiveTable);
+        jsonObject.addProperty(JSON_KEY_HIVE_DB, hiveDbName);
+        jsonObject.addProperty(JSON_KEY_HIVE_TABLE, hiveTableName);
         if (!Strings.isNullOrEmpty(resourceName)) {
             jsonObject.addProperty(JSON_KEY_RESOURCE_NAME, resourceName);
         }
-        if (!Strings.isNullOrEmpty(hdfsPath)) {
-            jsonObject.addProperty(JSON_KEY_HDFS_PATH, hdfsPath);
+        if (!Strings.isNullOrEmpty(tableLocation)) {
+            jsonObject.addProperty(JSON_KEY_HDFS_PATH, tableLocation);
         }
         if (!partColumnNames.isEmpty()) {
             JsonArray jPartColumnNames = new JsonArray();
@@ -506,6 +409,13 @@ public class HiveTable extends Table {
                 jPartColumnNames.add(partColName);
             }
             jsonObject.add(JSON_KEY_PART_COLUMN_NAMES, jPartColumnNames);
+        }
+        if (!dataColumnNames.isEmpty()) {
+            JsonArray jDataColumnNames = new JsonArray();
+            for (String dataColumnName : dataColumnNames) {
+                jDataColumnNames.add(dataColumnName);
+            }
+            jsonObject.add(JSON_KEY_DATA_COLUMN_NAMES, jDataColumnNames);
         }
         if (!hiveProperties.isEmpty()) {
             JsonObject jHiveProperties = new JsonObject();
@@ -520,16 +430,16 @@ public class HiveTable extends Table {
     public void readFields(DataInput in) throws IOException {
         super.readFields(in);
 
-        if (Catalog.getCurrentCatalogStarRocksJournalVersion() >= StarRocksFEMetaVersion.VERSION_3) {
+        if (GlobalStateMgr.getCurrentStateStarRocksMetaVersion() >= StarRocksFEMetaVersion.VERSION_3) {
             String json = Text.readString(in);
             JsonObject jsonObject = JsonParser.parseString(json).getAsJsonObject();
-            hiveDb = jsonObject.getAsJsonPrimitive(JSON_KEY_HIVE_DB).getAsString();
-            hiveTable = jsonObject.getAsJsonPrimitive(JSON_KEY_HIVE_TABLE).getAsString();
+            hiveDbName = jsonObject.getAsJsonPrimitive(JSON_KEY_HIVE_DB).getAsString();
+            hiveTableName = jsonObject.getAsJsonPrimitive(JSON_KEY_HIVE_TABLE).getAsString();
             if (jsonObject.has(JSON_KEY_RESOURCE_NAME)) {
                 resourceName = jsonObject.getAsJsonPrimitive(JSON_KEY_RESOURCE_NAME).getAsString();
             }
             if (jsonObject.has(JSON_KEY_HDFS_PATH)) {
-                hdfsPath = jsonObject.getAsJsonPrimitive(JSON_KEY_HDFS_PATH).getAsString();
+                tableLocation = jsonObject.getAsJsonPrimitive(JSON_KEY_HDFS_PATH).getAsString();
             }
             if (jsonObject.has(JSON_KEY_PART_COLUMN_NAMES)) {
                 JsonArray jPartColumnNames = jsonObject.getAsJsonArray(JSON_KEY_PART_COLUMN_NAMES);
@@ -543,9 +453,19 @@ public class HiveTable extends Table {
                     hiveProperties.put(entry.getKey(), entry.getValue().getAsString());
                 }
             }
-            {
+            if (jsonObject.has(JSON_KEY_DATA_COLUMN_NAMES)) {
+                JsonArray jDataColumnNames = jsonObject.getAsJsonArray(JSON_KEY_DATA_COLUMN_NAMES);
+                for (int i = 0; i < jDataColumnNames.size(); i++) {
+                    dataColumnNames.add(jDataColumnNames.get(i).getAsString());
+                }
+            } else {
+                // In order to be compatible with the case where JSON_KEY_DATA_COLUMN_NAMES does not exist.
+                // Just put (full schema - partition columns) to dataColumnNames.
+                // But there may be errors, because fullSchema may not store all the non-partition columns of the hive table
+                // and the order may be inconsistent with that in hive
+
                 // full schema - partition columns = data columns
-                HashSet<String> partColumnSet = new HashSet(partColumnNames);
+                HashSet<String> partColumnSet = new HashSet<>(partColumnNames);
                 for (Column col : fullSchema) {
                     if (!partColumnSet.contains(col.getName())) {
                         dataColumnNames.add(col.getName());
@@ -553,8 +473,8 @@ public class HiveTable extends Table {
                 }
             }
         } else {
-            hiveDb = Text.readString(in);
-            hiveTable = Text.readString(in);
+            hiveDbName = Text.readString(in);
+            hiveTableName = Text.readString(in);
             int size = in.readInt();
             for (int i = 0; i < size; i++) {
                 String key = Text.readString(in);
@@ -565,10 +485,182 @@ public class HiveTable extends Table {
     }
 
     @Override
-    public void onDrop() {
-        if (this.resourceName != null) {
-            Catalog.getCurrentCatalog().getHiveRepository().
-                    clearCache(this.resourceName, this.hiveDb, this.hiveTable);
+    public void onReload() {
+        if (Config.enable_hms_events_incremental_sync && isResourceMappingCatalog(getCatalogName())) {
+            GlobalStateMgr.getCurrentState().getMetastoreEventsProcessor().registerTableFromResource(
+                    String.join(".", getCatalogName(), hiveDbName, hiveTableName));
+        }
+    }
+
+    @Override
+    public void onDrop(Database db, boolean force, boolean replay) {
+        if (Config.enable_hms_events_incremental_sync && isResourceMappingCatalog(getCatalogName())) {
+            GlobalStateMgr.getCurrentState().getMetastoreEventsProcessor().unRegisterTableFromResource(
+                    String.join(".", getCatalogName(), hiveDbName, hiveTableName));
+        }
+
+        if (isResourceMappingCatalog(getCatalogName())) {
+            GlobalStateMgr.getCurrentState().getMetadataMgr().dropTable(getCatalogName(), db.getFullName(), name);
+        }
+    }
+
+    @Override
+    public boolean isSupported() {
+        return true;
+    }
+
+    @Override
+    public String toString() {
+        final StringBuilder sb = new StringBuilder("HiveTable{");
+        sb.append("catalogName='").append(catalogName).append('\'');
+        sb.append(", hiveDbName='").append(hiveDbName).append('\'');
+        sb.append(", hiveTableName='").append(hiveTableName).append('\'');
+        sb.append(", resourceName='").append(resourceName).append('\'');
+        sb.append(", id=").append(id);
+        sb.append(", name='").append(name).append('\'');
+        sb.append(", type=").append(type);
+        sb.append(", createTime=").append(createTime);
+        sb.append('}');
+        return sb.toString();
+    }
+
+    @Override
+    public List<UniqueConstraint> getUniqueConstraints() {
+        return uniqueConstraints;
+    }
+
+    @Override
+    public List<ForeignKeyConstraint> getForeignKeyConstraints() {
+        return foreignKeyConstraints;
+    }
+
+    @Override
+    public boolean supportInsert() {
+        return true;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hashCode(getCatalogName(), hiveDbName, getTableIdentifier());
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (!(other instanceof HiveTable)) {
+            return false;
+        }
+
+        HiveTable otherTable = (HiveTable) other;
+        String catalogName = getCatalogName();
+        String tableIdentifier = getTableIdentifier();
+        return Objects.equal(catalogName, otherTable.getCatalogName()) &&
+                Objects.equal(hiveDbName, otherTable.hiveDbName) &&
+                Objects.equal(tableIdentifier, otherTable.getTableIdentifier());
+    }
+
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    public static class Builder {
+        private long id;
+        private String tableName;
+        private String catalogName;
+        private String hiveDbName;
+        private String hiveTableName;
+        private String resourceName;
+        private String tableLocation;
+        private long createTime;
+        private List<Column> fullSchema;
+        private List<String> partitionColNames = Lists.newArrayList();
+        private List<String> dataColNames = Lists.newArrayList();
+        private Map<String, String> properties = Maps.newHashMap();
+        private Map<String, String> serdeProperties = Maps.newHashMap();
+        private HiveStorageFormat storageFormat;
+        private HiveTableType hiveTableType = HiveTableType.MANAGED_TABLE;
+
+        public Builder() {
+        }
+
+        public Builder setId(long id) {
+            this.id = id;
+            return this;
+        }
+
+        public Builder setTableName(String tableName) {
+            this.tableName = tableName;
+            return this;
+        }
+
+        public Builder setCatalogName(String catalogName) {
+            this.catalogName = catalogName;
+            return this;
+        }
+
+        public Builder setHiveDbName(String hiveDbName) {
+            this.hiveDbName = hiveDbName;
+            return this;
+        }
+
+        public Builder setHiveTableName(String hiveTableName) {
+            this.hiveTableName = hiveTableName;
+            return this;
+        }
+
+        public Builder setResourceName(String resourceName) {
+            this.resourceName = resourceName;
+            return this;
+        }
+
+        public Builder setTableLocation(String tableLocation) {
+            this.tableLocation = tableLocation;
+            return this;
+        }
+
+        public Builder setCreateTime(long createTime) {
+            this.createTime = createTime;
+            return this;
+        }
+
+        public Builder setFullSchema(List<Column> fullSchema) {
+            this.fullSchema = fullSchema;
+            return this;
+        }
+
+        public Builder setDataColumnNames(List<String> dataColumnNames) {
+            this.dataColNames = dataColumnNames;
+            return this;
+        }
+
+        public Builder setPartitionColumnNames(List<String> partitionColumnNames) {
+            this.partitionColNames = partitionColumnNames;
+            return this;
+        }
+
+        public Builder setProperties(Map<String, String> properties) {
+            this.properties = properties;
+            return this;
+        }
+
+        public Builder setSerdeProperties(Map<String, String> serdeProperties) {
+            this.serdeProperties = serdeProperties;
+            return this;
+        }
+
+        public Builder setStorageFormat(HiveStorageFormat storageFormat) {
+            this.storageFormat = storageFormat;
+            return this;
+        }
+
+        public Builder setHiveTableType(HiveTableType hiveTableType) {
+            this.hiveTableType = hiveTableType;
+            return this;
+        }
+
+        public HiveTable build() {
+            return new HiveTable(id, tableName, fullSchema, resourceName, catalogName, hiveDbName, hiveTableName,
+                    tableLocation, createTime, partitionColNames, dataColNames, properties, serdeProperties,
+                    storageFormat, hiveTableType);
         }
     }
 }

@@ -1,17 +1,36 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package com.starrocks.sql.common;
 
 import com.google.common.base.Preconditions;
-import com.starrocks.analysis.ArithmeticExpr;
+import com.google.common.collect.Lists;
 import com.starrocks.analysis.BinaryPredicate;
+import com.starrocks.analysis.BinaryType;
 import com.starrocks.analysis.Expr;
 import com.starrocks.catalog.ArrayType;
-import com.starrocks.catalog.PrimitiveType;
+import com.starrocks.catalog.MapType;
 import com.starrocks.catalog.ScalarType;
+import com.starrocks.catalog.StructField;
+import com.starrocks.catalog.StructType;
 import com.starrocks.catalog.Type;
 import com.starrocks.common.AnalysisException;
+import com.starrocks.qe.ConnectContext;
+import com.starrocks.qe.SessionVariableConstants;
 import com.starrocks.sql.analyzer.SemanticException;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -29,6 +48,18 @@ public class TypeManager {
         }
         if (t1.isArrayType() && t2.isArrayType()) {
             return getCommonArrayType((ArrayType) t1, (ArrayType) t2);
+        }
+        if (t1.isMapType() && t2.isMapType()) {
+            return getCommonMapType((MapType) t1, (MapType) t2);
+        }
+        if (t1.isStructType() && t2.isStructType()) {
+            return getCommonStructType((StructType) t1, (StructType) t2);
+        }
+        if (t1.isBoolean() && t2.isComplexType()) {
+            return t2;
+        }
+        if (t1.isComplexType() && t2.isBoolean()) {
+            return t1;
         }
         if (t1.isNull() || t2.isNull()) {
             return t1.isNull() ? t2 : t1;
@@ -60,47 +91,48 @@ public class TypeManager {
         return common.isValid() ? new ArrayType(common) : common;
     }
 
+    private static Type getCommonMapType(MapType t1, MapType t2) {
+        Type keyCommon = getCommonSuperType(t1.getKeyType(), t2.getKeyType());
+        if (!keyCommon.isValid()) {
+            return Type.INVALID;
+        }
+        Type valueCommon = getCommonSuperType(t1.getValueType(), t2.getValueType());
+        if (!valueCommon.isValid()) {
+            return Type.INVALID;
+        }
+        return new MapType(keyCommon, valueCommon);
+    }
+
+    private static Type getCommonStructType(StructType t1, StructType t2) {
+        if (t1.getFields().size() != t2.getFields().size()) {
+            return Type.INVALID;
+        }
+        ArrayList<StructField> fields = Lists.newArrayList();
+        for (int i = 0; i < t1.getFields().size(); ++i) {
+            Type fieldCommon = getCommonSuperType(t1.getField(i).getType(), t2.getField(i).getType());
+            if (!fieldCommon.isValid()) {
+                return Type.INVALID;
+            }
+
+            // default t1's field name
+            fields.add(new StructField(t1.getField(i).getName(), fieldCommon));
+        }
+        return new StructType(fields);
+    }
+
     public static Expr addCastExpr(Expr expr, Type targetType) {
         try {
             if (targetType.matchesType(expr.getType()) || targetType.isNull()) {
                 return expr;
             }
 
-            if (expr.getType().isArrayType()) {
-                Type originArrayItemType = ((ArrayType) expr.getType()).getItemType();
-
-                if (!targetType.isArrayType()) {
-                    throw new SemanticException(
-                            "Cannot cast '" + expr.toSql() + "' from " + expr.getType() + " to " + targetType);
-                }
-
-                if (!canCastTo(originArrayItemType, ((ArrayType) targetType).getItemType())) {
-                    throw new SemanticException("Cannot cast '" + expr.toSql()
-                            + "' from " + originArrayItemType + " to " + ((ArrayType) targetType).getItemType());
-                }
-            } else {
-                if (!canCastTo(expr.getType(), targetType)) {
-                    throw new SemanticException("Cannot cast '" + expr.toSql()
-                            + "' from " + expr.getType() + " to " + targetType);
-                }
+            if (!Type.canCastTo(expr.getType(), targetType)) {
+                throw new SemanticException(
+                        "Cannot cast '" + expr.toSql() + "' from " + expr.getType() + " to " + targetType);
             }
             return expr.uncheckedCastTo(targetType);
         } catch (AnalysisException e) {
             throw new SemanticException(e.getMessage());
-        }
-    }
-
-    public static boolean canCastTo(Type from, Type to) {
-        if (from.isNull()) {
-            return true;
-        }
-
-        if (from.isScalarType() && to.isScalarType()) {
-            return ScalarType.canCastTo((ScalarType) from, (ScalarType) to);
-        } else if (from.isArrayType() && to.isArrayType()) {
-            return canCastTo(((ArrayType) from).getItemType(), ((ArrayType) to).getItemType());
-        } else {
-            return false;
         }
     }
 
@@ -121,97 +153,46 @@ public class TypeManager {
         return compatibleType;
     }
 
-    public static Type getCompatibleTypeForBinary(Type type1, Type type2) {
+    public static Type getCompatibleTypeForBinary(BinaryType type, Type type1, Type type2) {
+        // 1. Many join on-clause use string = int predicate, follow mysql will cast to double, but
+        //    starrocks cast to double will lose precision, the predicate result will error
+        // 2. Why only support equivalence and unequivalence expression cast to string? Because string order is different
+        //    with number order, like: '12' > '2' is false, but 12 > 2 is true
+        if (type.isNotRangeComparison()) {
+            Type baseType = Type.STRING;
+            if (ConnectContext.get() != null && SessionVariableConstants.DECIMAL.equalsIgnoreCase(ConnectContext.get()
+                    .getSessionVariable().getCboEqBaseType())) {
+                baseType = Type.DEFAULT_DECIMAL128;
+                if (type1.isDecimalOfAnyVersion() || type2.isDecimalOfAnyVersion()) {
+                    baseType = type1.isDecimalOfAnyVersion() ? type1 : type2;
+                }
+            }
+
+            if ((type1.isStringType() && type2.isExactNumericType()) ||
+                    (type1.isExactNumericType() && type2.isStringType())) {
+                return baseType;
+            } else if (type1.isComplexType() || type2.isComplexType()) {
+                return TypeManager.getCommonSuperType(type1, type2);
+            }
+        }
+
         return BinaryPredicate.getCmpType(type1, type2);
     }
 
     public static Type getCompatibleTypeForCaseWhen(List<Type> types) {
+        return getCompatibleType(types, "CaseWhen");
+    }
+
+    public static Type getCompatibleType(List<Type> types, String kind) {
         Type compatibleType = types.get(0);
         for (int i = 1; i < types.size(); i++) {
-            compatibleType = Type.getAssignmentCompatibleType(compatibleType, types.get(i), false);
+            compatibleType = getCommonSuperType(compatibleType, types.get(i));
             if (!compatibleType.isValid()) {
-                throw new SemanticException("Failed to get Compatible Type ForCaseWhen with %s and %s",
-                        types.get(i), types.get(i - 1));
+                throw new SemanticException("Failed to get compatible type for %s with %s and %s",
+                        kind, types.get(i), types.get(i - 1));
             }
         }
 
         return compatibleType;
-    }
-
-    public static class TypeTriple {
-        public ScalarType returnType;
-        public ScalarType lhsTargetType;
-        public ScalarType rhsTargetType;
-    }
-
-    public static TypeTriple getReturnTypeOfDecimal(ArithmeticExpr.Operator op, ScalarType lhsType,
-                                                    ScalarType rhsType) {
-        Preconditions.checkState(lhsType.isDecimalV3() && rhsType.isDecimalV3(),
-                "Types of lhs and rhs must be DecimalV3");
-        final PrimitiveType lhsPtype = lhsType.getPrimitiveType();
-        final PrimitiveType rhsPtype = rhsType.getPrimitiveType();
-        final int lhsScale = lhsType.getScalarScale();
-        final int rhsScale = rhsType.getScalarScale();
-
-        // get the wider decimal type
-        PrimitiveType widerType = PrimitiveType.getWiderDecimalV3Type(lhsPtype, rhsPtype);
-        // compute arithmetic expr use decimal64 for both decimal32 and decimal64
-        widerType = PrimitiveType.getWiderDecimalV3Type(widerType, PrimitiveType.DECIMAL64);
-        int maxPrecision = PrimitiveType.getMaxPrecisionOfDecimal(widerType);
-
-        TypeTriple result = new TypeTriple();
-        result.lhsTargetType = ScalarType.createDecimalV3Type(widerType, maxPrecision, lhsScale);
-        result.rhsTargetType = ScalarType.createDecimalV3Type(widerType, maxPrecision, rhsScale);
-        int returnScale = 0;
-        switch (op) {
-            case ADD:
-            case SUBTRACT:
-            case MOD:
-                returnScale = Math.max(lhsScale, rhsScale);
-                break;
-            case MULTIPLY:
-                returnScale = lhsScale + rhsScale;
-                // promote type result type of multiplication if it is too narrow to hold all significant bits
-                if (returnScale > maxPrecision) {
-                    final int maxPrecisionOfDecimal128 =
-                            PrimitiveType.getMaxPrecisionOfDecimal(PrimitiveType.DECIMAL128);
-                    // decimal128 is already the widest decimal types, so throw an error if scale of result exceeds 38
-                    Preconditions.checkState(widerType != PrimitiveType.DECIMAL128,
-                            String.format("Return scale(%d) exceeds maximum value(%d)", returnScale,
-                                    maxPrecisionOfDecimal128));
-                    widerType = PrimitiveType.DECIMAL128;
-                    maxPrecision = maxPrecisionOfDecimal128;
-                    result.lhsTargetType = ScalarType.createDecimalV3Type(widerType, maxPrecision, lhsScale);
-                    result.rhsTargetType = ScalarType.createDecimalV3Type(widerType, maxPrecision, rhsScale);
-                }
-                break;
-            case INT_DIVIDE:
-            case DIVIDE:
-                if (lhsScale <= 6) {
-                    returnScale = lhsScale + 6;
-                } else if (lhsScale <= 12) {
-                    returnScale = 12;
-                } else {
-                    returnScale = lhsScale;
-                }
-                widerType = PrimitiveType.DECIMAL128;
-                maxPrecision = PrimitiveType.getMaxPrecisionOfDecimal(widerType);
-                result.lhsTargetType = ScalarType.createDecimalV3Type(widerType, maxPrecision, lhsScale);
-                result.rhsTargetType = ScalarType.createDecimalV3Type(widerType, maxPrecision, rhsScale);
-                int adjustedScale = returnScale + rhsScale;
-                if (adjustedScale > maxPrecision) {
-                    throw new SemanticException(
-                            String.format(
-                                    "Dividend fails to adjust scale to %d that exceeds maximum value(%d)",
-                                    adjustedScale,
-                                    maxPrecision));
-                }
-                break;
-            default:
-                Preconditions.checkState(false, "DecimalV3 only support operators: +-*/%");
-        }
-        result.returnType = op == ArithmeticExpr.Operator.INT_DIVIDE ? ScalarType.BIGINT :
-                ScalarType.createDecimalV3Type(widerType, maxPrecision, returnScale);
-        return result;
     }
 }

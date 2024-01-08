@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/test/util/countdown_latch_test.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -50,13 +46,13 @@ TEST(TestCountDownLatch, TestLatch) {
 
     // Decrement the count by 1 in another thread, this should not fire the
     // latch.
-    ASSERT_TRUE(pool->submit_func(std::bind(decrement_latch, &latch, 1)).ok());
+    ASSERT_TRUE(pool->submit_func([capture0 = &latch] { return decrement_latch(capture0, 1); }).ok());
     ASSERT_FALSE(latch.wait_for(MonoDelta::FromMilliseconds(200)));
     ASSERT_EQ(999, latch.count());
 
     // Now decrement by 1000 this should decrement to 0 and fire the latch
     // (even though 1000 is one more than the current count).
-    ASSERT_TRUE(pool->submit_func(std::bind(decrement_latch, &latch, 1000)).ok());
+    ASSERT_TRUE(pool->submit_func([capture0 = &latch] { return decrement_latch(capture0, 1000); }).ok());
     latch.wait();
     ASSERT_EQ(0, latch.count());
 }

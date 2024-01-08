@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/load/DppConfig.java
 
@@ -23,13 +36,12 @@ package com.starrocks.load;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.Maps;
-import com.starrocks.analysis.LoadStmt;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.common.FeConstants;
-import com.starrocks.common.FeMetaVersion;
 import com.starrocks.common.LoadException;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.LoadStmt;
 import com.starrocks.thrift.TPriority;
 
 import java.io.DataInput;
@@ -38,6 +50,7 @@ import java.io.IOException;
 import java.util.Iterator;
 import java.util.Map;
 
+@Deprecated
 public class DppConfig implements Writable {
     // necessary hadoop job config keys
     private static final String FS_DEFAULT_NAME = "fs.default.name";
@@ -56,7 +69,7 @@ public class DppConfig implements Writable {
     private static final String APPLICATIONS_PATH = "applications";
     private static final String OUTPUT_PATH = "output";
 
-    public static final String STARROCKS_PATH = "hadoop_palo_path";
+    public static final String STARROCKS_PATH = "hadoop_starrocks_path";
     public static final String HTTP_PORT = "hadoop_http_port";
     public static final String HADOOP_CONFIGS = "hadoop_configs";
     public static final String PRIORITY = "priority";
@@ -292,12 +305,13 @@ public class DppConfig implements Writable {
     }
 
     public String getApplicationsPath() {
-        return String.format("%s/%d/%s/%s", starrocksPath, Catalog.getCurrentCatalog().getClusterId(), APPLICATIONS_PATH,
-                FeConstants.dpp_version);
+        return String.format("%s/%d/%s/%s", starrocksPath, GlobalStateMgr.getCurrentState().getClusterId(),
+                APPLICATIONS_PATH,
+                FeConstants.DPP_VERSION);
     }
 
     public String getOutputPath() {
-        return String.format("%s/%d/%s", starrocksPath, Catalog.getCurrentCatalog().getClusterId(), OUTPUT_PATH);
+        return String.format("%s/%d/%s", starrocksPath, GlobalStateMgr.getCurrentState().getClusterId(), OUTPUT_PATH);
     }
 
     public static String getHttpPortKey() {
@@ -353,7 +367,8 @@ public class DppConfig implements Writable {
 
     @Override
     public String toString() {
-        return "DppConfig{starrocksPath=" + starrocksPath + ", httpPort=" + httpPort + ", hadoopConfigs=" + hadoopConfigs + "}";
+        return "DppConfig{starrocksPath=" + starrocksPath + ", httpPort=" + httpPort + ", hadoopConfigs=" +
+                hadoopConfigs + "}";
     }
 
     @Override
@@ -386,11 +401,7 @@ public class DppConfig implements Writable {
 
     public void readFields(DataInput in) throws IOException {
         boolean readStarRocksPath = false;
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_12) {
-            if (in.readBoolean()) {
-                readStarRocksPath = true;
-            }
-        } else {
+        if (in.readBoolean()) {
             readStarRocksPath = true;
         }
         if (readStarRocksPath) {
@@ -400,11 +411,7 @@ public class DppConfig implements Writable {
         httpPort = in.readInt();
 
         boolean readHadoopConfigs = false;
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_12) {
-            if (in.readBoolean()) {
-                readHadoopConfigs = true;
-            }
-        } else {
+        if (in.readBoolean()) {
             readHadoopConfigs = true;
         }
         if (readHadoopConfigs) {
@@ -415,15 +422,7 @@ public class DppConfig implements Writable {
             }
         }
 
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_15) {
-            this.priority = TPriority.valueOf(Text.readString(in));
-        } else {
-            this.priority = TPriority.NORMAL;
-        }
+        this.priority = TPriority.valueOf(Text.readString(in));
     }
 
-    @Override
-    public boolean equals(Object obj) {
-        return true;
-    }
 }

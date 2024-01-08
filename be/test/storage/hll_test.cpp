@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/test/olap/hll_test.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,18 +15,19 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "storage/hll.h"
+#include "types/hll.h"
 
 #include <gtest/gtest.h>
 
 #include "util/hash_util.hpp"
+#include "util/phmap/phmap.h"
 #include "util/slice.h"
 
 namespace starrocks {
 
 class TestHll : public testing::Test {
 public:
-    virtual ~TestHll() {}
+    ~TestHll() override = default;
 };
 
 static uint64_t hash(uint64_t value) {

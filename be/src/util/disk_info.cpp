@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/util/disk_info.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -24,17 +20,14 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
-#include <sys/vfs.h>
 #include <unistd.h>
 
 #include <boost/algorithm/string.hpp>
-#include <boost/algorithm/string/join.hpp>
 #include <fstream>
 #include <iostream>
-#include <sstream>
 
+#include "fs/fs_util.h"
 #include "gutil/strings/split.h"
-#include "util/file_utils.h"
 
 namespace starrocks {
 
@@ -81,12 +74,12 @@ void DiskInfo::get_device_names() {
         DCHECK(_s_device_id_to_disk_id.find(dev) == _s_device_id_to_disk_id.end());
 
         int disk_id = -1;
-        std::map<std::string, int>::iterator it = _s_disk_name_to_disk_id.find(name);
+        auto it = _s_disk_name_to_disk_id.find(name);
 
         if (it == _s_disk_name_to_disk_id.end()) {
             // First time seeing this disk
             disk_id = _s_disks.size();
-            _s_disks.push_back(Disk(name, disk_id));
+            _s_disks.emplace_back(name, disk_id);
             _s_disk_name_to_disk_id[name] = disk_id;
         } else {
             disk_id = it->second;
@@ -102,22 +95,22 @@ void DiskInfo::get_device_names() {
     if (_s_disks.empty()) {
         // If all else fails, return 1
         LOG(WARNING) << "Could not determine number of disks on this machine.";
-        _s_disks.push_back(Disk("sda", 0));
+        _s_disks.emplace_back("sda", 0);
     }
 
     // Determine if the disk is rotational or not.
-    for (int i = 0; i < _s_disks.size(); ++i) {
+    for (auto& _s_disk : _s_disks) {
         // We can check if it is rotational by reading:
         // /sys/block/<device>/queue/rotational
         // If the file is missing or has unexpected data, default to rotational.
         std::stringstream ss;
-        ss << "/sys/block/" << _s_disks[i].name << "/queue/rotational";
+        ss << "/sys/block/" << _s_disk.name << "/queue/rotational";
         std::ifstream rotational(ss.str().c_str(), std::ios::in);
         if (rotational.good()) {
             std::string line;
             getline(rotational, line);
             if (line == "0") {
-                _s_disks[i].is_rotational = false;
+                _s_disk.is_rotational = false;
             }
         }
         if (rotational.is_open()) {
@@ -134,7 +127,7 @@ void DiskInfo::init() {
 int DiskInfo::disk_id(const char* path) {
     struct stat s;
     stat(path, &s);
-    std::map<dev_t, int>::iterator it = _s_device_id_to_disk_id.find(s.st_dev);
+    auto it = _s_device_id_to_disk_id.find(s.st_dev);
 
     if (it == _s_device_id_to_disk_id.end()) {
         return -1;
@@ -165,7 +158,7 @@ Status DiskInfo::get_disk_devices(const std::vector<std::string>& paths, std::se
     std::vector<std::string> real_paths;
     for (auto& path : paths) {
         std::string p;
-        WARN_IF_ERROR(FileUtils::canonicalize(path, &p),
+        WARN_IF_ERROR(fs::canonicalize(path, &p),
                       "canonicalize path " + path + " failed, skip disk monitoring of this path");
         real_paths.emplace_back(std::move(p));
     }
@@ -180,7 +173,7 @@ Status DiskInfo::get_disk_devices(const std::vector<std::string>& paths, std::se
     }
 
     Status status;
-    char* line_ptr = 0;
+    char* line_ptr = nullptr;
     size_t line_buf_size = 0;
     for (auto& path : real_paths) {
         size_t max_mount_size = 0;

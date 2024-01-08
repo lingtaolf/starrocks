@@ -1,16 +1,32 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.sql.optimizer.rewrite.scalar;
 
 import com.google.common.collect.Lists;
+import com.starrocks.analysis.BinaryType;
 import com.starrocks.analysis.FunctionName;
 import com.starrocks.catalog.Function;
+import com.starrocks.catalog.PrimitiveType;
 import com.starrocks.catalog.Type;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.scalar.BetweenPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
@@ -20,6 +36,7 @@ import mockit.Expectations;
 import org.junit.Test;
 
 import java.time.LocalDateTime;
+import java.time.Month;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -39,10 +56,10 @@ public class ImplicitCastRuleTest {
         ));
 
         new Expectations(op) {{
-            op.getFunction();
-            minTimes = 0;
-            result = fn;
-        }};
+                op.getFunction();
+                minTimes = 0;
+                result = fn;
+            }};
 
         ImplicitCastRule rule = new ImplicitCastRule();
         ScalarOperator result = rule.apply(op, null);
@@ -88,19 +105,70 @@ public class ImplicitCastRuleTest {
     @Test
     public void testBinaryPredicate() {
         BinaryPredicateOperator op =
-                new BinaryPredicateOperator(BinaryPredicateOperator.BinaryType.EQ,
+                new BinaryPredicateOperator(BinaryType.EQ,
                         ConstantOperator.createVarchar("1"), ConstantOperator.createInt(1));
 
         ImplicitCastRule rule = new ImplicitCastRule();
         ScalarOperator result = rule.apply(op, null);
 
-        assertTrue(result.getChild(0) instanceof CastOperator);
+        assertTrue(result.getChild(0) instanceof ConstantOperator);
         assertTrue(result.getChild(1) instanceof CastOperator);
 
-        assertEquals(Type.DOUBLE, result.getChild(0).getType());
-        assertEquals(Type.DOUBLE, result.getChild(1).getType());
+        assertEquals(PrimitiveType.VARCHAR, result.getChild(0).getType().getPrimitiveType());
+        assertEquals(PrimitiveType.VARCHAR, result.getChild(1).getType().getPrimitiveType());
 
         assertTrue(result.getChild(1).getChild(0).getType().isInt());
+    }
+
+    @Test
+    public void testEqualForNullBinaryPredicateWithConstNull() {
+        BinaryPredicateOperator[] ops = new BinaryPredicateOperator[] {
+                new BinaryPredicateOperator(BinaryType.EQ_FOR_NULL,
+                        ConstantOperator.createVarchar("a"),
+                        ConstantOperator.createNull(Type.DOUBLE)),
+                new BinaryPredicateOperator(BinaryType.EQ_FOR_NULL,
+                        ConstantOperator.createNull(Type.DOUBLE),
+                        ConstantOperator.createVarchar("a")),
+        };
+        for (BinaryPredicateOperator op : ops) {
+            ImplicitCastRule rule = new ImplicitCastRule();
+            ScalarOperator result = rule.apply(op, null);
+
+            assertTrue(result.getChild(0) instanceof ConstantOperator);
+            assertTrue(result.getChild(1) instanceof ConstantOperator);
+
+            assertEquals(PrimitiveType.VARCHAR, result.getChild(0).getType().getPrimitiveType());
+            assertEquals(PrimitiveType.VARCHAR, result.getChild(1).getType().getPrimitiveType());
+        }
+    }
+
+    @Test
+    public void testEqualForNullBinaryPredicateWithoutConstNull() {
+        BinaryPredicateOperator[] ops = new BinaryPredicateOperator[] {
+                new BinaryPredicateOperator(BinaryType.EQ_FOR_NULL,
+                        ConstantOperator.createDate(LocalDateTime.of(2022, Month.JANUARY, 01, 0, 0, 0)),
+                        new ColumnRefOperator(1, Type.DATE, "date_col", true)
+                ),
+                new BinaryPredicateOperator(BinaryType.EQ_FOR_NULL,
+                        new ColumnRefOperator(1, Type.DATE, "date_col", true),
+                        ConstantOperator.createInt(20220111)
+                ),
+                new BinaryPredicateOperator(BinaryType.EQ_FOR_NULL,
+                        ConstantOperator.createVarchar("2022-01-01"),
+                        new ColumnRefOperator(1, Type.DATE, "date_col", true)
+                ),
+                new BinaryPredicateOperator(BinaryType.EQ_FOR_NULL,
+                        new ColumnRefOperator(1, Type.DATE, "date_col", true),
+                        ConstantOperator.createVarchar("2022-01-01")
+                ),
+        };
+        for (BinaryPredicateOperator op : ops) {
+            ImplicitCastRule rule = new ImplicitCastRule();
+            ScalarOperator result = rule.apply(op, null);
+
+            assertEquals(PrimitiveType.DATE, result.getChild(0).getType().getPrimitiveType());
+            assertEquals(PrimitiveType.DATE, result.getChild(1).getType().getPrimitiveType());
+        }
     }
 
     @Test

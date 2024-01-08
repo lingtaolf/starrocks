@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/stopwatch.hpp
 
@@ -19,11 +32,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_COMMON_UTIL_STOPWATCH_HPP
-#define STARROCKS_BE_SRC_COMMON_UTIL_STOPWATCH_HPP
+#pragma once
 
 #include <boost/cstdint.hpp>
-#include <time.h>
+#include <ctime>
 
 namespace starrocks {
 
@@ -36,6 +48,7 @@ namespace starrocks {
 class MonotonicStopWatch {
 public:
     MonotonicStopWatch() {
+        _start = {};
         _total_time = 0;
         _running = false;
     }
@@ -73,8 +86,7 @@ public:
 
         timespec end;
         clock_gettime(CLOCK_MONOTONIC, &end);
-        return (end.tv_sec - _start.tv_sec) * 1000L * 1000L * 1000L +
-               (end.tv_nsec - _start.tv_nsec);
+        return (end.tv_sec - _start.tv_sec) * 1000L * 1000L * 1000L + (end.tv_nsec - _start.tv_nsec);
     }
 
 private:
@@ -83,6 +95,4 @@ private:
     bool _running;
 };
 
-}
-
-#endif
+} // namespace starrocks

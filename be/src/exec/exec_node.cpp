@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/exec/exec_node.cpp
 
@@ -27,60 +40,44 @@
 #include <sstream>
 
 #include "column/column_helper.h"
+#include "column/vectorized_fwd.h"
+#include "common/compiler_util.h"
 #include "common/object_pool.h"
 #include "common/status.h"
-#include "exec/aggregation_node.h"
-#include "exec/analytic_eval_node.h"
+#include "exec/aggregate/aggregate_blocking_node.h"
+#include "exec/aggregate/aggregate_streaming_node.h"
+#include "exec/aggregate/distinct_blocking_node.h"
+#include "exec/aggregate/distinct_streaming_node.h"
+#include "exec/analytic_node.h"
 #include "exec/assert_num_rows_node.h"
+#include "exec/connector_scan_node.h"
 #include "exec/cross_join_node.h"
+#include "exec/dict_decode_node.h"
 #include "exec/empty_set_node.h"
-#include "exec/es_http_scan_node.h"
 #include "exec/except_node.h"
 #include "exec/exchange_node.h"
 #include "exec/file_scan_node.h"
 #include "exec/hash_join_node.h"
 #include "exec/intersect_node.h"
-#include "exec/merge_join_node.h"
-#include "exec/merge_node.h"
-#include "exec/mysql_scan_node.h"
+#include "exec/lake_meta_scan_node.h"
+#include "exec/olap_meta_scan_node.h"
 #include "exec/olap_scan_node.h"
-#include "exec/partitioned_aggregation_node.h"
+#include "exec/pipeline/chunk_accumulate_operator.h"
 #include "exec/pipeline/pipeline_builder.h"
+#include "exec/project_node.h"
 #include "exec/repeat_node.h"
 #include "exec/schema_scan_node.h"
 #include "exec/select_node.h"
-#include "exec/spill_sort_node.h"
+#include "exec/stream/stream_aggregate_node.h"
+#include "exec/table_function_node.h"
 #include "exec/topn_node.h"
 #include "exec/union_node.h"
-#include "exec/vectorized/adapter_node.h"
-#include "exec/vectorized/aggregate/aggregate_blocking_node.h"
-#include "exec/vectorized/aggregate/aggregate_streaming_node.h"
-#include "exec/vectorized/aggregate/distinct_blocking_node.h"
-#include "exec/vectorized/aggregate/distinct_streaming_node.h"
-#include "exec/vectorized/analytic_node.h"
-#include "exec/vectorized/assert_num_rows_node.h"
-#include "exec/vectorized/cross_join_node.h"
-#include "exec/vectorized/except_node.h"
-#include "exec/vectorized/file_scan_node.h"
-#include "exec/vectorized/hash_join_node.h"
-#include "exec/vectorized/hdfs_scan_node.h"
-#include "exec/vectorized/intersect_node.h"
-#include "exec/vectorized/mysql_scan_node.h"
-#include "exec/vectorized/olap_scan_node.h"
-#include "exec/vectorized/project_node.h"
-#include "exec/vectorized/repeat_node.h"
-#include "exec/vectorized/table_function_node.h"
-#include "exec/vectorized/topn_node.h"
-#include "exec/vectorized/union_node.h"
+#include "exprs/dictionary_get_expr.h"
 #include "exprs/expr_context.h"
 #include "gutil/strings/substitute.h"
 #include "runtime/descriptors.h"
 #include "runtime/exec_env.h"
-#include "runtime/initial_reservations.h"
-#include "runtime/mem_pool.h"
-#include "runtime/mem_tracker.h"
-#include "runtime/row_batch.h"
-#include "runtime/runtime_filter_worker.h"
+#include "runtime/runtime_filter_cache.h"
 #include "runtime/runtime_state.h"
 #include "simd/simd.h"
 #include "util/debug_util.h"
@@ -89,52 +86,6 @@
 namespace starrocks {
 
 const std::string ExecNode::ROW_THROUGHPUT_COUNTER = "RowsReturnedRate";
-
-int ExecNode::get_node_id_from_profile(RuntimeProfile* p) {
-    return p->metadata();
-}
-
-ExecNode::RowBatchQueue::RowBatchQueue(int max_batches) : TimedBlockingQueue<RowBatch*>(max_batches) {}
-
-ExecNode::RowBatchQueue::~RowBatchQueue() {
-    DCHECK(cleanup_queue_.empty());
-}
-
-void ExecNode::RowBatchQueue::AddBatch(RowBatch* batch) {
-    if (!blocking_put(batch)) {
-        std::lock_guard<std::mutex> lock(lock_);
-        cleanup_queue_.push_back(batch);
-    }
-}
-
-bool ExecNode::RowBatchQueue::AddBatchWithTimeout(RowBatch* batch, int64_t timeout_micros) {
-    // return blocking_put_with_timeout(batch, timeout_micros);
-    return blocking_put(batch);
-}
-
-RowBatch* ExecNode::RowBatchQueue::GetBatch() {
-    RowBatch* result = NULL;
-    if (blocking_get(&result)) return result;
-    return NULL;
-}
-
-int ExecNode::RowBatchQueue::Cleanup() {
-    int num_io_buffers = 0;
-
-    // RowBatch* batch = NULL;
-    // while ((batch = GetBatch()) != NULL) {
-    //   num_io_buffers += batch->num_io_buffers();
-    //   delete batch;
-    // }
-
-    std::lock_guard<std::mutex> l(lock_);
-    for (std::list<RowBatch*>::iterator it = cleanup_queue_.begin(); it != cleanup_queue_.end(); ++it) {
-        // num_io_buffers += (*it)->num_io_buffers();
-        delete *it;
-    }
-    cleanup_queue_.clear();
-    return num_io_buffers;
-}
 
 ExecNode::ExecNode(ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl& descs)
         : _id(tnode.node_id),
@@ -147,33 +98,35 @@ ExecNode::ExecNode(ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl
           _debug_action(TDebugAction::WAIT),
           _limit(tnode.limit),
           _num_rows_returned(0),
-          _rows_returned_counter(NULL),
-          _rows_returned_rate(NULL),
-          _memory_used_counter(NULL),
-          _use_vectorized(tnode.use_vectorized),
+          _rows_returned_counter(nullptr),
+          _rows_returned_rate(nullptr),
+          _memory_used_counter(nullptr),
+          _runtime_state(nullptr),
           _is_closed(false) {
     init_runtime_profile(print_plan_node_type(tnode.node_type));
 }
 
-ExecNode::~ExecNode() {}
+ExecNode::~ExecNode() {
+    if (runtime_state() != nullptr) {
+        ExecNode::close(_runtime_state);
+    }
+}
 
-void ExecNode::push_down_predicate(RuntimeState* state, std::list<ExprContext*>* expr_ctxs, bool is_vectorized) {
+void ExecNode::push_down_predicate(RuntimeState* state, std::list<ExprContext*>* expr_ctxs) {
     if (_type != TPlanNodeType::AGGREGATION_NODE) {
-        for (int i = 0; i < _children.size(); ++i) {
-            _children[i]->push_down_predicate(state, expr_ctxs, is_vectorized);
+        for (auto& i : _children) {
+            i->push_down_predicate(state, expr_ctxs);
             if (expr_ctxs->size() == 0) {
                 return;
             }
         }
     }
 
-    std::list<ExprContext*>::iterator iter = expr_ctxs->begin();
+    auto iter = expr_ctxs->begin();
     while (iter != expr_ctxs->end()) {
         if ((*iter)->root()->is_bound(_tuple_ids)) {
-            // LOG(INFO) << "push down success expr is " << (*iter)->debug_string()
-            //          << " and node is " << debug_string();
-            (*iter)->prepare(state, row_desc(), _expr_mem_tracker.get());
-            (*iter)->open(state);
+            WARN_IF_ERROR((*iter)->prepare(state), "prepare expression failed");
+            WARN_IF_ERROR((*iter)->open(state), "open expression failed");
             _conjunct_ctxs.push_back(*iter);
             iter = expr_ctxs->erase(iter);
         } else {
@@ -182,71 +135,98 @@ void ExecNode::push_down_predicate(RuntimeState* state, std::list<ExprContext*>*
     }
 }
 
-void ExecNode::push_down_join_runtime_filter(RuntimeState* state, vectorized::RuntimeFilterProbeCollector* collector) {
-    if (_type != TPlanNodeType::AGGREGATION_NODE) {
-        push_down_join_runtime_filter_to_children(state, collector);
+void ExecNode::push_down_tuple_slot_mappings(RuntimeState* state,
+                                             const std::vector<TupleSlotMapping>& parent_mappings) {
+    _tuple_slot_mappings = parent_mappings;
+    for (auto& child : _children) {
+        child->push_down_tuple_slot_mappings(state, _tuple_slot_mappings);
     }
-    _runtime_filter_collector.push_down(collector, _tuple_ids);
 }
 
-void ExecNode::push_down_join_runtime_filter_to_children(RuntimeState* state,
-                                                         vectorized::RuntimeFilterProbeCollector* collector) {
-    for (int i = 0; i < _children.size(); ++i) {
-        _children[i]->push_down_join_runtime_filter(state, collector);
+void ExecNode::push_down_join_runtime_filter(RuntimeState* state, RuntimeFilterProbeCollector* collector) {
+    if (collector->empty()) return;
+    if (_type != TPlanNodeType::AGGREGATION_NODE && _type != TPlanNodeType::ANALYTIC_EVAL_NODE) {
+        push_down_join_runtime_filter_to_children(state, collector);
+    }
+    _runtime_filter_collector.push_down(collector, _tuple_ids, _local_rf_waiting_set);
+}
+
+void ExecNode::push_down_join_runtime_filter_to_children(RuntimeState* state, RuntimeFilterProbeCollector* collector) {
+    for (auto& i : _children) {
+        i->push_down_join_runtime_filter(state, collector);
         if (collector->size() == 0) {
             return;
         }
     }
 }
 
-void ExecNode::register_runtime_filter_descriptor(RuntimeState* state,
-                                                  vectorized::RuntimeFilterProbeDescriptor* rf_desc) {
+void ExecNode::register_runtime_filter_descriptor(RuntimeState* state, RuntimeFilterProbeDescriptor* rf_desc) {
+    rf_desc->set_probe_plan_node_id(_id);
     _runtime_filter_collector.add_descriptor(rf_desc);
+    ExecEnv::GetInstance()->add_rf_event({state->query_id(), rf_desc->filter_id(), BackendOptions::get_localhost(),
+                                          strings::Substitute("REGISTER_GRF(probe_node_id=$0", _id)});
     state->runtime_filter_port()->add_listener(rf_desc);
 }
 
 Status ExecNode::init_join_runtime_filters(const TPlanNode& tnode, RuntimeState* state) {
+    _runtime_filter_collector.set_plan_node_id(_id);
     if (state != nullptr && tnode.__isset.probe_runtime_filters) {
         for (const auto& desc : tnode.probe_runtime_filters) {
-            vectorized::RuntimeFilterProbeDescriptor* rf_desc =
-                    _pool->add(new vectorized::RuntimeFilterProbeDescriptor());
-            RETURN_IF_ERROR(rf_desc->init(_pool, desc, _id));
+            RuntimeFilterProbeDescriptor* rf_desc = _pool->add(new RuntimeFilterProbeDescriptor());
+            RETURN_IF_ERROR(rf_desc->init(_pool, desc, _id, state));
             register_runtime_filter_descriptor(state, rf_desc);
         }
     }
     if (state != nullptr && state->query_options().__isset.runtime_filter_wait_timeout_ms) {
         _runtime_filter_collector.set_wait_timeout_ms(state->query_options().runtime_filter_wait_timeout_ms);
     }
+    if (state != nullptr && state->query_options().__isset.runtime_filter_scan_wait_time_ms) {
+        _runtime_filter_collector.set_scan_wait_timeout_ms(state->query_options().runtime_filter_scan_wait_time_ms);
+    }
+    if (tnode.__isset.filter_null_value_columns) {
+        _filter_null_value_columns = tnode.filter_null_value_columns;
+    }
     return Status::OK();
 }
 
+void ExecNode::init_runtime_filter_for_operator(OperatorFactory* op, pipeline::PipelineBuilderContext* context,
+                                                const RcRfProbeCollectorPtr& rc_rf_probe_collector) {
+    op->init_runtime_filter(context->fragment_context()->runtime_filter_hub(), this->get_tuple_ids(),
+                            this->local_rf_waiting_set(), this->row_desc(), rc_rf_probe_collector,
+                            _filter_null_value_columns, _tuple_slot_mappings);
+}
+
 Status ExecNode::init(const TPlanNode& tnode, RuntimeState* state) {
-    RETURN_IF_ERROR(Expr::create_expr_trees(_pool, tnode.conjuncts, &_conjunct_ctxs));
+    VLOG(2) << "ExecNode init:\n" << apache::thrift::ThriftDebugString(tnode);
+    _runtime_state = state;
+    RETURN_IF_ERROR(Expr::create_expr_trees(_pool, tnode.conjuncts, &_conjunct_ctxs, state));
     RETURN_IF_ERROR(init_join_runtime_filters(tnode, state));
+    if (tnode.__isset.local_rf_waiting_set) {
+        _local_rf_waiting_set = tnode.local_rf_waiting_set;
+    }
     return Status::OK();
 }
 
 Status ExecNode::prepare(RuntimeState* state) {
     RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::PREPARE));
-    DCHECK(_runtime_profile.get() != NULL);
+    DCHECK(_runtime_profile.get() != nullptr);
     _rows_returned_counter = ADD_COUNTER(_runtime_profile, "RowsReturned", TUnit::UNIT);
     _rows_returned_rate = runtime_profile()->add_derived_counter(
             ROW_THROUGHPUT_COUNTER, TUnit::UNIT_PER_SECOND,
-            std::bind<int64_t>(&RuntimeProfile::units_per_second, _rows_returned_counter,
-                               runtime_profile()->total_time_counter()),
+            [capture0 = _rows_returned_counter, capture1 = runtime_profile()->total_time_counter()] {
+                return RuntimeProfile::units_per_second(capture0, capture1);
+            },
             "");
-    _mem_tracker.reset(
-            new MemTracker(_runtime_profile.get(), -1, _runtime_profile->name(), state->instance_mem_tracker()));
-    _expr_mem_tracker.reset(new MemTracker(-1, "Exprs", _mem_tracker.get()));
-    _expr_mem_pool.reset(new MemPool(_expr_mem_tracker.get()));
-    RETURN_IF_ERROR(Expr::prepare(_conjunct_ctxs, state, row_desc(), expr_mem_tracker()));
-    RETURN_IF_ERROR(_runtime_filter_collector.prepare(state, row_desc(), expr_mem_tracker(), _runtime_profile.get()));
+    _mem_tracker.reset(new MemTracker(_runtime_profile.get(), std::make_tuple(true, false, false), "", -1,
+                                      _runtime_profile->name(), nullptr));
+    RETURN_IF_ERROR(Expr::prepare(_conjunct_ctxs, state));
+    RETURN_IF_ERROR(_runtime_filter_collector.prepare(state, row_desc(), _runtime_profile.get()));
 
     // TODO(zc):
     // AddExprCtxsToFree(_conjunct_ctxs);
 
-    for (int i = 0; i < _children.size(); ++i) {
-        RETURN_IF_ERROR(_children[i]->prepare(state));
+    for (auto& i : _children) {
+        RETURN_IF_ERROR(i->prepare(state));
     }
 
     return Status::OK();
@@ -257,7 +237,7 @@ Status ExecNode::open(RuntimeState* state) {
     RETURN_IF_ERROR(Expr::open(_conjunct_ctxs, state));
     RETURN_IF_ERROR(_runtime_filter_collector.open(state));
     push_down_join_runtime_filter(state, &_runtime_filter_collector);
-    _runtime_filter_collector.wait();
+    _runtime_filter_collector.wait(is_scan_node());
     return Status::OK();
 }
 
@@ -271,18 +251,19 @@ pipeline::OpFactories ExecNode::decompose_to_pipeline(pipeline::PipelineBuilderC
 }
 
 // specific_get_next to get chunks, It's implemented in subclass.
-// if pre chunk is nullptr current chunk size >= batch_size / 2, direct return the current chunk
+// if pre chunk is nullptr current chunk size >= chunk_size / 2, direct return the current chunk
 // if pre chunk is not nullptr and pre chunk size + cur chunk size <= 4096, merge the two chunk
 // if pre chunk is not nullptr and pre chunk size + cur chunk size > 4096, return pre chunk
 Status ExecNode::get_next_big_chunk(RuntimeState* state, ChunkPtr* chunk, bool* eos, ChunkPtr& pre_output_chunk,
-                                    std::function<Status(RuntimeState*, ChunkPtr*, bool*)> specific_get_next) {
-    size_t batch_size = state->batch_size();
+                                    const std::function<Status(RuntimeState*, ChunkPtr*, bool*)>& specific_get_next) {
+    size_t chunk_size = state->chunk_size();
 
     while (true) {
         bool cur_eos = false;
         ChunkPtr cur_chunk = nullptr;
 
         RETURN_IF_ERROR(specific_get_next(state, &cur_chunk, &cur_eos));
+        TRY_CATCH_ALLOC_SCOPE_START()
         if (cur_eos) {
             if (pre_output_chunk != nullptr) {
                 *eos = false;
@@ -297,8 +278,8 @@ Status ExecNode::get_next_big_chunk(RuntimeState* state, ChunkPtr* chunk, bool* 
             if (cur_size <= 0) {
                 continue;
             } else if (pre_output_chunk == nullptr) {
-                if (cur_size >= batch_size / 2) {
-                    // the probe chunk size of read from right child >= batch_size, direct return
+                if (cur_size >= chunk_size / 2) {
+                    // the probe chunk size of read from right child >= chunk_size, direct return
                     *eos = false;
                     *chunk = std::move(cur_chunk);
                     return Status::OK();
@@ -307,16 +288,16 @@ Status ExecNode::get_next_big_chunk(RuntimeState* state, ChunkPtr* chunk, bool* 
                     continue;
                 }
             } else {
-                if (cur_size + pre_output_chunk->num_rows() > batch_size) {
-                    // the two chunk size > batch_size, return the first reserved chunk
+                if (cur_size + pre_output_chunk->num_rows() > chunk_size) {
+                    // the two chunk size > chunk_size, return the first reserved chunk
                     *eos = false;
                     *chunk = std::move(pre_output_chunk);
                     pre_output_chunk = std::move(cur_chunk);
                     return Status::OK();
                 } else {
                     // TODO: copy the small chunk to big chunk
-                    vectorized::Columns& dest_columns = pre_output_chunk->columns();
-                    vectorized::Columns& src_columns = cur_chunk->columns();
+                    Columns& dest_columns = pre_output_chunk->columns();
+                    Columns& src_columns = cur_chunk->columns();
                     size_t num_rows = cur_size;
                     // copy the new read chunk to the reserved
                     for (size_t i = 0; i < dest_columns.size(); i++) {
@@ -326,13 +307,14 @@ Status ExecNode::get_next_big_chunk(RuntimeState* state, ChunkPtr* chunk, bool* 
                 }
             }
         }
+        TRY_CATCH_ALLOC_SCOPE_END()
     }
 }
 
 Status ExecNode::reset(RuntimeState* state) {
     _num_rows_returned = 0;
-    for (int i = 0; i < _children.size(); ++i) {
-        RETURN_IF_ERROR(_children[i]->reset(state));
+    for (auto& i : _children) {
+        RETURN_IF_ERROR(i->reset(state));
     }
     return Status::OK();
 }
@@ -340,79 +322,41 @@ Status ExecNode::reset(RuntimeState* state) {
 Status ExecNode::collect_query_statistics(QueryStatistics* statistics) {
     DCHECK(statistics != nullptr);
     for (auto child_node : _children) {
-        child_node->collect_query_statistics(statistics);
+        (void)child_node->collect_query_statistics(statistics);
     }
     return Status::OK();
 }
 
-Status ExecNode::close(RuntimeState* state) {
+void ExecNode::close(RuntimeState* state) {
     if (_is_closed) {
-        return Status::OK();
+        return;
     }
     _is_closed = true;
-    RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::CLOSE));
+    (void)exec_debug_action(TExecNodePhase::CLOSE);
 
-    if (_rows_returned_counter != NULL) {
+    if (_rows_returned_counter != nullptr) {
         COUNTER_SET(_rows_returned_counter, _num_rows_returned);
     }
 
-    Status result;
-    for (int i = 0; i < _children.size(); ++i) {
-        auto st = _children[i]->close(state);
-        if (result.ok() && !st.ok()) {
-            result = st;
-        }
+    for (auto& i : _children) {
+        i->close(state);
     }
 
     Expr::close(_conjunct_ctxs, state);
     _runtime_filter_collector.close(state);
-
-    if (expr_mem_pool() != nullptr) {
-        _expr_mem_pool->free_all();
-    }
-
-    if (_buffer_pool_client.is_registered()) {
-        VLOG_FILE << _id << " returning reservation " << _resource_profile.min_reservation;
-        state->initial_reservations()->Return(&_buffer_pool_client, _resource_profile.min_reservation);
-        state->exec_env()->buffer_pool()->DeregisterClient(&_buffer_pool_client);
-    }
-
-    if (_expr_mem_tracker != nullptr) {
-        _expr_mem_tracker->close();
-    }
-
-    if (_mem_tracker != nullptr) {
-        _mem_tracker->close();
-    }
-
-    return result;
-}
-
-void ExecNode::add_runtime_exec_option(const std::string& str) {
-    std::lock_guard<std::mutex> l(_exec_options_lock);
-
-    if (_runtime_exec_options.empty()) {
-        _runtime_exec_options = str;
-    } else {
-        _runtime_exec_options.append(", ");
-        _runtime_exec_options.append(str);
-    }
-
-    runtime_profile()->add_info_string("ExecOption", _runtime_exec_options);
 }
 
 Status ExecNode::create_tree(RuntimeState* state, ObjectPool* pool, const TPlan& plan, const DescriptorTbl& descs,
                              ExecNode** root) {
     if (plan.nodes.size() == 0) {
-        *root = NULL;
+        *root = nullptr;
         return Status::OK();
     }
 
     int node_idx = 0;
-    RETURN_IF_ERROR(create_tree_helper(state, pool, plan.nodes, descs, NULL, &node_idx, root));
+    RETURN_IF_ERROR(create_tree_helper(state, pool, plan.nodes, descs, nullptr, &node_idx, root));
 
     if (node_idx + 1 != plan.nodes.size()) {
-        // TODO: print thrift msg for diagnostic purposes.
         return Status::InternalError("Plan tree only partially reconstructed. Not all thrift nodes were used.");
     }
 
@@ -423,17 +367,19 @@ Status ExecNode::create_tree_helper(RuntimeState* state, ObjectPool* pool, const
                                     const DescriptorTbl& descs, ExecNode* parent, int* node_idx, ExecNode** root) {
     // propagate error case
     if (*node_idx >= tnodes.size()) {
-        // TODO: print thrift msg
         return Status::InternalError("Failed to reconstruct plan tree from thrift.");
     }
     const TPlanNode& tnode = tnodes[*node_idx];
 
     int num_children = tnodes[*node_idx].num_children;
-    ExecNode* node = NULL;
-    RETURN_IF_ERROR(create_node(state, pool, tnodes[*node_idx], descs, &node));
+    ExecNode* node = nullptr;
+    RETURN_IF_ERROR(create_vectorized_node(state, pool, tnodes[*node_idx], descs, &node));
 
-    // assert(parent != NULL || (node_idx == 0 && root_expr != NULL));
-    if (parent != NULL) {
+    DCHECK((parent != nullptr) || (root != nullptr));
+    if (UNLIKELY(parent == nullptr && root == nullptr)) {
+        return Status::InternalError("parent and root shouldn't both be null");
+    }
+    if (parent != nullptr) {
         parent->_children.push_back(node);
     } else {
         *root = node;
@@ -441,7 +387,7 @@ Status ExecNode::create_tree_helper(RuntimeState* state, ObjectPool* pool, const
 
     for (int i = 0; i < num_children; i++) {
         ++*node_idx;
-        RETURN_IF_ERROR(create_tree_helper(state, pool, tnodes, descs, node, node_idx, NULL));
+        RETURN_IF_ERROR(create_tree_helper(state, pool, tnodes, descs, node, node_idx, nullptr));
 
         // we are expecting a child, but have used all nodes
         // this means we have been given a bad tree and must fail
@@ -456,11 +402,11 @@ Status ExecNode::create_tree_helper(RuntimeState* state, ObjectPool* pool, const
     // build up tree of profiles; add children >0 first, so that when we print
     // the profile, child 0 is printed last (makes the output more readable)
     for (int i = 1; i < node->_children.size(); ++i) {
-        node->runtime_profile()->add_child(node->_children[i]->runtime_profile(), true, NULL);
+        node->runtime_profile()->add_child(node->_children[i]->runtime_profile(), true, nullptr);
     }
 
     if (!node->_children.empty()) {
-        node->runtime_profile()->add_child(node->_children[0]->runtime_profile(), true, NULL);
+        node->runtime_profile()->add_child(node->_children[0]->runtime_profile(), true, nullptr);
     }
 
     return Status::OK();
@@ -471,20 +417,26 @@ Status ExecNode::create_vectorized_node(starrocks::RuntimeState* state, starrock
                                         starrocks::ExecNode** node) {
     switch (tnode.node_type) {
     case TPlanNodeType::OLAP_SCAN_NODE:
-        *node = pool->add(new vectorized::OlapScanNode(pool, tnode, descs));
+        *node = pool->add(new OlapScanNode(pool, tnode, descs));
+        return Status::OK();
+    case TPlanNodeType::META_SCAN_NODE:
+        *node = pool->add(new OlapMetaScanNode(pool, tnode, descs));
+        return Status::OK();
+    case TPlanNodeType::LAKE_META_SCAN_NODE:
+        *node = pool->add(new LakeMetaScanNode(pool, tnode, descs));
         return Status::OK();
     case TPlanNodeType::AGGREGATION_NODE:
         if (tnode.agg_node.__isset.use_streaming_preaggregation && tnode.agg_node.use_streaming_preaggregation) {
             if (tnode.agg_node.aggregate_functions.size() == 0) {
-                *node = pool->add(new vectorized::DistinctStreamingNode(pool, tnode, descs));
+                *node = pool->add(new DistinctStreamingNode(pool, tnode, descs));
             } else {
-                *node = pool->add(new vectorized::AggregateStreamingNode(pool, tnode, descs));
+                *node = pool->add(new AggregateStreamingNode(pool, tnode, descs));
             }
         } else {
             if (tnode.agg_node.aggregate_functions.size() == 0) {
-                *node = pool->add(new vectorized::DistinctBlockingNode(pool, tnode, descs));
+                *node = pool->add(new DistinctBlockingNode(pool, tnode, descs));
             } else {
-                *node = pool->add(new vectorized::AggregateBlockingNode(pool, tnode, descs));
+                *node = pool->add(new AggregateBlockingNode(pool, tnode, descs));
             }
         }
         return Status::OK();
@@ -493,201 +445,126 @@ Status ExecNode::create_vectorized_node(starrocks::RuntimeState* state, starrock
         return Status::OK();
     case TPlanNodeType::EXCHANGE_NODE:
         *node = pool->add(new ExchangeNode(pool, tnode, descs));
-        return Status::OK();
-    case TPlanNodeType::HASH_JOIN_NODE:
-        *node = pool->add(new vectorized::HashJoinNode(pool, tnode, descs));
-        return Status::OK();
-    case TPlanNodeType::ANALYTIC_EVAL_NODE:
-        *node = pool->add(new vectorized::AnalyticNode(pool, tnode, descs));
-        return Status::OK();
-    case TPlanNodeType::SORT_NODE:
-        *node = pool->add(new vectorized::TopNNode(pool, tnode, descs));
-        return Status::OK();
-    case TPlanNodeType::CROSS_JOIN_NODE:
-        *node = pool->add(new vectorized::CrossJoinNode(pool, tnode, descs));
-        return Status::OK();
-    case TPlanNodeType::UNION_NODE:
-        *node = pool->add(new vectorized::UnionNode(pool, tnode, descs));
-        return Status::OK();
-    case TPlanNodeType::INTERSECT_NODE:
-        *node = pool->add(new vectorized::IntersectNode(pool, tnode, descs));
-        return Status::OK();
-    case TPlanNodeType::EXCEPT_NODE:
-        *node = pool->add(new vectorized::ExceptNode(pool, tnode, descs));
-        return Status::OK();
-    case TPlanNodeType::SELECT_NODE:
-        *node = pool->add(new SelectNode(pool, tnode, descs));
-        return Status::OK();
-    case TPlanNodeType::FILE_SCAN_NODE:
-        *node = pool->add(new vectorized::FileScanNode(pool, tnode, descs));
-        return Status::OK();
-    case TPlanNodeType::REPEAT_NODE:
-        *node = pool->add(new vectorized::RepeatNode(pool, tnode, descs));
-        return Status::OK();
-    case TPlanNodeType::ASSERT_NUM_ROWS_NODE:
-        *node = pool->add(new vectorized::AssertNumRowsNode(pool, tnode, descs));
-        return Status::OK();
-    case TPlanNodeType::PROJECT_NODE:
-        *node = pool->add(new vectorized::ProjectNode(pool, tnode, descs));
-        return Status::OK();
-    case TPlanNodeType::TABLE_FUNCTION_NODE:
-        *node = pool->add(new vectorized::TableFunctionNode(pool, tnode, descs));
-        return Status::OK();
-    case TPlanNodeType::HDFS_SCAN_NODE:
-#ifdef STARROCKS_WITH_HDFS
-        *node = pool->add(new vectorized::HdfsScanNode(pool, tnode, descs));
-        return Status::OK();
-#else
-        return Status::InternalError("Don't support HDFS table, you should rebuild StarRocks with WITH_HDFS option ON");
-#endif
-    case TPlanNodeType::MYSQL_SCAN_NODE:
-#ifdef STARROCKS_WITH_MYSQL
-        *node = pool->add(new vectorized::MysqlScanNode(pool, tnode, descs));
-        return Status::OK();
-#else
-        return Status::InternalError(
-                "Don't support MySQL table, you should rebuild StarRocks with WITH_MYSQL option ON");
-#endif
-    case TPlanNodeType::ES_HTTP_SCAN_NODE:
-        *node = pool->add(new EsHttpScanNode(pool, tnode, descs));
-        return Status::OK();
-    case TPlanNodeType::SCHEMA_SCAN_NODE:
-        *node = pool->add(new SchemaScanNode(pool, tnode, descs));
-        return Status::OK();
-    default:
-        return Status::InternalError(strings::Substitute("Vectorized engine not support node: $0", tnode.node_type));
-    }
-}
-
-Status ExecNode::create_node(RuntimeState* state, ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl& descs,
-                             ExecNode** node) {
-    std::stringstream error_msg;
-
-    VLOG(2) << "tnode:\n" << apache::thrift::ThriftDebugString(tnode);
-
-    if (tnode.use_vectorized) {
-        return create_vectorized_node(state, pool, tnode, descs, node);
-    }
-
-    switch (tnode.node_type) {
-    case TPlanNodeType::MYSQL_SCAN_NODE:
-#ifdef STARROCKS_WITH_MYSQL
-        *node = pool->add(new MysqlScanNode(pool, tnode, descs));
-        return Status::OK();
-#else
-        return Status::InternalError(
-                "Don't support MySQL table, you should rebuild StarRocks with WITH_MYSQL option ON");
-#endif
-
-    case TPlanNodeType::ES_HTTP_SCAN_NODE:
-        *node = pool->add(new EsHttpScanNode(pool, tnode, descs));
-        return Status::OK();
-
-    case TPlanNodeType::SCHEMA_SCAN_NODE:
-        *node = pool->add(new SchemaScanNode(pool, tnode, descs));
-        return Status::OK();
-
-    case TPlanNodeType::OLAP_SCAN_NODE:
-        *node = pool->add(new OlapScanNode(pool, tnode, descs));
-        return Status::OK();
-
-    case TPlanNodeType::AGGREGATION_NODE:
-        if (config::enable_partitioned_aggregation) {
-            *node = pool->add(new PartitionedAggregationNode(pool, tnode, descs));
-        } else {
-            *node = pool->add(new AggregationNode(pool, tnode, descs));
-        }
         return Status::OK();
     case TPlanNodeType::HASH_JOIN_NODE:
         *node = pool->add(new HashJoinNode(pool, tnode, descs));
         return Status::OK();
-
+    case TPlanNodeType::ANALYTIC_EVAL_NODE:
+        *node = pool->add(new AnalyticNode(pool, tnode, descs));
+        return Status::OK();
+    case TPlanNodeType::SORT_NODE:
+        *node = pool->add(new TopNNode(pool, tnode, descs));
+        return Status::OK();
     case TPlanNodeType::CROSS_JOIN_NODE:
+    case TPlanNodeType::NESTLOOP_JOIN_NODE:
         *node = pool->add(new CrossJoinNode(pool, tnode, descs));
         return Status::OK();
-
-    case TPlanNodeType::MERGE_JOIN_NODE:
-        *node = pool->add(new MergeJoinNode(pool, tnode, descs));
-        return Status::OK();
-
-    case TPlanNodeType::EMPTY_SET_NODE:
-        *node = pool->add(new EmptySetNode(pool, tnode, descs));
-        return Status::OK();
-
-    case TPlanNodeType::EXCHANGE_NODE:
-        *node = pool->add(new ExchangeNode(pool, tnode, descs));
-        return Status::OK();
-
-    case TPlanNodeType::SELECT_NODE:
-        *node = pool->add(new SelectNode(pool, tnode, descs));
-        return Status::OK();
-
-    case TPlanNodeType::SORT_NODE:
-        if (tnode.sort_node.use_top_n) {
-            *node = pool->add(new TopNNode(pool, tnode, descs));
-        } else {
-            *node = pool->add(new SpillSortNode(pool, tnode, descs));
-        }
-
-        return Status::OK();
-    case TPlanNodeType::ANALYTIC_EVAL_NODE:
-        *node = pool->add(new AnalyticEvalNode(pool, tnode, descs));
-        break;
-
-    case TPlanNodeType::MERGE_NODE:
-        *node = pool->add(new MergeNode(pool, tnode, descs));
-        return Status::OK();
-
     case TPlanNodeType::UNION_NODE:
         *node = pool->add(new UnionNode(pool, tnode, descs));
         return Status::OK();
-
     case TPlanNodeType::INTERSECT_NODE:
         *node = pool->add(new IntersectNode(pool, tnode, descs));
         return Status::OK();
-
     case TPlanNodeType::EXCEPT_NODE:
         *node = pool->add(new ExceptNode(pool, tnode, descs));
         return Status::OK();
-
-    case TPlanNodeType::FILE_SCAN_NODE:
-        *node = pool->add(new FileScanNode(pool, tnode, descs));
+    case TPlanNodeType::SELECT_NODE:
+        *node = pool->add(new SelectNode(pool, tnode, descs));
         return Status::OK();
-
+    case TPlanNodeType::FILE_SCAN_NODE: {
+        if (tnode.file_scan_node.__isset.enable_pipeline_load && tnode.file_scan_node.enable_pipeline_load) {
+            TPlanNode new_node = tnode;
+            TConnectorScanNode connector_scan_node;
+            connector_scan_node.connector_name = connector::Connector::FILE;
+            new_node.connector_scan_node = connector_scan_node;
+            *node = pool->add(new ConnectorScanNode(pool, new_node, descs));
+        } else {
+            *node = pool->add(new FileScanNode(pool, tnode, descs));
+        }
+    }
+        return Status::OK();
     case TPlanNodeType::REPEAT_NODE:
         *node = pool->add(new RepeatNode(pool, tnode, descs));
         return Status::OK();
-
     case TPlanNodeType::ASSERT_NUM_ROWS_NODE:
         *node = pool->add(new AssertNumRowsNode(pool, tnode, descs));
         return Status::OK();
-    case TPlanNodeType::ADAPTER_NODE:
-        *node = pool->add(new vectorized::AdapterNode(pool, tnode, descs));
+    case TPlanNodeType::PROJECT_NODE:
+        *node = pool->add(new ProjectNode(pool, tnode, descs));
         return Status::OK();
-    default:
-        map<int, const char*>::const_iterator i = _TPlanNodeType_VALUES_TO_NAMES.find(tnode.node_type);
-        const char* str = "unknown node type";
-
-        if (i != _TPlanNodeType_VALUES_TO_NAMES.end()) {
-            str = i->second;
+    case TPlanNodeType::TABLE_FUNCTION_NODE:
+        *node = pool->add(new TableFunctionNode(pool, tnode, descs));
+        return Status::OK();
+    case TPlanNodeType::HDFS_SCAN_NODE: {
+        TPlanNode new_node = tnode;
+        TConnectorScanNode connector_scan_node;
+        connector_scan_node.connector_name = connector::Connector::HIVE;
+        new_node.connector_scan_node = connector_scan_node;
+        *node = pool->add(new ConnectorScanNode(pool, new_node, descs));
+        return Status::OK();
+    }
+    case TPlanNodeType::MYSQL_SCAN_NODE: {
+        TPlanNode new_node = tnode;
+        TConnectorScanNode connector_scan_node;
+        connector_scan_node.connector_name = connector::Connector::MYSQL;
+        new_node.connector_scan_node = connector_scan_node;
+        *node = pool->add(new ConnectorScanNode(pool, new_node, descs));
+        return Status::OK();
+    }
+    case TPlanNodeType::ES_HTTP_SCAN_NODE: {
+        TPlanNode new_node = tnode;
+        TConnectorScanNode connector_scan_node;
+        connector_scan_node.connector_name = connector::Connector::ES;
+        new_node.connector_scan_node = connector_scan_node;
+        *node = pool->add(new ConnectorScanNode(pool, new_node, descs));
+        return Status::OK();
+    }
+    case TPlanNodeType::SCHEMA_SCAN_NODE:
+        *node = pool->add(new SchemaScanNode(pool, tnode, descs));
+        return Status::OK();
+    case TPlanNodeType::DECODE_NODE:
+        *node = pool->add(new DictDecodeNode(pool, tnode, descs));
+        return Status::OK();
+    case TPlanNodeType::JDBC_SCAN_NODE: {
+        TPlanNode new_node = tnode;
+        TConnectorScanNode connector_scan_node;
+        connector_scan_node.connector_name = connector::Connector::JDBC;
+        new_node.connector_scan_node = connector_scan_node;
+        *node = pool->add(new ConnectorScanNode(pool, new_node, descs));
+        return Status::OK();
+    }
+    case TPlanNodeType::LAKE_SCAN_NODE: {
+        TPlanNode new_node = tnode;
+        TConnectorScanNode connector_scan_node;
+        connector_scan_node.connector_name = connector::Connector::LAKE;
+        new_node.connector_scan_node = connector_scan_node;
+        *node = pool->add(new ConnectorScanNode(pool, new_node, descs));
+        return Status::OK();
+    }
+    case TPlanNodeType::STREAM_SCAN_NODE: {
+        TPlanNode new_node = tnode;
+        std::string connector_name;
+        StreamSourceType::type source_type = new_node.stream_scan_node.source_type;
+        switch (source_type) {
+        case StreamSourceType::BINLOG: {
+            connector_name = connector::Connector::BINLOG;
+            break;
         }
-
-        error_msg << str << " not implemented";
-        return Status::InternalError(error_msg.str());
+        default:
+            return Status::InternalError(fmt::format("Stream scan node does not support source type {}", source_type));
+        }
+        TConnectorScanNode connector_scan_node;
+        connector_scan_node.connector_name = connector_name;
+        new_node.connector_scan_node = connector_scan_node;
+        *node = pool->add(new ConnectorScanNode(pool, new_node, descs));
+        return Status::OK();
     }
-
-    return Status::OK();
-}
-
-void ExecNode::set_debug_options(int node_id, TExecNodePhase::type phase, TDebugAction::type action, ExecNode* root) {
-    if (root->_id == node_id) {
-        root->_debug_phase = phase;
-        root->_debug_action = action;
-        return;
+    case TPlanNodeType::STREAM_AGG_NODE: {
+        *node = pool->add(new StreamAggregateNode(pool, tnode, descs));
+        return Status::OK();
     }
-
-    for (int i = 0; i < root->_children.size(); ++i) {
-        set_debug_options(node_id, phase, action, root->_children[i]);
+    default:
+        return Status::InternalError(strings::Substitute("Vectorized engine not support node: $0", tnode.node_type));
     }
 }
 
@@ -707,25 +584,15 @@ void ExecNode::debug_string(int indentation_level, std::stringstream* out) const
     }
     *out << "]";
 
-    for (int i = 0; i < _children.size(); ++i) {
+    for (auto i : _children) {
         *out << "\n";
-        _children[i]->debug_string(indentation_level + 1, out);
+        i->debug_string(indentation_level + 1, out);
     }
 }
 
-bool ExecNode::eval_conjuncts(ExprContext* const* ctxs, int num_ctxs, TupleRow* row) {
-    for (int i = 0; i < num_ctxs; ++i) {
-        BooleanVal v = ctxs[i]->get_boolean_val(row);
-        if (v.is_null || !v.val) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static void eager_prune_eval_conjuncts(const std::vector<ExprContext*>& ctxs, vectorized::Chunk* chunk) {
-    vectorized::Column::Filter filter(chunk->num_rows(), 1);
-    vectorized::Column::Filter* raw_filter = &filter;
+Status eager_prune_eval_conjuncts(const std::vector<ExprContext*>& ctxs, Chunk* chunk) {
+    Filter filter(chunk->num_rows(), 1);
+    Filter* raw_filter = &filter;
 
     // prune chunk when pruned size is large enough
     // these constants are just came up without any specific reason.
@@ -742,8 +609,8 @@ static void eager_prune_eval_conjuncts(const std::vector<ExprContext*>& ctxs, ve
     int zero_count = 0;
 
     for (auto* ctx : ctxs) {
-        ColumnPtr column = ctx->evaluate(chunk);
-        size_t true_count = vectorized::ColumnHelper::count_true_with_notnull(column);
+        ASSIGN_OR_RETURN(ColumnPtr column, ctx->evaluate(chunk))
+        size_t true_count = ColumnHelper::count_true_with_notnull(column);
 
         if (true_count == column->size()) {
             // all hit, skip
@@ -751,16 +618,16 @@ static void eager_prune_eval_conjuncts(const std::vector<ExprContext*>& ctxs, ve
         } else if (0 == true_count) {
             // all not hit, return
             chunk->set_num_rows(0);
-            return;
+            return Status::OK();
         } else {
-            vectorized::ColumnHelper::merge_two_filters(column, raw_filter, nullptr);
+            ColumnHelper::merge_two_filters(column, raw_filter, nullptr);
             zero_count = SIMD::count_zero(*raw_filter);
             if (zero_count > prune_threshold) {
-                int rows = chunk->filter(*raw_filter);
+                int rows = chunk->filter(*raw_filter, true);
                 if (rows == 0) {
                     // When all rows in chunk is filtered, direct return
                     // No need to execute the following predicate
-                    return;
+                    return Status::OK();
                 }
                 filter.assign(rows, 1);
                 zero_count = 0;
@@ -768,16 +635,18 @@ static void eager_prune_eval_conjuncts(const std::vector<ExprContext*>& ctxs, ve
         }
     }
     if (zero_count == 0) {
-        return;
+        return Status::OK();
     }
-    chunk->filter(*raw_filter);
+    chunk->filter(*raw_filter, true);
+    return Status::OK();
 }
 
-void ExecNode::eval_conjuncts(const std::vector<ExprContext*>& ctxs, vectorized::Chunk* chunk,
-                              vectorized::FilterPtr* filter_ptr) {
+Status ExecNode::eval_conjuncts(const std::vector<ExprContext*>& ctxs, Chunk* chunk, FilterPtr* filter_ptr,
+                                bool apply_filter) {
     // No need to do expression if none rows
+    DCHECK(chunk != nullptr);
     if (chunk->num_rows() == 0) {
-        return;
+        return Status::OK();
     }
 
     // if we don't need filter, then we can prune chunk during eval conjuncts.
@@ -788,62 +657,149 @@ void ExecNode::eval_conjuncts(const std::vector<ExprContext*>& ctxs, vectorized:
     // but here for simplicity, we just check columns numbers absolute value.
     // TO BE NOTED, that there is no storng evidence that this has better performance.
     // It's just by intuition.
+    TRY_CATCH_ALLOC_SCOPE_START()
     const int eager_prune_max_column_number = 5;
     if (filter_ptr == nullptr && chunk->num_columns() <= eager_prune_max_column_number) {
         return eager_prune_eval_conjuncts(ctxs, chunk);
     }
 
-    vectorized::FilterPtr filter(new vectorized::Column::Filter(chunk->num_rows(), 1));
+    if (!apply_filter) {
+        DCHECK(filter_ptr) << "Must provide a filter if not apply it directly";
+    }
+    FilterPtr filter(new Filter(chunk->num_rows(), 1));
     if (filter_ptr != nullptr) {
         *filter_ptr = filter;
     }
-    vectorized::Column::Filter* raw_filter = filter.get();
+    Filter* raw_filter = filter.get();
 
     for (auto* ctx : ctxs) {
-        ColumnPtr column = ctx->evaluate(chunk);
-        size_t true_count = vectorized::ColumnHelper::count_true_with_notnull(column);
+        ASSIGN_OR_RETURN(ColumnPtr column, ctx->evaluate(chunk))
+        size_t true_count = ColumnHelper::count_true_with_notnull(column);
 
         if (true_count == column->size()) {
             // all hit, skip
             continue;
         } else if (0 == true_count) {
             // all not hit, return
-            chunk->set_num_rows(0);
-            return;
+            if (apply_filter) {
+                chunk->set_num_rows(0);
+            } else {
+                filter->assign(filter->size(), 0);
+            }
+            return Status::OK();
         } else {
             bool all_zero = false;
-            vectorized::ColumnHelper::merge_two_filters(column, raw_filter, &all_zero);
+            ColumnHelper::merge_two_filters(column, raw_filter, &all_zero);
             if (all_zero) {
-                chunk->set_num_rows(0);
-                return;
+                if (apply_filter) {
+                    chunk->set_num_rows(0);
+                } else {
+                    filter->assign(filter->size(), 0);
+                }
+                return Status::OK();
             }
         }
     }
 
-    int zero_count = SIMD::count_zero(*raw_filter);
-    if (zero_count == 0) {
-        return;
+    if (apply_filter) {
+        chunk->filter(*raw_filter);
     }
-    chunk->filter(*raw_filter);
+    TRY_CATCH_ALLOC_SCOPE_END()
+    return Status::OK();
 }
 
-void ExecNode::eval_join_runtime_filters(vectorized::Chunk* chunk) {
+StatusOr<size_t> ExecNode::eval_conjuncts_into_filter(const std::vector<ExprContext*>& ctxs, Chunk* chunk,
+                                                      Filter* filter) {
+    // No need to do expression if none rows
+    DCHECK(chunk != nullptr);
+    if (chunk->num_rows() == 0) {
+        return 0;
+    }
+    for (auto* ctx : ctxs) {
+        ASSIGN_OR_RETURN(ColumnPtr column, ctx->evaluate(chunk, filter->data()))
+        size_t true_count = ColumnHelper::count_true_with_notnull(column);
+
+        if (true_count == column->size()) {
+            // all hit, skip
+            continue;
+        } else if (0 == true_count) {
+            return 0;
+        } else {
+            bool all_zero = false;
+            ColumnHelper::merge_two_filters(column, filter, &all_zero);
+            if (all_zero) {
+                return 0;
+            }
+        }
+    }
+
+    size_t true_count = SIMD::count_nonzero(*filter);
+    return true_count;
+}
+
+void ExecNode::eval_join_runtime_filters(Chunk* chunk) {
     if (chunk == nullptr) return;
     _runtime_filter_collector.evaluate(chunk);
+    eval_filter_null_values(chunk);
 }
 
-void ExecNode::eval_join_runtime_filters(vectorized::ChunkPtr* chunk) {
+void ExecNode::eval_join_runtime_filters(ChunkPtr* chunk) {
     if (chunk == nullptr) return;
     eval_join_runtime_filters(chunk->get());
+}
+
+void ExecNode::eval_filter_null_values(Chunk* chunk, const std::vector<SlotId>& filter_null_value_columns) {
+    if (filter_null_value_columns.size() == 0) return;
+    size_t before_size = chunk->num_rows();
+    if (before_size == 0) return;
+
+    // lazy allocation.
+    Buffer<uint8_t> selection(0);
+
+    for (SlotId slot_id : filter_null_value_columns) {
+        const ColumnPtr& c = chunk->get_column_by_slot_id(slot_id);
+        if (!c->is_nullable()) continue;
+        if (c->only_null()) {
+            chunk->reset();
+            return;
+        }
+        const NullableColumn* nullable_column = ColumnHelper::as_raw_column<NullableColumn>(c);
+        if (!nullable_column->has_null()) continue;
+        if (selection.size() == 0) {
+            selection.assign(before_size, 1);
+        }
+        // how many data() should we call? I really don't know.
+        // let compiler tells me.
+        // let compiler does vectorization.
+        // let compiler does everything.
+        // let's pray for compiler,
+        // till the end of the world.
+        const uint8_t* nulls = nullable_column->null_column()->raw_data();
+        uint8_t* sel = selection.data();
+        for (size_t i = 0; i < before_size; i++) {
+            sel[i] &= !nulls[i];
+        }
+    }
+    if (selection.size() == 0) return;
+
+    size_t after_size = SIMD::count_nonzero(selection);
+    // Those rows will be filtered out anyway, better to be filtered out here.
+    if (after_size != before_size) {
+        VLOG_FILE << "filter null values. before_size = " << before_size << ", after_size = " << after_size;
+        chunk->filter(selection, true);
+    }
+}
+
+void ExecNode::eval_filter_null_values(Chunk* chunk) {
+    eval_filter_null_values(chunk, _filter_null_value_columns);
 }
 
 void ExecNode::collect_nodes(TPlanNodeType::type node_type, std::vector<ExecNode*>* nodes) {
     if (_type == node_type) {
         nodes->push_back(this);
     }
-
-    for (int i = 0; i < _children.size(); ++i) {
-        _children[i]->collect_nodes(node_type, nodes);
+    for (auto& i : _children) {
+        i->collect_nodes(node_type, nodes);
     }
 }
 
@@ -853,44 +809,13 @@ void ExecNode::collect_scan_nodes(vector<ExecNode*>* nodes) {
     collect_nodes(TPlanNodeType::ES_SCAN_NODE, nodes);
     collect_nodes(TPlanNodeType::ES_HTTP_SCAN_NODE, nodes);
     collect_nodes(TPlanNodeType::HDFS_SCAN_NODE, nodes);
-}
-
-bool ExecNode::_check_has_vectorized_scan_child() {
-    if (_use_vectorized) {
-        return true;
-    }
-
-    for (int i = 0; i < _children.size(); ++i) {
-        if (_children[i]->_check_has_vectorized_scan_child()) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-void ExecNode::try_do_aggregate_serde_improve() {
-    std::vector<ExecNode*> agg_node;
-    collect_nodes(TPlanNodeType::AGGREGATION_NODE, &agg_node);
-    if (agg_node.size() != 1) {
-        return;
-    }
-
-    if (agg_node[0]->_children.size() != 1) {
-        return;
-    }
-
-    if (agg_node[0]->_children[0]->type() != TPlanNodeType::OLAP_SCAN_NODE) {
-        return;
-    }
-
-    // Vector query engine don't support aggregate serde improve
-    if (agg_node[0]->_children[0]->_use_vectorized) {
-        return;
-    }
-
-    OlapScanNode* scan_node = down_cast<OlapScanNode*>(agg_node[0]->_children[0]);
-    scan_node->set_no_agg_finalize();
+    collect_nodes(TPlanNodeType::META_SCAN_NODE, nodes);
+    collect_nodes(TPlanNodeType::LAKE_META_SCAN_NODE, nodes);
+    collect_nodes(TPlanNodeType::JDBC_SCAN_NODE, nodes);
+    collect_nodes(TPlanNodeType::MYSQL_SCAN_NODE, nodes);
+    collect_nodes(TPlanNodeType::LAKE_SCAN_NODE, nodes);
+    collect_nodes(TPlanNodeType::SCHEMA_SCAN_NODE, nodes);
+    collect_nodes(TPlanNodeType::STREAM_SCAN_NODE, nodes);
 }
 
 void ExecNode::init_runtime_profile(const std::string& name) {
@@ -920,62 +845,13 @@ Status ExecNode::exec_debug_action(TExecNodePhase::type phase) {
     return Status::OK();
 }
 
-Status ExecNode::claim_buffer_reservation(RuntimeState* state) {
-    DCHECK(!_buffer_pool_client.is_registered());
-    BufferPool* buffer_pool = ExecEnv::GetInstance()->buffer_pool();
-    // Check the minimum buffer size in case the minimum buffer size used by the planner
-    // doesn't match this backend's.
-    std::stringstream ss;
-    if (_resource_profile.__isset.spillable_buffer_size &&
-        _resource_profile.spillable_buffer_size < buffer_pool->min_buffer_len()) {
-        ss << "Spillable buffer size for node " << _id << " of " << _resource_profile.spillable_buffer_size
-           << "bytes is less than the minimum buffer pool buffer size of " << buffer_pool->min_buffer_len() << "bytes";
-        return Status::InternalError(ss.str());
+void ExecNode::may_add_chunk_accumulate_operator(OpFactories& ops, pipeline::PipelineBuilderContext* context, int id) {
+    // TODO(later): Need to rewrite ChunkAccumulateOperator to support StreamPipelines,
+    // for now just disable it in stream pipelines:
+    // - make sure UPDATE_BEFORE/UPDATE_AFTER are in the same chunk.
+    if (!context->is_stream_pipeline()) {
+        ops.emplace_back(std::make_shared<pipeline::ChunkAccumulateOperatorFactory>(context->next_operator_id(), id));
     }
-
-    ss << print_plan_node_type(_type) << " id=" << _id << " ptr=" << this;
-    RETURN_IF_ERROR(buffer_pool->RegisterClient(ss.str(), state->instance_buffer_reservation(), mem_tracker(),
-                                                buffer_pool->GetSystemBytesLimit(), runtime_profile(),
-                                                &_buffer_pool_client));
-
-    state->initial_reservations()->Claim(&_buffer_pool_client, _resource_profile.min_reservation);
-    /*
-    if (debug_action_ == TDebugAction::SET_DENY_RESERVATION_PROBABILITY &&
-        (debug_phase_ == TExecNodePhase::PREPARE || debug_phase_ == TExecNodePhase::OPEN)) {
-       // We may not have been able to enable the debug action at the start of Prepare() or
-       // Open() because the client is not registered then. Do it now to be sure that it is
-       // effective.
-               RETURN_IF_ERROR(EnableDenyReservationDebugAction());
-    }
-*/
-    return Status::OK();
-}
-
-Status ExecNode::release_unused_reservation() {
-    return _buffer_pool_client.DecreaseReservationTo(_resource_profile.min_reservation);
-}
-/*
-Status ExecNode::enable_deny_reservation_debug_action() {
-  DCHECK_EQ(debug_action_, TDebugAction::SET_DENY_RESERVATION_PROBABILITY);
-  DCHECK(_buffer_pool_client.is_registered());
-  // Parse [0.0, 1.0] probability.
-  StringParser::ParseResult parse_result;
-  double probability = StringParser::StringToFloat<double>(
-      debug_action_param_.c_str(), debug_action_param_.size(), &parse_result);
-  if (parse_result != StringParser::PARSE_SUCCESS || probability < 0.0
-      || probability > 1.0) {
-    return Status::InternalError(strings::Substitute(
-        "Invalid SET_DENY_RESERVATION_PROBABILITY param: '$0'", debug_action_param_));
-  }
-  _buffer_pool_client.SetDebugDenyIncreaseReservation(probability);
-  return Status::OK()();
-}
-*/
-
-Status ExecNode::QueryMaintenance(RuntimeState* state, const std::string& msg) {
-    // TODO chenhao , when introduce latest AnalyticEvalNode open it
-    // ScalarExprEvaluator::FreeLocalAllocations(evals_to_free_);
-    return state->check_query_state(msg);
 }
 
 } // namespace starrocks

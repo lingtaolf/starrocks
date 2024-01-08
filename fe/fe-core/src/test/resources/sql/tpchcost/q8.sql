@@ -1,41 +1,3 @@
-[sql]
-select
-    o_year,
-    sum(case
-            when nation = 'IRAN' then volume
-            else 0
-        end) / sum(volume) as mkt_share
-from
-    (
-        select
-            extract(year from o_orderdate) as o_year,
-            l_extendedprice * (1 - l_discount) as volume,
-            n2.n_name as nation
-        from
-            part,
-            supplier,
-            lineitem,
-            orders,
-            customer,
-            nation n1,
-            nation n2,
-            region
-        where
-                p_partkey = l_partkey
-          and s_suppkey = l_suppkey
-          and l_orderkey = o_orderkey
-          and o_custkey = c_custkey
-          and c_nationkey = n1.n_nationkey
-          and n1.n_regionkey = r_regionkey
-          and r_name = 'MIDDLE EAST'
-          and s_nationkey = n2.n_nationkey
-          and o_orderdate between date '1995-01-01' and date '1996-12-31'
-          and p_type = 'ECONOMY ANODIZED STEEL'
-    ) as all_nations
-group by
-    o_year
-order by
-    o_year ;
 [fragment]
 PLAN FRAGMENT 0
 OUTPUT EXPRS:69: year | 74: expr
@@ -44,7 +6,6 @@ PARTITION: UNPARTITIONED
 RESULT SINK
 
 36:MERGING-EXCHANGE
-use vectorized: true
 
 PLAN FRAGMENT 1
 OUTPUT EXPRS:
@@ -57,20 +18,16 @@ UNPARTITIONED
 35:SORT
 |  order by: <slot 69> 69: year ASC
 |  offset: 0
-|  use vectorized: true
 |
 34:Project
 |  <slot 69> : 69: year
-|  <slot 74> : 72: sum(71: expr) / 73: sum(70: expr)
-|  use vectorized: true
+|  <slot 74> : 72: sum / 73: sum
 |
 33:AGGREGATE (merge finalize)
-|  output: sum(72: sum(71: expr)), sum(73: sum(70: expr))
+|  output: sum(72: sum), sum(73: sum)
 |  group by: 69: year
-|  use vectorized: true
 |
 32:EXCHANGE
-use vectorized: true
 
 PLAN FRAGMENT 2
 OUTPUT EXPRS:
@@ -82,45 +39,36 @@ HASH_PARTITIONED: 69: year
 
 31:AGGREGATE (update serialize)
 |  STREAMING
-|  output: sum(71: expr), sum(70: expr)
+|  output: sum(71: case), sum(70: expr)
 |  group by: 69: year
-|  use vectorized: true
 |
 30:Project
-|  <slot 69> : year(CAST(40: O_ORDERDATE AS DATETIME))
+|  <slot 69> : year(40: O_ORDERDATE)
 |  <slot 70> : 76: multiply
-|  <slot 71> : CASE WHEN 61: N_NAME = 'IRAN' THEN 76: multiply ELSE 0.0 END
+|  <slot 71> : if(61: N_NAME = 'IRAN', 76: multiply, 0.0)
 |  common expressions:
 |  <slot 75> : 1.0 - 25: L_DISCOUNT
 |  <slot 76> : 24: L_EXTENDEDPRICE * 75: subtract
-|  use vectorized: true
 |
 29:HASH JOIN
 |  join op: INNER JOIN (BROADCAST)
-|  hash predicates:
 |  colocate: false, reason:
 |  equal join conjunct: 14: S_NATIONKEY = 60: N_NATIONKEY
-|  use vectorized: true
 |
 |----28:EXCHANGE
-|       use vectorized: true
 |
 26:Project
-|  <slot 24> : 24: L_EXTENDEDPRICE
-|  <slot 40> : 40: O_ORDERDATE
-|  <slot 25> : 25: L_DISCOUNT
 |  <slot 14> : 14: S_NATIONKEY
-|  use vectorized: true
+|  <slot 24> : 24: L_EXTENDEDPRICE
+|  <slot 25> : 25: L_DISCOUNT
+|  <slot 40> : 40: O_ORDERDATE
 |
 25:HASH JOIN
 |  join op: INNER JOIN (BUCKET_SHUFFLE)
-|  hash predicates:
 |  colocate: false, reason:
 |  equal join conjunct: 11: S_SUPPKEY = 21: L_SUPPKEY
-|  use vectorized: true
 |
 |----24:EXCHANGE
-|       use vectorized: true
 |
 0:OlapScanNode
 TABLE: supplier
@@ -128,11 +76,8 @@ PREAGGREGATION: ON
 partitions=1/1
 rollup: supplier
 tabletRatio=1/1
-tabletList=10111
 cardinality=1000000
 avgRowSize=8.0
-numNodes=0
-use vectorized: true
 
 PLAN FRAGMENT 3
 OUTPUT EXPRS:
@@ -148,11 +93,8 @@ PREAGGREGATION: ON
 partitions=1/1
 rollup: nation
 tabletRatio=1/1
-tabletList=10185
 cardinality=25
 avgRowSize=29.0
-numNodes=0
-use vectorized: true
 
 PLAN FRAGMENT 4
 OUTPUT EXPRS:
@@ -160,38 +102,30 @@ PARTITION: RANDOM
 
 STREAM DATA SINK
 EXCHANGE ID: 24
-BUCKET_SHFFULE_HASH_PARTITIONED: 21: L_SUPPKEY
+BUCKET_SHUFFLE_HASH_PARTITIONED: 21: L_SUPPKEY
 
 23:Project
 |  <slot 21> : 21: L_SUPPKEY
 |  <slot 24> : 24: L_EXTENDEDPRICE
-|  <slot 40> : 40: O_ORDERDATE
 |  <slot 25> : 25: L_DISCOUNT
-|  use vectorized: true
+|  <slot 40> : 40: O_ORDERDATE
 |
 22:HASH JOIN
 |  join op: INNER JOIN (BUCKET_SHUFFLE)
-|  hash predicates:
 |  colocate: false, reason:
 |  equal join conjunct: 46: C_CUSTKEY = 37: O_CUSTKEY
-|  use vectorized: true
 |
 |----21:EXCHANGE
-|       use vectorized: true
 |
 10:Project
 |  <slot 46> : 46: C_CUSTKEY
-|  use vectorized: true
 |
 9:HASH JOIN
 |  join op: INNER JOIN (BROADCAST)
-|  hash predicates:
 |  colocate: false, reason:
 |  equal join conjunct: 49: C_NATIONKEY = 55: N_NATIONKEY
-|  use vectorized: true
 |
 |----8:EXCHANGE
-|       use vectorized: true
 |
 1:OlapScanNode
 TABLE: customer
@@ -199,11 +133,8 @@ PREAGGREGATION: ON
 partitions=1/1
 rollup: customer
 tabletRatio=10/10
-tabletList=10162,10164,10166,10168,10170,10172,10174,10176,10178,10180
 cardinality=15000000
 avgRowSize=12.0
-numNodes=0
-use vectorized: true
 
 PLAN FRAGMENT 5
 OUTPUT EXPRS:
@@ -211,25 +142,21 @@ PARTITION: RANDOM
 
 STREAM DATA SINK
 EXCHANGE ID: 21
-BUCKET_SHFFULE_HASH_PARTITIONED: 37: O_CUSTKEY
+BUCKET_SHUFFLE_HASH_PARTITIONED: 37: O_CUSTKEY
 
 20:Project
 |  <slot 21> : 21: L_SUPPKEY
-|  <slot 37> : 37: O_CUSTKEY
 |  <slot 24> : 24: L_EXTENDEDPRICE
-|  <slot 40> : 40: O_ORDERDATE
 |  <slot 25> : 25: L_DISCOUNT
-|  use vectorized: true
+|  <slot 37> : 37: O_CUSTKEY
+|  <slot 40> : 40: O_ORDERDATE
 |
 19:HASH JOIN
 |  join op: INNER JOIN (BUCKET_SHUFFLE)
-|  hash predicates:
 |  colocate: false, reason:
 |  equal join conjunct: 36: O_ORDERKEY = 19: L_ORDERKEY
-|  use vectorized: true
 |
 |----18:EXCHANGE
-|       use vectorized: true
 |
 11:OlapScanNode
 TABLE: orders
@@ -238,11 +165,8 @@ PREDICATES: 40: O_ORDERDATE >= '1995-01-01', 40: O_ORDERDATE <= '1996-12-31'
 partitions=1/1
 rollup: orders
 tabletRatio=10/10
-tabletList=10139,10141,10143,10145,10147,10149,10151,10153,10155,10157
-cardinality=45530145
+cardinality=45530146
 avgRowSize=20.0
-numNodes=0
-use vectorized: true
 
 PLAN FRAGMENT 6
 OUTPUT EXPRS:
@@ -250,24 +174,20 @@ PARTITION: RANDOM
 
 STREAM DATA SINK
 EXCHANGE ID: 18
-BUCKET_SHFFULE_HASH_PARTITIONED: 19: L_ORDERKEY
+BUCKET_SHUFFLE_HASH_PARTITIONED: 19: L_ORDERKEY
 
 17:Project
 |  <slot 19> : 19: L_ORDERKEY
 |  <slot 21> : 21: L_SUPPKEY
 |  <slot 24> : 24: L_EXTENDEDPRICE
 |  <slot 25> : 25: L_DISCOUNT
-|  use vectorized: true
 |
 16:HASH JOIN
 |  join op: INNER JOIN (BROADCAST)
-|  hash predicates:
 |  colocate: false, reason:
 |  equal join conjunct: 20: L_PARTKEY = 1: P_PARTKEY
-|  use vectorized: true
 |
 |----15:EXCHANGE
-|       use vectorized: true
 |
 12:OlapScanNode
 TABLE: lineitem
@@ -275,11 +195,8 @@ PREAGGREGATION: ON
 partitions=1/1
 rollup: lineitem
 tabletRatio=20/20
-tabletList=10213,10215,10217,10219,10221,10223,10225,10227,10229,10231 ...
 cardinality=600000000
 avgRowSize=36.0
-numNodes=0
-use vectorized: true
 
 PLAN FRAGMENT 7
 OUTPUT EXPRS:
@@ -291,7 +208,6 @@ UNPARTITIONED
 
 14:Project
 |  <slot 1> : 1: P_PARTKEY
-|  use vectorized: true
 |
 13:OlapScanNode
 TABLE: part
@@ -300,11 +216,8 @@ PREDICATES: 5: P_TYPE = 'ECONOMY ANODIZED STEEL'
 partitions=1/1
 rollup: part
 tabletRatio=10/10
-tabletList=10190,10192,10194,10196,10198,10200,10202,10204,10206,10208
 cardinality=133333
 avgRowSize=33.0
-numNodes=0
-use vectorized: true
 
 PLAN FRAGMENT 8
 OUTPUT EXPRS:
@@ -316,17 +229,13 @@ UNPARTITIONED
 
 7:Project
 |  <slot 55> : 55: N_NATIONKEY
-|  use vectorized: true
 |
 6:HASH JOIN
 |  join op: INNER JOIN (BROADCAST)
-|  hash predicates:
 |  colocate: false, reason:
 |  equal join conjunct: 57: N_REGIONKEY = 65: R_REGIONKEY
-|  use vectorized: true
 |
 |----5:EXCHANGE
-|       use vectorized: true
 |
 2:OlapScanNode
 TABLE: nation
@@ -334,11 +243,8 @@ PREAGGREGATION: ON
 partitions=1/1
 rollup: nation
 tabletRatio=1/1
-tabletList=10185
 cardinality=25
 avgRowSize=8.0
-numNodes=0
-use vectorized: true
 
 PLAN FRAGMENT 9
 OUTPUT EXPRS:
@@ -350,7 +256,6 @@ UNPARTITIONED
 
 4:Project
 |  <slot 65> : 65: R_REGIONKEY
-|  use vectorized: true
 |
 3:OlapScanNode
 TABLE: region
@@ -359,10 +264,7 @@ PREDICATES: 66: R_NAME = 'MIDDLE EAST'
 partitions=1/1
 rollup: region
 tabletRatio=1/1
-tabletList=10106
 cardinality=1
 avgRowSize=29.0
-numNodes=0
-use vectorized: true
 [end]
 

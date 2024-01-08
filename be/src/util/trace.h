@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/util/trace.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -215,15 +211,16 @@ private:
     // Lock protecting the entries linked list.
     mutable SpinLock lock_;
     // The head of the linked list of entries (allocated inside arena_)
-    TraceEntry* entries_head_;
+    TraceEntry* entries_head_{nullptr};
     // The tail of the linked list of entries (allocated inside arena_)
-    TraceEntry* entries_tail_;
+    TraceEntry* entries_tail_{nullptr};
 
     std::vector<std::pair<StringPiece, scoped_refptr<Trace>>> child_traces_;
 
     TraceMetrics metrics_;
 
-    DISALLOW_COPY_AND_ASSIGN(Trace);
+    Trace(const Trace&) = delete;
+    const Trace& operator=(const Trace&) = delete;
 };
 
 // Adopt a Trace object into the current thread for the duration
@@ -252,7 +249,8 @@ private:
     DFAKE_MUTEX(ctor_dtor_);
     Trace* old_trace_;
 
-    DISALLOW_COPY_AND_ASSIGN(ScopedAdoptTrace);
+    ScopedAdoptTrace(const ScopedAdoptTrace&) = delete;
+    const ScopedAdoptTrace& operator=(const ScopedAdoptTrace&) = delete;
 };
 
 // Implementation for TRACE_COUNTER_SCOPE_LATENCY_US(...) macro above.
@@ -265,7 +263,8 @@ public:
 private:
     const char* const counter_;
     MicrosecondsInt64 start_time_;
-    DISALLOW_COPY_AND_ASSIGN(ScopedTraceLatencyCounter);
+    ScopedTraceLatencyCounter(const ScopedTraceLatencyCounter&) = delete;
+    const ScopedTraceLatencyCounter& operator=(const ScopedTraceLatencyCounter&) = delete;
 };
 
 } // namespace starrocks

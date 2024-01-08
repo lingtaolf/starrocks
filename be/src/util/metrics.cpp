@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/metrics.cpp
 
@@ -20,6 +33,8 @@
 // under the License.
 
 #include "util/metrics.h"
+
+#include <mutex>
 
 namespace starrocks {
 
@@ -74,7 +89,7 @@ const char* unit_name(MetricUnit unit) {
     case MetricUnit::ROWSETS:
         return "rowsets";
     case MetricUnit::CONNECTIONS:
-        return "rowsets";
+        return "connections";
     default:
         return "nounit";
     }
@@ -122,9 +137,9 @@ void MetricCollector::get_metrics(std::vector<Metric*>* metrics) {
     }
 }
 
-MetricRegistry::~MetricRegistry() {
+MetricRegistry::~MetricRegistry() noexcept {
     {
-        std::lock_guard<SpinLock> l(_lock);
+        std::unique_lock lock(_collector_mutex);
 
         std::vector<Metric*> metrics;
         for (const auto& it : _collectors) {
@@ -134,6 +149,10 @@ MetricRegistry::~MetricRegistry() {
             _deregister_locked(metric);
         }
     }
+    {
+        std::unique_lock lock(_hooks_mutex);
+        _hooks.clear();
+    }
     // All register metric will deregister
     DCHECK(_collectors.empty()) << "_collectors not empty, size=" << _collectors.size();
 }
@@ -141,7 +160,7 @@ MetricRegistry::~MetricRegistry() {
 bool MetricRegistry::register_metric(const std::string& name, const MetricLabels& labels, Metric* metric) {
     DCHECK(metric != nullptr);
     metric->hide();
-    std::lock_guard<SpinLock> l(_lock);
+    std::unique_lock lock(_collector_mutex);
     MetricCollector* collector = nullptr;
     auto it = _collectors.find(name);
     if (it == _collectors.end()) {
@@ -173,7 +192,7 @@ void MetricRegistry::_deregister_locked(Metric* metric) {
 }
 
 Metric* MetricRegistry::get_metric(const std::string& name, const MetricLabels& labels) const {
-    std::lock_guard<SpinLock> l(_lock);
+    std::shared_lock lock(_collector_mutex);
     auto it = _collectors.find(name);
     if (it != _collectors.end()) {
         return it->second->get_metric(labels);
@@ -182,13 +201,13 @@ Metric* MetricRegistry::get_metric(const std::string& name, const MetricLabels& 
 }
 
 bool MetricRegistry::register_hook(const std::string& name, const std::function<void()>& hook) {
-    std::lock_guard<SpinLock> l(_lock);
+    std::unique_lock lock(_hooks_mutex);
     auto it = _hooks.emplace(name, hook);
     return it.second;
 }
 
 void MetricRegistry::deregister_hook(const std::string& name) {
-    std::lock_guard<SpinLock> l(_lock);
+    std::unique_lock lock(_hooks_mutex);
     _hooks.erase(name);
 }
 

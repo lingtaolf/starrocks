@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/thrift_server.cpp
 
@@ -32,9 +45,13 @@
 #include <thrift/transport/TServerSocket.h>
 #include <thrift/transport/TSocket.h>
 
-#include <boost/thread.hpp>
 #include <condition_variable>
 #include <sstream>
+#include <thread>
+#include <utility>
+
+#include "common/config.h"
+#include "util/thread.h"
 
 namespace starrocks {
 
@@ -43,27 +60,27 @@ namespace starrocks {
 // correctly.
 class ThriftServer::ThriftServerEventProcessor : public apache::thrift::server::TServerEventHandler {
 public:
-    ThriftServerEventProcessor(ThriftServer* thrift_server) : _thrift_server(thrift_server), _signal_fired(false) {}
+    ThriftServerEventProcessor(ThriftServer* thrift_server) : _thrift_server(thrift_server) {}
 
     // friendly to code style
-    virtual ~ThriftServerEventProcessor() {}
+    ~ThriftServerEventProcessor() override = default;
 
     // Called by TNonBlockingServer when server has acquired its resources and is ready to
     // serve, and signals to StartAndWaitForServer that start-up is finished.
     // From TServerEventHandler.
-    virtual void preServe();
+    void preServe() override;
 
     // Called when a client connects; we create per-client state and call any
     // SessionHandlerIf handler.
-    virtual void* createContext(std::shared_ptr<apache::thrift::protocol::TProtocol> input,
-                                std::shared_ptr<apache::thrift::protocol::TProtocol> output);
+    void* createContext(std::shared_ptr<apache::thrift::protocol::TProtocol> input,
+                        std::shared_ptr<apache::thrift::protocol::TProtocol> output) override;
 
     // Called when a client starts an RPC; we set the thread-local session key.
-    virtual void processContext(void* context, std::shared_ptr<apache::thrift::transport::TTransport> output);
+    void processContext(void* context, std::shared_ptr<apache::thrift::transport::TTransport> output) override;
 
     // Called when a client disconnects; we call any SessionHandlerIf handler.
-    virtual void deleteContext(void* serverContext, std::shared_ptr<apache::thrift::protocol::TProtocol> input,
-                               std::shared_ptr<apache::thrift::protocol::TProtocol> output);
+    void deleteContext(void* serverContext, std::shared_ptr<apache::thrift::protocol::TProtocol> input,
+                       std::shared_ptr<apache::thrift::protocol::TProtocol> output) override;
 
     // Waits for a timeout of TIMEOUT_MS for a server to signal that it has started
     // correctly.
@@ -84,7 +101,7 @@ private:
     ThriftServer* _thrift_server;
 
     // Guards against spurious condition variable wakeups
-    bool _signal_fired;
+    bool _signal_fired{false};
 
     // The time, in milliseconds, to wait for a server to come up
     static constexpr int TIMEOUT_MS = 2500;
@@ -98,7 +115,9 @@ Status ThriftServer::ThriftServerEventProcessor::start_and_wait_for_server() {
     std::unique_lock<std::mutex> lock(_signal_lock);
     _thrift_server->_started = false;
 
-    _thrift_server->_server_thread.reset(new boost::thread(&ThriftServer::ThriftServerEventProcessor::supervise, this));
+    _thrift_server->_server_thread =
+            std::make_unique<std::thread>(&ThriftServer::ThriftServerEventProcessor::supervise, this);
+    Thread::set_thread_name(_thrift_server->_server_thread.get()->native_handle(), "thrift_server");
 
     // Loop protects against spurious wakeup. Locks provide necessary fences to ensure
     // visibility.
@@ -115,7 +134,7 @@ Status ThriftServer::ThriftServerEventProcessor::start_and_wait_for_server() {
 
     // _started == true only if preServe was called. May be false if there was an exception
     // after preServe that was caught by Supervise, causing it to reset the error condition.
-    if (_thrift_server->_started == false) {
+    if (!_thrift_server->_started) {
         std::stringstream ss;
         ss << "ThriftServer '" << _thrift_server->_name << "' (on port: " << _thrift_server->_port
            << ") did not start correctly ";
@@ -127,13 +146,32 @@ Status ThriftServer::ThriftServerEventProcessor::start_and_wait_for_server() {
 }
 
 void ThriftServer::ThriftServerEventProcessor::supervise() {
-    DCHECK(_thrift_server->_server.get() != NULL);
+    DCHECK(_thrift_server->_server.get() != nullptr);
 
+    // serve() will call preServe() internal to set _started = true before serve loop start
     try {
         _thrift_server->_server->serve();
     } catch (apache::thrift::TException& e) {
         LOG(ERROR) << "ThriftServer '" << _thrift_server->_name << "' (on port: " << _thrift_server->_port
                    << ") exited due to TException: " << e.what();
+    }
+    // There are three scenario of serve loop
+    // 1. Accept timeout and client disconnect - ThriftServer continue processing.
+    // 2. Server was interrupted.  This only happens when stop() called. - ThriftServer serve return
+    // 3. All other transport exceptions are only logged. - ThriftServer serve return.
+    // In scenario 3 we prefer to retry before stop() called, it will reset the transport
+    while (!_thrift_server->_stopped && _thrift_server->_started) {
+        try {
+            _thrift_server->_server->serve();
+            if (!_thrift_server->_stopped) {
+                LOG(ERROR) << "ThriftServer '" << _thrift_server->_name << "' (on port: " << _thrift_server->_port
+                           << ") exited unexpected. ";
+            }
+        } catch (apache::thrift::TException& e) {
+            LOG(ERROR) << "ThriftServer '" << _thrift_server->_name << "' (on port: " << _thrift_server->_port
+                       << ") exited due to TException: " << e.what();
+        }
+        SleepFor(MonoDelta::FromSeconds(3));
     }
 
     {
@@ -169,16 +207,12 @@ void ThriftServer::ThriftServerEventProcessor::preServe() {
 // thrift server is currently serving a request on the current thread.
 __thread ThriftServer::SessionKey* _session_key;
 
-ThriftServer::SessionKey* ThriftServer::get_thread_session_key() {
-    return _session_key;
-}
-
 void* ThriftServer::ThriftServerEventProcessor::createContext(
         std::shared_ptr<apache::thrift::protocol::TProtocol> input,
         std::shared_ptr<apache::thrift::protocol::TProtocol> output) {
     std::stringstream ss;
 
-    apache::thrift::transport::TSocket* socket = NULL;
+    apache::thrift::transport::TSocket* socket = nullptr;
     apache::thrift::transport::TTransport* transport = input->getTransport().get();
     {
         switch (_thrift_server->_server_type) {
@@ -213,10 +247,6 @@ void* ThriftServer::ThriftServerEventProcessor::createContext(
         _thrift_server->_session_keys[key_ptr.get()] = key_ptr;
     }
 
-    if (_thrift_server->_session_handler != NULL) {
-        _thrift_server->_session_handler->session_start(*_session_key);
-    }
-
     if (_thrift_server->_metrics_enabled) {
         _thrift_server->_connections_total->increment(1L);
         _thrift_server->_current_connections->increment(1L);
@@ -238,10 +268,6 @@ void ThriftServer::ThriftServerEventProcessor::deleteContext(
         std::shared_ptr<apache::thrift::protocol::TProtocol> output) {
     _session_key = (SessionKey*)serverContext;
 
-    if (_thrift_server->_session_handler != NULL) {
-        _thrift_server->_session_handler->session_end(*_session_key);
-    }
-
     {
         std::lock_guard<std::mutex> _l(_thrift_server->_session_keys_lock);
         _thrift_server->_session_keys.erase(_session_key);
@@ -252,8 +278,8 @@ void ThriftServer::ThriftServerEventProcessor::deleteContext(
     }
 }
 
-ThriftServer::ThriftServer(const std::string& name, const std::shared_ptr<apache::thrift::TProcessor>& processor,
-                           int port, MetricRegistry* metrics, int num_worker_threads, ServerType server_type)
+ThriftServer::ThriftServer(const std::string& name, std::shared_ptr<apache::thrift::TProcessor> processor, int port,
+                           MetricRegistry* metrics, int num_worker_threads, ServerType server_type)
         : _started(false),
           _port(port),
           _num_worker_threads(num_worker_threads),
@@ -261,15 +287,14 @@ ThriftServer::ThriftServer(const std::string& name, const std::shared_ptr<apache
           _name(name),
           _server_thread(nullptr),
           _server(nullptr),
-          _processor(processor),
-          _session_handler(NULL) {
-    if (metrics != NULL) {
+          _processor(std::move(processor)) {
+    if (metrics != nullptr) {
         _metrics_enabled = true;
-        _current_connections.reset(new IntGauge(MetricUnit::CONNECTIONS));
+        _current_connections = std::make_unique<IntGauge>(MetricUnit::CONNECTIONS);
         metrics->register_metric("thrift_current_connections", MetricLabels().add("name", name),
                                  _current_connections.get());
 
-        _connections_total.reset(new IntCounter(MetricUnit::CONNECTIONS));
+        _connections_total = std::make_unique<IntCounter>(MetricUnit::CONNECTIONS);
         metrics->register_metric("thrift_connections_total", MetricLabels().add("name", name),
                                  _connections_total.get());
     } else {
@@ -279,11 +304,13 @@ ThriftServer::ThriftServer(const std::string& name, const std::shared_ptr<apache
 
 Status ThriftServer::start() {
     DCHECK(!_started);
-    std::shared_ptr<apache::thrift::protocol::TProtocolFactory> protocol_factory(
-            new apache::thrift::protocol::TBinaryProtocolFactory());
+    auto protocol_factory = std::make_shared<apache::thrift::protocol::TBinaryProtocolFactory>();
+    protocol_factory->setStrict(config::thrift_rpc_strict_mode, true);
+    protocol_factory->setStringSizeLimit(config::thrift_rpc_max_body_size);
+
+    auto thread_factory = std::make_shared<apache::thrift::concurrency::ThreadFactory>();
+
     std::shared_ptr<apache::thrift::concurrency::ThreadManager> thread_mgr;
-    std::shared_ptr<apache::thrift::concurrency::ThreadFactory> thread_factory(
-            new apache::thrift::concurrency::ThreadFactory());
     std::shared_ptr<apache::thrift::transport::TServerTransport> fe_server_transport;
     std::shared_ptr<apache::thrift::transport::TTransportFactory> transport_factory;
 
@@ -295,31 +322,30 @@ Status ThriftServer::start() {
 
     // Note - if you change the transport types here, you must check that the
     // logic in createContext is still accurate.
-    apache::thrift::transport::TServerSocket* server_socket = NULL;
+    apache::thrift::transport::TServerSocket* server_socket = nullptr;
 
     switch (_server_type) {
     case NON_BLOCKING: {
-        if (transport_factory.get() == NULL) {
+        if (transport_factory == nullptr) {
             transport_factory.reset(new apache::thrift::transport::TTransportFactory());
         }
 
         std::shared_ptr<apache::thrift::transport::TNonblockingServerSocket> port(
                 new apache::thrift::transport::TNonblockingServerSocket(_port));
-        _server.reset(new apache::thrift::server::TNonblockingServer(_processor, transport_factory, transport_factory,
-                                                                     protocol_factory, protocol_factory, port,
-                                                                     thread_mgr));
+        _server = std::make_unique<apache::thrift::server::TNonblockingServer>(
+                _processor, transport_factory, transport_factory, protocol_factory, protocol_factory, port, thread_mgr);
         break;
     }
 
     case THREAD_POOL:
         fe_server_transport.reset(new apache::thrift::transport::TServerSocket(_port));
 
-        if (transport_factory.get() == NULL) {
+        if (transport_factory == nullptr) {
             transport_factory.reset(new apache::thrift::transport::TBufferedTransportFactory());
         }
 
-        _server.reset(new apache::thrift::server::TThreadPoolServer(_processor, fe_server_transport, transport_factory,
-                                                                    protocol_factory, thread_mgr));
+        _server = std::make_unique<apache::thrift::server::TThreadPoolServer>(
+                _processor, fe_server_transport, transport_factory, protocol_factory, thread_mgr);
         break;
 
     case THREADED:
@@ -327,12 +353,15 @@ Status ThriftServer::start() {
         //      server_socket->setAcceptTimeout(500);
         fe_server_transport.reset(server_socket);
 
-        if (transport_factory.get() == NULL) {
+        if (transport_factory == nullptr) {
             transport_factory.reset(new apache::thrift::transport::TBufferedTransportFactory());
         }
 
-        _server.reset(new apache::thrift::server::TThreadedServer(_processor, fe_server_transport, transport_factory,
-                                                                  protocol_factory, thread_factory));
+        // Use non-detached thread mode, so the ThreadedServer can correctly wait for all client threads done and exits cleanly.
+        // Refer to https://issues.apache.org/jira/browse/THRIFT-3768
+        thread_factory->setDetached(false);
+        _server = std::make_unique<apache::thrift::server::TThreadedServer>(
+                _processor, fe_server_transport, transport_factory, protocol_factory, thread_factory);
         break;
 
     default:
@@ -348,30 +377,20 @@ Status ThriftServer::start() {
 
     RETURN_IF_ERROR(event_processor->start_and_wait_for_server());
 
-    LOG(INFO) << "ThriftServer '" << _name << "' started on port: " << _port;
+    LOG(INFO) << _name << " has started listening port on " << _port;
 
     DCHECK(_started);
     return Status::OK();
 }
 
 void ThriftServer::stop() {
+    _stopped = true;
     _server->stop();
 }
 
 void ThriftServer::join() {
-    DCHECK(_server_thread != NULL);
-    DCHECK(_started);
+    DCHECK(_server_thread != nullptr);
     _server_thread->join();
 }
 
-void ThriftServer::stop_for_testing() {
-    DCHECK(_server_thread != NULL);
-    DCHECK(_server);
-    DCHECK_EQ(_server_type, THREADED);
-    _server->stop();
-
-    if (_started) {
-        join();
-    }
-}
 } // namespace starrocks

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/catalog/PartitionKeyTest.java
 
@@ -21,9 +34,10 @@
 
 package com.starrocks.catalog;
 
-import com.starrocks.analysis.PartitionValue;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.FeConstants;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.PartitionValue;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -49,7 +63,7 @@ public class PartitionKeyTest {
     private static Column date;
     private static Column datetime;
 
-    private Catalog catalog;
+    private GlobalStateMgr globalStateMgr;
 
     @BeforeClass
     public static void setUp() {
@@ -128,26 +142,26 @@ public class PartitionKeyTest {
 
         // case8
         pk1 = PartitionKey.createPartitionKey(Arrays.asList(new PartitionValue("127"), new PartitionValue("32767"),
-                new PartitionValue("2147483647"), new PartitionValue("9223372036854775807"),
-                new PartitionValue("170141183460469231731687303715884105727"),
-                new PartitionValue("9999-12-31"), new PartitionValue("9999-12-31 23:59:59")),
+                        new PartitionValue("2147483647"), new PartitionValue("9223372036854775807"),
+                        new PartitionValue("170141183460469231731687303715884105727"),
+                        new PartitionValue("9999-12-31"), new PartitionValue("9999-12-31 23:59:59")),
                 allColumns);
         pk2 = PartitionKey.createInfinityPartitionKey(allColumns, true);
         Assert.assertTrue(!pk1.equals(pk2) && pk1.compareTo(pk2) == -1);
 
         // case9
         pk1 = PartitionKey.createPartitionKey(Arrays.asList(new PartitionValue("-128"), new PartitionValue("-32768"),
-                new PartitionValue("-2147483648"), new PartitionValue("-9223372036854775808"),
-                new PartitionValue("-170141183460469231731687303715884105728"),
-                new PartitionValue("0000-01-01"), new PartitionValue("0000-01-01 00:00:00")),
+                        new PartitionValue("-2147483648"), new PartitionValue("-9223372036854775808"),
+                        new PartitionValue("-170141183460469231731687303715884105728"),
+                        new PartitionValue("0000-01-01"), new PartitionValue("0000-01-01 00:00:00")),
                 allColumns);
         pk2 = PartitionKey.createInfinityPartitionKey(allColumns, false);
         Assert.assertTrue(pk1.equals(pk2) && pk1.compareTo(pk2) == 0);
 
         // case10
         pk1 = PartitionKey.createPartitionKey(Arrays.asList(new PartitionValue("-128"), new PartitionValue("-32768"),
-                new PartitionValue("0"), new PartitionValue("-9223372036854775808"),
-                new PartitionValue("0"), new PartitionValue("1970-01-01"), new PartitionValue("1970-01-01 00:00:00")),
+                        new PartitionValue("0"), new PartitionValue("-9223372036854775808"),
+                        new PartitionValue("0"), new PartitionValue("1970-01-01"), new PartitionValue("1970-01-01 00:00:00")),
                 allColumns);
         pk2 = PartitionKey.createInfinityPartitionKey(allColumns, false);
         Assert.assertTrue(!pk1.equals(pk2) && pk1.compareTo(pk2) == 1);
@@ -155,8 +169,8 @@ public class PartitionKeyTest {
 
     @Test
     public void testSerialization() throws Exception {
-        FakeCatalog fakeCatalog = new FakeCatalog();
-        FakeCatalog.setMetaVersion(FeConstants.meta_version);
+        FakeGlobalStateMgr fakeGlobalStateMgr = new FakeGlobalStateMgr();
+        FakeGlobalStateMgr.setMetaVersion(FeConstants.META_VERSION);
 
         // 1. Write objects to file
         File file = new File("./keyRangePartition");

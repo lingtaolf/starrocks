@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/time.h
 
@@ -19,12 +32,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_UTIL_TIME_H
-#define STARROCKS_BE_UTIL_TIME_H
+#pragma once
 
-#include <stdint.h>
-#include <time.h>
+#include <sys/time.h> // timeval, gettimeofday
 
+#include <chrono>
+#include <cstdint>
+#include <ctime>
 #include <string>
 
 #define NANOS_PER_SEC 1000000000ll
@@ -135,5 +149,23 @@ std::string ToStringFromUnixMicros(int64_t us, TimePrecision p = TimePrecision::
 /// Converts input microseconds-since-epoch to date-time string in UTC time zone.
 std::string ToUtcStringFromUnixMicros(int64_t us, TimePrecision p = TimePrecision::Microsecond);
 
+template <typename Duration>
+inline ::timespec TimespecFromTimePoint(const std::chrono::time_point<std::chrono::system_clock, Duration>& atime) {
+    auto s = std::chrono::time_point_cast<std::chrono::seconds>(atime);
+    auto ns = std::chrono::time_point_cast<std::chrono::nanoseconds>(atime) -
+              std::chrono::time_point_cast<std::chrono::nanoseconds>(s);
+
+    ::timespec spec = {.tv_sec = static_cast<std::time_t>(s.time_since_epoch().count()),
+                       .tv_nsec = static_cast<long>(ns.count())};
+    return spec;
+}
+
+inline uint64_t SecondsSinceEpochFromTimePoint(const std::chrono::system_clock::time_point& tp) {
+    return std::chrono::duration_cast<std::chrono::seconds>(tp.time_since_epoch()).count();
+}
+
+inline uint64_t MilliSecondsSinceEpochFromTimePoint(const std::chrono::system_clock::time_point& tp) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(tp.time_since_epoch()).count();
+}
+
 } // namespace starrocks
-#endif

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/persist/DropPartitionInfo.java
 
@@ -21,9 +34,8 @@
 
 package com.starrocks.persist;
 
+import com.google.common.base.Objects;
 import com.google.gson.annotations.SerializedName;
-import com.starrocks.catalog.Catalog;
-import com.starrocks.common.FeMetaVersion;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.persist.gson.GsonUtils;
@@ -76,27 +88,20 @@ public class DropPartitionInfo implements Writable {
         return forceDrop;
     }
 
-    private void readFields(DataInput in) throws IOException {
-        dbId = in.readLong();
-        tableId = in.readLong();
-        partitionName = Text.readString(in);
-    }
-
     public static DropPartitionInfo read(DataInput in) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_74) {
-            DropPartitionInfo info = new DropPartitionInfo();
-            info.readFields(in);
-            return info;
-        } else {
-            String json = Text.readString(in);
-            return GsonUtils.GSON.fromJson(json, DropPartitionInfo.class);
-        }
+        String json = Text.readString(in);
+        return GsonUtils.GSON.fromJson(json, DropPartitionInfo.class);
     }
 
     @Override
     public void write(DataOutput out) throws IOException {
         String json = GsonUtils.GSON.toJson(this);
         Text.writeString(out, json);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hashCode(dbId, tableId, partitionName);
     }
 
     @Override

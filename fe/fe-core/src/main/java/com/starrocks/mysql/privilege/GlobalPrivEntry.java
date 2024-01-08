@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/mysql/privilege/GlobalPrivEntry.java
 
@@ -21,13 +34,14 @@
 
 package com.starrocks.mysql.privilege;
 
-import com.starrocks.analysis.UserIdentity;
-import com.starrocks.catalog.Catalog;
+import com.starrocks.analysis.TablePattern;
 import com.starrocks.common.AnalysisException;
-import com.starrocks.common.CaseSensibility;
-import com.starrocks.common.PatternMatcher;
 import com.starrocks.common.StarRocksFEMetaVersion;
 import com.starrocks.common.io.Text;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.analyzer.AstToStringBuilder;
+import com.starrocks.sql.ast.GrantPrivilegeStmt;
+import com.starrocks.sql.ast.UserIdentity;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -37,7 +51,6 @@ import java.io.IOException;
 
 public class GlobalPrivEntry extends PrivEntry {
     private static final Logger LOG = LogManager.getLogger(GlobalPrivEntry.class);
-
     private Password password;
     // set domainUserIdent when this a password entry and is set by domain resolver.
     // so that when user checking password with user@'IP' and match a entry set by the resolver,
@@ -48,19 +61,17 @@ public class GlobalPrivEntry extends PrivEntry {
     protected GlobalPrivEntry() {
     }
 
-    protected GlobalPrivEntry(PatternMatcher hostPattern, String origHost,
-                              PatternMatcher userPattern, String origUser, boolean isDomain,
-                              Password password, PrivBitSet privSet) {
-        super(hostPattern, origHost, userPattern, origUser, isDomain, privSet);
+    protected GlobalPrivEntry(String origHost, String origUser, boolean isDomain, PrivBitSet privSet, Password password) {
+        super(origHost, origUser, isDomain, privSet);
         this.password = password;
     }
 
     public static GlobalPrivEntry create(String host, String user, boolean isDomain, Password password,
                                          PrivBitSet privs)
             throws AnalysisException {
-        PatternMatcher hostPattern = PatternMatcher.createMysqlPattern(host, CaseSensibility.HOST.getCaseSensibility());
-        PatternMatcher userPattern = PatternMatcher.createMysqlPattern(user, CaseSensibility.USER.getCaseSensibility());
-        return new GlobalPrivEntry(hostPattern, host, userPattern, user, isDomain, password, privs);
+        GlobalPrivEntry globalPrivEntry = new GlobalPrivEntry(host, user, isDomain, privs, password);
+        globalPrivEntry.analyse();
+        return globalPrivEntry;
     }
 
     public Password getPassword() {
@@ -115,12 +126,12 @@ public class GlobalPrivEntry extends PrivEntry {
         }
 
         GlobalPrivEntry otherEntry = (GlobalPrivEntry) other;
-        int res = origHost.compareTo(otherEntry.origHost);
+        int res = otherEntry.origHost.compareTo(origHost);
         if (res != 0) {
-            return -res;
+            return res;
         }
 
-        return -origUser.compareTo(otherEntry.origUser);
+        return otherEntry.realOrigUser.compareTo(realOrigUser);
     }
 
     @Override
@@ -130,7 +141,7 @@ public class GlobalPrivEntry extends PrivEntry {
         }
 
         GlobalPrivEntry otherEntry = (GlobalPrivEntry) other;
-        if (origHost.equals(otherEntry.origHost) && origUser.equals(otherEntry.origUser)
+        if (origHost.equals(otherEntry.origHost) && realOrigUser.equals(otherEntry.realOrigUser)
                 && isDomain == otherEntry.isDomain) {
             return true;
         }
@@ -140,7 +151,7 @@ public class GlobalPrivEntry extends PrivEntry {
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder();
-        sb.append("global priv. host: ").append(origHost).append(", user: ").append(origUser);
+        sb.append("global priv. host: ").append(origHost).append(", user: ").append(realOrigUser);
         sb.append(", priv: ").append(privSet).append(", set by resolver: ").append(isSetByDomainResolver);
         sb.append(", domain user ident: ").append(domainUserIdent);
         return sb.toString();
@@ -163,7 +174,7 @@ public class GlobalPrivEntry extends PrivEntry {
 
     public void readFields(DataInput in) throws IOException {
         super.readFields(in);
-        if (Catalog.getCurrentCatalogStarRocksJournalVersion() >= StarRocksFEMetaVersion.VERSION_2) {
+        if (GlobalStateMgr.getCurrentStateStarRocksMetaVersion() >= StarRocksFEMetaVersion.VERSION_2) {
             this.password = Password.read(in);
         } else {
             int passwordLen = in.readInt();
@@ -171,5 +182,15 @@ public class GlobalPrivEntry extends PrivEntry {
             in.readFully(pdBytes);
             this.password = new Password(pdBytes);
         }
+    }
+
+    @Override
+    public String toGrantSQL() {
+        if (privSet.isEmpty()) {
+            return null;
+        }
+        GrantPrivilegeStmt stmt = new GrantPrivilegeStmt(null, "TABLE", getUserIdent(), false);
+        stmt.setAnalysedTable(privSet, new TablePattern("*", "*"));
+        return AstToStringBuilder.toString(stmt);
     }
 }

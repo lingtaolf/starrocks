@@ -1,31 +1,32 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package com.starrocks.sql.analyzer;
 
 import com.starrocks.utframe.UtFrameUtils;
-import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
-
-import java.io.File;
-import java.util.UUID;
 
 import static com.starrocks.sql.analyzer.AnalyzeTestUtil.analyzeFail;
 import static com.starrocks.sql.analyzer.AnalyzeTestUtil.analyzeSuccess;
 
 public class AnalyzeAnalyticTest {    // use a unique dir so that it won't be conflict with other unit test which
-    // may also start a Mocked Frontend
-    private static String runningDir = "fe/mocked/AnalyzeAnalytic/" + UUID.randomUUID().toString() + "/";
 
     @BeforeClass
     public static void beforeClass() throws Exception {
-        UtFrameUtils.createMinStarRocksCluster(runningDir);
+        UtFrameUtils.createMinStarRocksCluster();
         AnalyzeTestUtil.init();
-    }
-
-    @AfterClass
-    public static void tearDown() {
-        File file = new File(runningDir);
-        file.delete();
     }
 
     @Test
@@ -52,27 +53,30 @@ public class AnalyzeAnalyticTest {    // use a unique dir so that it won't be co
 
     @Test
     public void testRange() {
-        analyzeFail(
-                "select sum(v1) over(partition by v2 order by v3 range between 1 preceding and unbounded following) from t0",
-                "RANGE is only supported with both the lower and upper bounds UNBOUNDED or one UNBOUNDED and the other CURRENT ROW");
+        analyzeFail("select sum(v1) " +
+                        "over(partition by v2 order by v3 range between 1 preceding and unbounded following) from t0",
+                "RANGE is only supported with both the lower " +
+                        "and upper bounds UNBOUNDED or one UNBOUNDED and the other CURRENT ROW");
 
-        analyzeFail(
-                "select sum(v1) over(partition by v2 order by v3 range between unbounded preceding and 1 following) from t0",
-                "RANGE is only supported with both the lower and upper bounds UNBOUNDED or one UNBOUNDED and the other CURRENT ROW");
+        analyzeFail("select sum(v1) " +
+                        "over(partition by v2 order by v3 range between unbounded preceding and 1 following) from t0",
+                "RANGE is only supported with both the lower " +
+                        "and upper bounds UNBOUNDED or one UNBOUNDED and the other CURRENT ROW");
 
-        analyzeFail(
-                "select sum(v1) over(partition by v2 order by v3 range between current row and current row) from t0",
-                "RANGE is only supported with both the lower and upper bounds UNBOUNDED or one UNBOUNDED and the other CURRENT ROW");
+        analyzeFail("select sum(v1) " +
+                        "over(partition by v2 order by v3 range between current row and current row) from t0",
+                "RANGE is only supported with both the lower " +
+                        "and upper bounds UNBOUNDED or one UNBOUNDED and the other CURRENT ROW");
 
         analyzeFail("select sum(v1) over(partition by v2 order by v3 range unbounded following) from t0",
                 "UNBOUNDED FOLLOWING is only allowed for upper bound of BETWEEN");
 
-        analyzeSuccess(
-                "select sum(v1) over(partition by v2 order by v3 range between unbounded preceding and unbounded following) from t0");
-        analyzeSuccess(
-                "select sum(v1) over(partition by v2 order by v3 range between current row and unbounded following) from t0");
-        analyzeSuccess(
-                "select sum(v1) over(partition by v2 order by v3 range between unbounded preceding and current row) from t0");
+        analyzeSuccess("select sum(v1) " +
+                "over(partition by v2 order by v3 range between unbounded preceding and unbounded following) from t0");
+        analyzeSuccess("select sum(v1) " +
+                "over(partition by v2 order by v3 range between current row and unbounded following) from t0");
+        analyzeSuccess("select sum(v1) " +
+                "over(partition by v2 order by v3 range between unbounded preceding and current row) from t0");
         analyzeSuccess("select sum(v1) over(partition by v2 order by v3 range unbounded preceding) from t0");
     }
 

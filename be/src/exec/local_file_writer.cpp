@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/local_file_writer.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,15 +17,17 @@
 
 #include "exec/local_file_writer.h"
 
+#include <utility>
+
 #include "util/error_util.h"
 
 namespace starrocks {
 
-LocalFileWriter::LocalFileWriter(const std::string& path, int64_t start_offset)
-        : _path(path), _start_offset(start_offset), _fp(nullptr) {}
+LocalFileWriter::LocalFileWriter(std::string path, int64_t start_offset)
+        : _path(std::move(path)), _start_offset(start_offset), _fp(nullptr) {}
 
 LocalFileWriter::~LocalFileWriter() {
-    close();
+    (void)close();
 }
 
 Status LocalFileWriter::open() {

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/analysis/VirtualSlotRef.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -24,8 +20,6 @@ package com.starrocks.analysis;
 import com.starrocks.catalog.Type;
 import com.starrocks.common.AnalysisException;
 import org.apache.commons.collections.CollectionUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -37,7 +31,6 @@ import java.util.List;
  * It like a SlotRef except that it is not a real column exist in table.
  */
 public class VirtualSlotRef extends SlotRef {
-    private static final Logger LOG = LogManager.getLogger(VirtualSlotRef.class);
     // results of analysis slot
 
     private TupleDescriptor tupleDescriptor;

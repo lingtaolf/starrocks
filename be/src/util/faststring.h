@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/faststring.h
 
@@ -40,10 +53,10 @@ class faststring {
 public:
     enum { kInitialCapacity = 32 };
 
-    faststring() : data_(initial_data_), len_(0), capacity_(kInitialCapacity) {}
+    faststring() : data_(initial_data_) {}
 
     // Construct a string with the given capacity, in bytes.
-    explicit faststring(size_t capacity) : data_(initial_data_), len_(0), capacity_(kInitialCapacity) {
+    explicit faststring(size_t capacity) : data_(initial_data_) {
         if (capacity > capacity_) {
             data_ = new uint8_t[capacity];
             capacity_ = capacity;
@@ -108,7 +121,7 @@ public:
 
     // Append the given data to the string, resizing capacity as necessary.
     void append(const void* src_v, size_t count) {
-        const uint8_t* src = reinterpret_cast<const uint8_t*>(src_v);
+        const auto* src = reinterpret_cast<const uint8_t*>(src_v);
         EnsureRoomForAppend(count);
         ASAN_UNPOISON_MEMORY_REGION(data_ + len_, count);
 
@@ -202,9 +215,12 @@ public:
             assert(rhs.capacity_ == kInitialCapacity);
             ASAN_UNPOISON_MEMORY_REGION(initial_data_, kInitialCapacity);
             ASAN_UNPOISON_MEMORY_REGION(rhs.initial_data_, kInitialCapacity);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wuninitialized"
             memcpy(tmp_buff, initial_data_, kInitialCapacity);
             memcpy(initial_data_, rhs.initial_data_, kInitialCapacity);
             memcpy(rhs.initial_data_, tmp_buff, kInitialCapacity);
+#pragma GCC diagnostic pop
             std::swap(len_, rhs.len_);
         } else if (data_ == initial_data_) {
             assert(capacity_ == kInitialCapacity);
@@ -234,7 +250,8 @@ public:
     }
 
 private:
-    DISALLOW_COPY_AND_ASSIGN(faststring);
+    faststring(const faststring&) = delete;
+    const faststring& operator=(const faststring&) = delete;
 
     // If necessary, expand the buffer to fit at least 'count' more bytes.
     // If the array has to be grown, it is grown by at least 50%.
@@ -260,10 +277,10 @@ private:
 
     uint8_t* data_;
     uint8_t initial_data_[kInitialCapacity];
-    size_t len_;
+    size_t len_{0};
     // NOTE: we will make a initial buffer as part of the object, so the smallest
     // possible value of capacity_ is kInitialCapacity.
-    size_t capacity_;
+    size_t capacity_{kInitialCapacity};
 };
 
 } // namespace starrocks

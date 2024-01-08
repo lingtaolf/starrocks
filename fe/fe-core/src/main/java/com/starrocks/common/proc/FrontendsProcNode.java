@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/proc/FrontendsProcNode.java
 
@@ -23,15 +36,17 @@ package com.starrocks.common.proc;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.common.Config;
 import com.starrocks.common.Pair;
 import com.starrocks.common.util.TimeUtils;
-import com.starrocks.service.FrontendOptions;
+import com.starrocks.ha.FrontendNodeType;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.system.Frontend;
+import org.apache.commons.validator.routines.InetAddressValidator;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.List;
@@ -44,17 +59,15 @@ public class FrontendsProcNode implements ProcNodeInterface {
     private static final Logger LOG = LogManager.getLogger(FrontendsProcNode.class);
 
     public static final ImmutableList<String> TITLE_NAMES = new ImmutableList.Builder<String>()
-            .add("Name").add("IP").add("HostName").add("EditLogPort").add("HttpPort").add("QueryPort").add("RpcPort")
-            .add("Role").add("IsMaster").add("ClusterId").add("Join").add("Alive")
-            .add("ReplayedJournalId").add("LastHeartbeat").add("IsHelper").add("ErrMsg")
+            .add("Name").add("IP").add("EditLogPort").add("HttpPort").add("QueryPort").add("RpcPort")
+            .add("Role").add("ClusterId").add("Join").add("Alive").add("ReplayedJournalId")
+            .add("LastHeartbeat").add("IsHelper").add("ErrMsg").add("StartTime").add("Version")
             .build();
 
-    public static final int HOSTNAME_INDEX = 2;
+    private GlobalStateMgr globalStateMgr;
 
-    private Catalog catalog;
-
-    public FrontendsProcNode(Catalog catalog) {
-        this.catalog = catalog;
+    public FrontendsProcNode(GlobalStateMgr globalStateMgr) {
+        this.globalStateMgr = globalStateMgr;
     }
 
     @Override
@@ -64,7 +77,7 @@ public class FrontendsProcNode implements ProcNodeInterface {
 
         List<List<String>> infos = Lists.newArrayList();
 
-        getFrontendsInfo(catalog, infos);
+        getFrontendsInfo(globalStateMgr, infos);
 
         for (List<String> info : infos) {
             result.addRow(info);
@@ -73,35 +86,27 @@ public class FrontendsProcNode implements ProcNodeInterface {
         return result;
     }
 
-    public static void getFrontendsInfo(Catalog catalog, List<List<String>> infos) {
-        String masterIp = "";
-        int masterPort = -1;
-        try {
-            InetSocketAddress master = catalog.getHaProtocol().getLeader();
-            masterIp = master.getAddress().getHostAddress();
-            masterPort = master.getPort();
-        } catch (Exception e) {
-            // this may happen when majority of FOLLOWERS are down and no MASTER right now.
-            LOG.warn("failed to get leader: {}", e.getMessage());
+    public static void getFrontendsInfo(GlobalStateMgr globalStateMgr, List<List<String>> infos) {
+        String leaderIp = GlobalStateMgr.getCurrentState().getLeaderIp();
+        if (leaderIp == null) {
+            leaderIp = "";
         }
 
         // get all node which are joined in bdb group
-        List<InetSocketAddress> allFe = catalog.getHaProtocol().getElectableNodes(true /* include leader */);
-        allFe.addAll(catalog.getHaProtocol().getObserverNodes());
-        List<Pair<String, Integer>> allFeHosts = convertToHostPortPair(allFe);
-        List<Pair<String, Integer>> helperNodes = catalog.getHelperNodes();
+        List<InetSocketAddress> allFe = globalStateMgr.getHaProtocol().getElectableNodes(true /* include leader */);
+        allFe.addAll(globalStateMgr.getHaProtocol().getObserverNodes());
+        List<Pair<String, Integer>> helperNodes = globalStateMgr.getHelperNodes();
 
-        for (Frontend fe : catalog.getFrontends(null /* all */)) {
+        for (Frontend fe : globalStateMgr.getFrontends(null /* all */)) {
 
             List<String> info = new ArrayList<String>();
             info.add(fe.getNodeName());
             info.add(fe.getHost());
 
-            info.add(FrontendOptions.getHostnameByIp(fe.getHost()));
             info.add(Integer.toString(fe.getEditLogPort()));
             info.add(Integer.toString(Config.http_port));
 
-            if (fe.getHost().equals(catalog.getSelfNode().first)) {
+            if (fe.getHost().equals(globalStateMgr.getSelfNode().first)) {
                 info.add(Integer.toString(Config.query_port));
                 info.add(Integer.toString(Config.rpc_port));
             } else {
@@ -109,24 +114,38 @@ public class FrontendsProcNode implements ProcNodeInterface {
                 info.add(Integer.toString(fe.getRpcPort()));
             }
 
-            info.add(fe.getRole().name());
-            info.add(String.valueOf(fe.getHost().equals(masterIp) && fe.getEditLogPort() == masterPort));
 
-            info.add(Integer.toString(catalog.getClusterId()));
-            info.add(String.valueOf(isJoin(allFeHosts, fe)));
+            if (fe.getHost().equals(leaderIp)) {
+                info.add(FrontendNodeType.LEADER.toString());
+            } else {
+                info.add(fe.getRole().name());
+            }
 
-            if (fe.getHost().equals(catalog.getSelfNode().first)) {
+            info.add(Integer.toString(globalStateMgr.getClusterId()));
+            info.add(String.valueOf(isJoin(allFe, fe)));
+
+            if (fe.getHost().equals(globalStateMgr.getSelfNode().first)) {
                 info.add("true");
-                info.add(Long.toString(catalog.getEditLog().getMaxJournalId()));
+                info.add(Long.toString(globalStateMgr.getMaxJournalId()));
             } else {
                 info.add(String.valueOf(fe.isAlive()));
                 info.add(Long.toString(fe.getReplayedJournalId()));
             }
             info.add(TimeUtils.longToTimeString(fe.getLastUpdateTime()));
-
             info.add(String.valueOf(isHelperNode(helperNodes, fe)));
-
             info.add(fe.getHeartbeatErrMsg());
+
+            if (fe.isAlive()) {
+                info.add(TimeUtils.longToTimeString(fe.getStartTime()));
+            } else {
+                info.add("NULL");
+            }
+
+            if (fe.getFeVersion() == null) {
+                info.add("NULL");
+            } else {
+                info.add(fe.getFeVersion());
+            }
 
             infos.add(info);
         }
@@ -136,21 +155,29 @@ public class FrontendsProcNode implements ProcNodeInterface {
         return helperNodes.stream().anyMatch(p -> p.first.equals(fe.getHost()) && p.second == fe.getEditLogPort());
     }
 
-    private static boolean isJoin(List<Pair<String, Integer>> allFeHosts, Frontend fe) {
-        for (Pair<String, Integer> pair : allFeHosts) {
-            if (fe.getHost().equals(pair.first) && fe.getEditLogPort() == pair.second) {
+    private static boolean isJoin(List<InetSocketAddress> allFeHosts, Frontend fe) {
+        for (InetSocketAddress addr : allFeHosts) {
+            String realHost = "";
+            try {
+                InetAddress address = addr.getAddress();
+                if (null == address) {
+                    LOG.warn("Failed to get InetAddress {}", addr);
+                    continue;
+                }
+                if (InetAddressValidator.getInstance().isValidInet4Address(fe.getHost())) {
+                    realHost = address.getHostAddress();
+                } else {
+                    realHost = address.getHostName();
+                }
+            } catch (Exception e) {
+                LOG.warn("Failed to get address hostname of fe: {} msg: {}", addr, e);
+                continue;
+            }
+            if (fe.getHost().equals(realHost) && fe.getEditLogPort() == addr.getPort()) {
                 return true;
             }
         }
         return false;
-    }
-
-    private static List<Pair<String, Integer>> convertToHostPortPair(List<InetSocketAddress> addrs) {
-        List<Pair<String, Integer>> hostPortPair = Lists.newArrayList();
-        for (InetSocketAddress addr : addrs) {
-            hostPortPair.add(Pair.create(addr.getAddress().getHostAddress(), addr.getPort()));
-        }
-        return hostPortPair;
     }
 }
 

@@ -1,460 +1,223 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/orc_scanner.cpp
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "exec/orc_scanner.h"
 
-#include "exec/broker_reader.h"
-#include "exec/local_file_reader.h"
-#include "exprs/expr.h"
+#include <memory>
+
+#include "column/array_column.h"
+#include "formats/orc/orc_chunk_reader.h"
+#include "formats/orc/orc_input_stream.h"
+#include "fs/fs.h"
+#include "gutil/strings/substitute.h"
+#include "runtime/broker_mgr.h"
 #include "runtime/descriptors.h"
 #include "runtime/exec_env.h"
-#include "runtime/mem_tracker.h"
-#include "runtime/raw_value.h"
 #include "runtime/runtime_state.h"
-#include "runtime/tuple.h"
-
-// orc include file didn't expose orc::TimezoneError
-// we have to declare it by hand, following is the source code in orc link
-// https://github.com/apache/orc/blob/84353fbfc447b06e0924024a8e03c1aaebd3e7a5/c%2B%2B/src/Timezone.hh#L104-L109
-namespace orc {
-
-class TimezoneError : public std::runtime_error {
-public:
-    TimezoneError(const std::string& what);
-    TimezoneError(const TimezoneError&);
-    virtual ~TimezoneError() noexcept;
-};
-
-} // namespace orc
 
 namespace starrocks {
 
-class ORCFileStream : public orc::InputStream {
+class ORCFileStream : public ORCHdfsFileStream {
 public:
-    ORCFileStream(FileReader* file, std::string filename) : _file(file), _filename(std::move(filename)) {}
+    ORCFileStream(std::shared_ptr<RandomAccessFile> file, uint64_t length, starrocks::ScannerCounter* counter)
+            : ORCHdfsFileStream(file.get(), length, nullptr), _file(std::move(file)), _counter(counter) {}
 
-    ~ORCFileStream() override {
-        if (_file != nullptr) {
-            _file->close();
-            delete _file;
-            _file = nullptr;
-        }
-    }
+    ~ORCFileStream() override { _file.reset(); }
 
-    /**
-     * Get the total length of the file in bytes.
-     */
-    uint64_t getLength() const override { return _file->size(); }
-
-    /**
-     * Get the natural size for reads.
-     * @return the number of bytes that should be read at once
-     */
-    uint64_t getNaturalReadSize() const override { return 128 * 1024; }
-
-    /**
-     * Read length bytes from the file starting at offset into
-     * the buffer starting at buf.
-     * @param buf the starting position of a buffer.
-     * @param length the number of bytes to read.
-     * @param offset the position in the stream to read from.
-     */
     void read(void* buf, uint64_t length, uint64_t offset) override {
-        if (buf == nullptr) {
-            throw orc::ParseError("Buffer is null");
-        }
-
-        int64_t bytes_read = 0;
-        int64_t reads = 0;
-        while (bytes_read < length) {
-            Status result = _file->readat(offset, length - bytes_read, &reads, buf);
-            if (!result.ok()) {
-                throw orc::ParseError("Bad read of " + _filename);
-            }
-            if (reads == 0) {
-                break;
-            }
-            bytes_read += reads; // total read bytes
-            offset += reads;
-            buf = (char*)buf + reads;
-        }
-        if (length != bytes_read) {
-            throw orc::ParseError("Short read of " + _filename + ". expected :" + std::to_string(length) +
-                                  ", actual : " + std::to_string(bytes_read));
-        }
+        SCOPED_RAW_TIMER(&_counter->file_read_ns);
+        ORCHdfsFileStream::read(buf, length, offset);
     }
-
-    /**
-     * Get the name of the stream for error messages.
-     */
-    const std::string& getName() const override { return _filename; }
 
 private:
-    FileReader* _file;
-    std::string _filename;
+    std::shared_ptr<RandomAccessFile> _file;
+    ScannerCounter* _counter;
 };
 
-ORCScanner::ORCScanner(RuntimeState* state, RuntimeProfile* profile, const TBrokerScanRangeParams& params,
-                       const std::vector<TBrokerRangeDesc>& ranges,
-                       const std::vector<TNetworkAddress>& broker_addresses, ScannerCounter* counter)
-        : FileScanner(state, profile, params, counter),
-          _ranges(ranges),
-          _broker_addresses(broker_addresses),
-          // _splittable(params.splittable),
+ORCScanner::ORCScanner(starrocks::RuntimeState* state, starrocks::RuntimeProfile* profile,
+                       const TBrokerScanRange& scan_range, starrocks::ScannerCounter* counter, bool schema_only)
+        : FileScanner(state, profile, scan_range.params, counter, schema_only),
+          _scan_range(scan_range),
+          _max_chunk_size(_state->chunk_size() ? _state->chunk_size() : 4096),
           _next_range(0),
-          _cur_file_eof(true),
-          _scanner_eof(false),
-          _total_groups(0),
-          _current_group(0),
-          _rows_of_group(0),
-          _current_line_of_group(0) {}
-
-ORCScanner::~ORCScanner() {
-    close();
-}
+          _error_counter(0),
+          _status_eof(false) {}
 
 Status ORCScanner::open() {
     RETURN_IF_ERROR(FileScanner::open());
-    if (!_ranges.empty()) {
-        std::list<std::string> include_cols;
-        TBrokerRangeDesc range = _ranges[0];
-        _num_of_columns_from_file =
-                range.__isset.num_of_columns_from_file ? range.num_of_columns_from_file : _src_slot_descs.size();
-        for (int i = 0; i < _num_of_columns_from_file; i++) {
-            auto slot_desc = _src_slot_descs.at(i);
-            include_cols.push_back(slot_desc->col_name());
-        }
-        _row_reader_options.include(include_cols);
-        _row_reader_options.searchArgument(nullptr);
+    if (_scan_range.ranges.empty()) {
+        _status_eof = true;
+        return Status::OK();
     }
+
+    auto range = _scan_range.ranges[0];
+    int num_columns_from_orc = range.__isset.num_of_columns_from_file
+                                       ? implicit_cast<int>(range.num_of_columns_from_file)
+                                       : implicit_cast<int>(_src_slot_descriptors.size());
+
+    // column from path
+    if (range.__isset.num_of_columns_from_file) {
+        int nums = range.columns_from_path.size();
+        for (const auto& rng : _scan_range.ranges) {
+            if (nums != rng.columns_from_path.size()) {
+                return Status::InternalError("Different range different columns.");
+            }
+        }
+    }
+
+    // just slot descriptors that's going to read from orc file.
+    _orc_slot_descriptors.resize(num_columns_from_orc);
+    for (int i = 0; i < num_columns_from_orc; ++i) {
+        _orc_slot_descriptors[i] = _src_slot_descriptors[i];
+    }
+    _orc_reader = std::make_unique<OrcChunkReader>(_state->chunk_size(), _orc_slot_descriptors);
+    _orc_reader->set_broker_load_mode(_strict_mode);
+    RETURN_IF_ERROR(_orc_reader->set_timezone(_state->timezone()));
+    _orc_reader->drop_nanoseconds_in_datetime();
+    _orc_reader->set_runtime_state(_state);
+    _orc_reader->set_case_sensitive(_case_sensitive);
+    RETURN_IF_ERROR(_open_next_orc_reader());
 
     return Status::OK();
 }
 
-Status ORCScanner::get_next(Tuple* tuple, MemPool* tuple_pool, bool* eof) {
-    try {
-        SCOPED_TIMER(_read_timer);
-        // Get one line
-        while (!_scanner_eof) {
-            if (_cur_file_eof) {
-                RETURN_IF_ERROR(open_next_reader());
-                if (_scanner_eof) {
-                    *eof = true;
-                    return Status::OK();
-                } else {
-                    _cur_file_eof = false;
-                }
-            }
-            if (_current_line_of_group >= _rows_of_group) { // read next stripe
-                if (_current_group >= _total_groups) {
-                    _cur_file_eof = true;
-                    continue;
-                }
-                _rows_of_group = _reader->getStripe(_current_group)->getNumberOfRows();
-                _batch = _row_reader->createRowBatch(_rows_of_group);
-                _row_reader->next(*_batch.get());
-
-                _current_line_of_group = 0;
-                ++_current_group;
-            }
-
-            const std::vector<orc::ColumnVectorBatch*>& batch_vec = ((orc::StructVectorBatch*)_batch.get())->fields;
-            for (int column_ipos = 0; column_ipos < _num_of_columns_from_file; ++column_ipos) {
-                auto slot_desc = _src_slot_descs[column_ipos];
-                orc::ColumnVectorBatch* cvb = batch_vec[_position_in_orc_original[column_ipos]];
-
-                if (cvb->hasNulls && !cvb->notNull[_current_line_of_group]) {
-                    if (!slot_desc->is_nullable()) {
-                        std::stringstream str_error;
-                        str_error << "The field name(" << slot_desc->col_name() << ") is not nullable ";
-                        LOG(WARNING) << str_error.str();
-                        return Status::InternalError(str_error.str());
-                    }
-                    _src_tuple->set_null(slot_desc->null_indicator_offset());
-                } else {
-                    int32_t wbytes = 0;
-                    uint8_t tmp_buf[128] = {0};
-                    if (slot_desc->is_nullable()) {
-                        _src_tuple->set_not_null(slot_desc->null_indicator_offset());
-                    }
-                    void* slot = _src_tuple->get_slot(slot_desc->tuple_offset());
-                    StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-
-                    switch (_row_reader->getSelectedType()
-                                    .getSubtype(_position_in_orc_original[column_ipos])
-                                    ->getKind()) {
-                    case orc::BOOLEAN: {
-                        int64_t value = ((orc::LongVectorBatch*)cvb)->data[_current_line_of_group];
-                        if (value == 0) {
-                            str_slot->ptr = reinterpret_cast<char*>(tuple_pool->allocate(5));
-                            if (UNLIKELY(str_slot->ptr == nullptr)) {
-                                return Status::InternalError("Mem usage has exceed the limit of BE");
-                            }
-                            memcpy(str_slot->ptr, "false", 5);
-                            str_slot->len = 5;
-                        } else {
-                            str_slot->ptr = reinterpret_cast<char*>(tuple_pool->allocate(4));
-                            if (UNLIKELY(str_slot->ptr == nullptr)) {
-                                return Status::InternalError("Mem usage has exceed the limit of BE");
-                            }
-                            memcpy(str_slot->ptr, "true", 4);
-                            str_slot->len = 4;
-                        }
-                        break;
-                    }
-                    case orc::BYTE:
-                    case orc::INT:
-                    case orc::SHORT:
-                    case orc::LONG: {
-                        int64_t value = ((orc::LongVectorBatch*)cvb)->data[_current_line_of_group];
-                        wbytes = sprintf((char*)tmp_buf, "%ld", value);
-                        str_slot->ptr = reinterpret_cast<char*>(tuple_pool->allocate(wbytes));
-                        if (UNLIKELY(str_slot->ptr == nullptr)) {
-                            return Status::InternalError("Mem usage has exceed the limit of BE");
-                        }
-                        memcpy(str_slot->ptr, tmp_buf, wbytes);
-                        str_slot->len = wbytes;
-                        break;
-                    }
-                    case orc::FLOAT:
-                    case orc::DOUBLE: {
-                        double value = ((orc::DoubleVectorBatch*)cvb)->data[_current_line_of_group];
-                        wbytes = sprintf((char*)tmp_buf, "%f", value);
-                        str_slot->ptr = reinterpret_cast<char*>(tuple_pool->allocate(wbytes));
-                        if (UNLIKELY(str_slot->ptr == nullptr)) {
-                            return Status::InternalError("Mem usage has exceed the limit of BE");
-                        }
-                        memcpy(str_slot->ptr, tmp_buf, wbytes);
-                        str_slot->len = wbytes;
-                        break;
-                    }
-                    case orc::BINARY:
-                    case orc::CHAR:
-                    case orc::VARCHAR:
-                    case orc::STRING: {
-                        char* value = ((orc::StringVectorBatch*)cvb)->data[_current_line_of_group];
-                        wbytes = ((orc::StringVectorBatch*)cvb)->length[_current_line_of_group];
-                        str_slot->ptr = reinterpret_cast<char*>(tuple_pool->allocate(wbytes));
-                        if (UNLIKELY(str_slot->ptr == nullptr)) {
-                            return Status::InternalError("Mem usage has exceed the limit of BE");
-                        }
-                        memcpy(str_slot->ptr, value, wbytes);
-                        str_slot->len = wbytes;
-                        break;
-                    }
-                    case orc::DECIMAL: {
-                        [[maybe_unused]] int precision;
-                        int scale;
-
-                        //Decimal64VectorBatch handles decimal columns with precision no greater than 18.
-                        //Decimal128VectorBatch handles the others.
-                        std::string decimal_str;
-                        if (dynamic_cast<orc::Decimal64VectorBatch*>(cvb) != nullptr) {
-                            precision = ((orc::Decimal64VectorBatch*)cvb)->precision;
-                            scale = ((orc::Decimal64VectorBatch*)cvb)->scale;
-                            decimal_str =
-                                    std::to_string(((orc::Decimal64VectorBatch*)cvb)->values[_current_line_of_group]);
-                        } else {
-                            precision = ((orc::Decimal128VectorBatch*)cvb)->precision;
-                            scale = ((orc::Decimal128VectorBatch*)cvb)->scale;
-                            decimal_str = ((orc::Decimal128VectorBatch*)cvb)->values[_current_line_of_group].toString();
-                        }
-
-                        int negative = decimal_str[0] == '-' ? 1 : 0;
-                        int decimal_scale_length = decimal_str.size() - negative;
-
-                        std::string v;
-                        if (decimal_scale_length <= scale) {
-                            // decimal(5,2) : the integer of 0.01 is 1, so we should fill 0 befor integer
-                            v = std::string(negative ? "-0." : "0.");
-                            int fill_zero = scale - decimal_scale_length;
-                            while (fill_zero--) {
-                                v += "0";
-                            }
-                            if (negative) {
-                                v += decimal_str.substr(1, decimal_str.length());
-                            } else {
-                                v += decimal_str;
-                            }
-                        } else {
-                            //Orc api will fill in 0 at the end, so size must greater than scale
-                            v = decimal_str.substr(0, decimal_str.size() - scale) + "." +
-                                decimal_str.substr(decimal_str.size() - scale);
-                        }
-
-                        str_slot->ptr = reinterpret_cast<char*>(tuple_pool->allocate(v.size()));
-                        if (UNLIKELY(str_slot->ptr == nullptr)) {
-                            return Status::InternalError("Mem usage has exceed the limit of BE");
-                        }
-                        memcpy(str_slot->ptr, v.c_str(), v.size());
-                        str_slot->len = v.size();
-                        break;
-                    }
-                    case orc::DATE: {
-                        //Date columns record the number of days since the UNIX epoch (1/1/1970 in UTC).
-                        int64_t timestamp = ((orc::LongVectorBatch*)cvb)->data[_current_line_of_group] * 24 * 60 * 60;
-                        DateTimeValue dtv;
-                        if (!dtv.from_unixtime(timestamp, "UTC")) {
-                            std::stringstream str_error;
-                            str_error << "Parse timestamp (" + std::to_string(timestamp) + ") error";
-                            LOG(WARNING) << str_error.str();
-                            return Status::InternalError(str_error.str());
-                        }
-                        dtv.cast_to_date();
-                        char* buf_end = dtv.to_string((char*)tmp_buf);
-                        wbytes = buf_end - (char*)tmp_buf - 1;
-                        str_slot->ptr = reinterpret_cast<char*>(tuple_pool->allocate(wbytes));
-                        if (UNLIKELY(str_slot->ptr == nullptr)) {
-                            return Status::InternalError("Mem usage has exceed the limit of BE");
-                        }
-                        memcpy(str_slot->ptr, tmp_buf, wbytes);
-                        str_slot->len = wbytes;
-                        break;
-                    }
-                    case orc::TIMESTAMP: {
-                        //The time zone of orc's timestamp is stored inside orc's stripe information,
-                        //so the timestamp obtained here is an offset timestamp, so parse timestamp with UTC is actual datetime literal.
-                        int64_t timestamp = ((orc::TimestampVectorBatch*)cvb)->data[_current_line_of_group];
-                        DateTimeValue dtv;
-                        if (!dtv.from_unixtime(timestamp, "UTC")) {
-                            std::stringstream str_error;
-                            str_error << "Parse timestamp (" + std::to_string(timestamp) + ") error";
-                            LOG(WARNING) << str_error.str();
-                            return Status::InternalError(str_error.str());
-                        }
-                        char* buf_end = dtv.to_string((char*)tmp_buf);
-                        wbytes = buf_end - (char*)tmp_buf - 1;
-                        str_slot->ptr = reinterpret_cast<char*>(tuple_pool->allocate(wbytes));
-                        if (UNLIKELY(str_slot->ptr == nullptr)) {
-                            return Status::InternalError("Mem usage has exceed the limit of BE");
-                        }
-                        memcpy(str_slot->ptr, tmp_buf, wbytes);
-                        str_slot->len = wbytes;
-                        break;
-                    }
-                    default: {
-                        std::stringstream str_error;
-                        str_error << "The field name(" << slot_desc->col_name() << ") type not support. ";
-                        LOG(WARNING) << str_error.str();
-                        return Status::InternalError(str_error.str());
-                    }
-                    }
-                }
-            }
-            ++_current_line_of_group;
-
-            // range of current file
-            const TBrokerRangeDesc& range = _ranges.at(_next_range - 1);
-            if (range.__isset.num_of_columns_from_file) {
-                fill_slots_of_columns_from_path(range.num_of_columns_from_file, range.columns_from_path);
-            }
-            COUNTER_UPDATE(_rows_read_counter, 1);
-            SCOPED_TIMER(_materialize_timer);
-            if (fill_dest_tuple(tuple, tuple_pool)) {
-                break; // get one line, break from while
-            }          // else skip this line and continue get_next to return
-        }
-        return Status::OK();
-    } catch (orc::ParseError& e) {
-        std::stringstream str_error;
-        str_error << "ParseError : " << e.what();
-        LOG(WARNING) << str_error.str();
-        return Status::InternalError(str_error.str());
-    } catch (orc::InvalidArgument& e) {
-        std::stringstream str_error;
-        str_error << "ParseError : " << e.what();
-        LOG(WARNING) << str_error.str();
-        return Status::InternalError(str_error.str());
-    } catch (orc::TimezoneError& e) {
-        std::stringstream str_error;
-        str_error << "TimezoneError : " << e.what();
-        LOG(WARNING) << str_error.str();
-        return Status::InternalError(str_error.str());
-    }
+Status ORCScanner::get_schema(std::vector<SlotDescriptor>* schema) {
+    return _orc_reader->get_schema(schema);
 }
 
-Status ORCScanner::open_next_reader() {
+StatusOr<ChunkPtr> ORCScanner::get_next() {
+    SCOPED_RAW_TIMER(&_counter->total_ns);
+    if (_status_eof) {
+        return Status::EndOfFile("eof");
+    }
+
+    ChunkPtr tmp_chunk = nullptr;
     while (true) {
-        if (_next_range >= _ranges.size()) {
-            _scanner_eof = true;
-            return Status::OK();
+        auto result = _next_orc_chunk();
+        if (!result.ok()) {
+            return result;
         }
-        const TBrokerRangeDesc& range = _ranges[_next_range++];
-        std::unique_ptr<FileReader> file_reader;
-        switch (range.file_type) {
-        case TFileType::FILE_LOCAL: {
-            file_reader.reset(new LocalFileReader(range.path, range.start_offset));
+        tmp_chunk = std::move(result.value());
+        if (!tmp_chunk->is_empty()) {
             break;
         }
-        case TFileType::FILE_BROKER: {
-            int64_t file_size = 0;
-            // for compatibility
-            if (range.__isset.file_size) {
-                file_size = range.file_size;
+    }
+    ASSIGN_OR_RETURN(auto cast_chunk, _transfer_chunk(tmp_chunk));
+    // use base class implementation. they are the SAME!!!
+    return materialize(tmp_chunk, cast_chunk);
+}
+
+StatusOr<ChunkPtr> ORCScanner::_next_orc_chunk() {
+    try {
+        ChunkPtr chunk = _create_src_chunk();
+        RETURN_IF_ERROR(_next_orc_batch(&chunk));
+        // fill path column
+        const TBrokerRangeDesc& range = _scan_range.ranges.at(_next_range - 1);
+        if (range.__isset.num_of_columns_from_file) {
+            fill_columns_from_path(chunk, range.num_of_columns_from_file, range.columns_from_path, chunk->num_rows());
+        }
+        return std::move(chunk);
+    } catch (orc::ParseError& e) {
+        std::string s = strings::Substitute("ParseError: $0", e.what());
+        LOG(WARNING) << s;
+        return Status::InternalError(s);
+    } catch (orc::InvalidArgument& e) {
+        std::string s = strings::Substitute("ParseError: $0", e.what());
+        LOG(WARNING) << s;
+        return Status::InternalError(s);
+    }
+    return Status::InternalError("unreachable path");
+}
+
+StatusOr<ChunkPtr> ORCScanner::_transfer_chunk(starrocks::ChunkPtr& src) {
+    SCOPED_RAW_TIMER(&_counter->cast_chunk_ns);
+    ASSIGN_OR_RETURN(ChunkPtr cast_chunk, _orc_reader->cast_chunk_checked(&src));
+    auto range = _scan_range.ranges.at(_next_range - 1);
+    if (range.__isset.num_of_columns_from_file) {
+        for (int i = 0; i < range.columns_from_path.size(); ++i) {
+            auto slot = _src_slot_descriptors[range.num_of_columns_from_file + i];
+            // This happens when there are extra fields in broker load specification
+            // but those extra fields don't match any fields in native table.
+            if (slot != nullptr) {
+                cast_chunk->append_column(src->get_column_by_slot_id(slot->id()), slot->id());
             }
-            file_reader.reset(new BrokerReader(_state->exec_env(), _broker_addresses, _params.properties, range.path,
-                                               range.start_offset, file_size));
-            break;
         }
-        default: {
-            std::stringstream ss;
-            ss << "Unknown file type, type=" << range.file_type;
-            return Status::InternalError(ss.str());
+    }
+    return cast_chunk;
+}
+
+ChunkPtr ORCScanner::_create_src_chunk() {
+    SCOPED_RAW_TIMER(&_counter->init_chunk_ns);
+    ChunkPtr chunk = _orc_reader->create_chunk();
+    return chunk;
+}
+
+Status ORCScanner::_next_orc_batch(ChunkPtr* result) {
+    {
+        SCOPED_RAW_TIMER(&_counter->read_batch_ns);
+        Status status = _orc_reader->read_next();
+        while (status.is_end_of_file()) {
+            RETURN_IF_ERROR(_open_next_orc_reader());
+            status = _orc_reader->read_next();
+            if (status.is_end_of_file()) {
+                continue;
+            }
+            RETURN_IF_ERROR(status);
         }
+        RETURN_IF_ERROR(status);
+    }
+    {
+        SCOPED_RAW_TIMER(&_counter->fill_ns);
+        RETURN_IF_ERROR(_orc_reader->fill_chunk(result));
+        _counter->num_rows_filtered += _orc_reader->get_num_rows_filtered();
+    }
+    return Status::OK();
+}
+
+Status ORCScanner::_open_next_orc_reader() {
+    while (true) {
+        _state->update_num_bytes_scan_from_source(_last_file_size);
+        if (_next_range >= _scan_range.ranges.size()) {
+            return Status::EndOfFile("no more file to be read");
         }
-        RETURN_IF_ERROR(file_reader->open());
-        if (file_reader->size() == 0) {
-            file_reader->close();
+        std::shared_ptr<RandomAccessFile> file;
+        const TBrokerRangeDesc& range_desc = _scan_range.ranges[_next_range];
+        Status st = create_random_access_file(range_desc, _scan_range.broker_addresses[0], _scan_range.params,
+                                              CompressionTypePB::NO_COMPRESSION, &file);
+        if (!st.ok()) {
+            LOG(WARNING) << "Failed to create random-access files. status: " << st.to_string();
+            return st;
+        }
+        const std::string& file_name = file->filename();
+        ASSIGN_OR_RETURN(uint64_t file_size, file->get_size());
+        auto inStream = std::make_unique<ORCFileStream>(file, file_size, _counter);
+        _next_range++;
+        _last_file_size = file_size;
+        _orc_reader->set_read_chunk_size(_max_chunk_size);
+        _orc_reader->set_current_file_name(file_name);
+        st = _orc_reader->init(std::move(inStream));
+        if (st.is_end_of_file()) {
+            LOG(WARNING) << "Failed to init orc reader. filename: " << file_name << ", status: " << st.to_string();
             continue;
         }
-
-        std::unique_ptr<orc::InputStream> inStream =
-                std::unique_ptr<orc::InputStream>(new ORCFileStream(file_reader.release(), range.path));
-        _reader = orc::createReader(std::move(inStream), _options);
-
-        _total_groups = _reader->getNumberOfStripes();
-        _current_group = 0;
-        _rows_of_group = 0;
-        _current_line_of_group = 0;
-        _row_reader = _reader->createRowReader(_row_reader_options);
-
-        //include_colus is in loader columns order, and batch is in the orc order
-        _position_in_orc_original.clear();
-        _position_in_orc_original.resize(_num_of_columns_from_file);
-        int orc_index = 0;
-        auto include_cols = _row_reader_options.getIncludeNames();
-        for (int i = 0; i < _row_reader->getSelectedType().getSubtypeCount(); ++i) {
-            //include columns must in reader field, otherwise createRowReader will throw exception
-            auto pos =
-                    std::find(include_cols.begin(), include_cols.end(), _row_reader->getSelectedType().getFieldName(i));
-            _position_in_orc_original.at(std::distance(include_cols.begin(), pos)) = orc_index++;
-        }
-        return Status::OK();
+        return st;
     }
 }
 
 void ORCScanner::close() {
-    _batch = nullptr;
-    _reader.reset(nullptr);
-    _row_reader.reset(nullptr);
+    FileScanner::close();
+    _orc_reader.reset(nullptr);
 }
 
 } // namespace starrocks

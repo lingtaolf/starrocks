@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/load/loadv2/SparkEtlJobHandlerTest.java
 
@@ -25,19 +38,20 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.analysis.BrokerDesc;
 import com.starrocks.catalog.BrokerMgr;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.FsBroker;
 import com.starrocks.catalog.SparkResource;
 import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.GenericPool;
 import com.starrocks.common.LoadException;
+import com.starrocks.common.TimeoutException;
 import com.starrocks.common.UserException;
 import com.starrocks.common.util.BrokerUtil;
 import com.starrocks.common.util.CommandResult;
 import com.starrocks.common.util.Util;
 import com.starrocks.load.EtlStatus;
 import com.starrocks.load.loadv2.etl.EtlJobConfig;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.thrift.TBrokerFileStatus;
 import com.starrocks.thrift.TBrokerListPathRequest;
 import com.starrocks.thrift.TBrokerListResponse;
@@ -169,7 +183,8 @@ public class SparkEtlJobHandlerTest {
         BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
         SparkPendingTaskAttachment attachment = new SparkPendingTaskAttachment(pendingTaskId);
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
-        handler.submitEtlJob(loadJobId, label, etlJobConfig, resource, brokerDesc, handle, attachment);
+        long sparkLoadSubmitTimeout = Config.spark_load_submit_timeout_second;
+        handler.submitEtlJob(loadJobId, label, etlJobConfig, resource, brokerDesc, handle, attachment, sparkLoadSubmitTimeout);
 
         // check submit etl job success
         Assert.assertEquals(appId, attachment.getAppId());
@@ -206,7 +221,8 @@ public class SparkEtlJobHandlerTest {
         BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
         SparkPendingTaskAttachment attachment = new SparkPendingTaskAttachment(pendingTaskId);
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
-        handler.submitEtlJob(loadJobId, label, etlJobConfig, resource, brokerDesc, handle, attachment);
+        long sparkLoadSubmitTimeout = Config.spark_load_submit_timeout_second;
+        handler.submitEtlJob(loadJobId, label, etlJobConfig, resource, brokerDesc, handle, attachment, sparkLoadSubmitTimeout);
     }
 
     @Test
@@ -234,7 +250,7 @@ public class SparkEtlJobHandlerTest {
 
         new Expectations() {
             {
-                Util.executeCommand(anyString, (String[]) any);
+                Util.executeCommand(anyString, (String[]) any, anyLong);
                 minTimes = 0;
                 result = commandResult;
 
@@ -279,7 +295,42 @@ public class SparkEtlJobHandlerTest {
         Assert.assertEquals(0, status.getDppResult().abnormalRows);
     }
 
-    @Test
+    @Test(expected = TimeoutException.class)
+    public void testGetEtlJobStatusTimeout(@Mocked BrokerUtil brokerUtil, @Mocked Util util,
+                                           @Mocked SparkYarnConfigFiles sparkYarnConfigFiles,
+                                           @Mocked SparkLoadAppHandle handle)
+            throws IOException, UserException {
+
+        new Expectations() {
+            {
+                sparkYarnConfigFiles.prepare();
+                sparkYarnConfigFiles.getConfigDir();
+                result = "./yarn_config";
+
+                Util.executeCommand(anyString, (String[]) any, anyLong);
+                minTimes = 0;
+                result = new TimeoutException("get spark etl job status timeout");
+            }
+        };
+
+        SparkResource resource = new SparkResource(resourceName);
+        Map<String, String> sparkConfigs = resource.getSparkConfigs();
+        sparkConfigs.put("spark.master", "yarn");
+        sparkConfigs.put("spark.submit.deployMode", "cluster");
+        sparkConfigs.put("spark.hadoop.yarn.resourcemanager.address", "127.0.0.1:9999");
+        new Expectations(resource) {
+            {
+                resource.getYarnClientPath();
+                result = Config.yarn_client_path;
+            }
+        };
+
+        BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
+        SparkEtlJobHandler handler = new SparkEtlJobHandler();
+        handler.getEtlJobStatus(handle, appId, loadJobId, etlOutputPath, resource, brokerDesc);
+    }
+
+    @Test(expected = LoadException.class)
     public void testGetEtlJobStatusFailed(@Mocked Util util, @Mocked CommandResult commandResult,
                                           @Mocked SparkYarnConfigFiles sparkYarnConfigFiles,
                                           @Mocked SparkLoadAppHandle handle)
@@ -298,7 +349,7 @@ public class SparkEtlJobHandlerTest {
 
         new Expectations() {
             {
-                Util.executeCommand(anyString, (String[]) any);
+                Util.executeCommand(anyString, (String[]) any, anyLong);
                 minTimes = 0;
                 result = commandResult;
             }
@@ -319,9 +370,8 @@ public class SparkEtlJobHandlerTest {
         BrokerDesc brokerDesc = new BrokerDesc(broker, Maps.newHashMap());
         SparkEtlJobHandler handler = new SparkEtlJobHandler();
 
-        // yarn finished and spark failed
-        EtlStatus status = handler.getEtlJobStatus(null, appId, loadJobId, etlOutputPath, resource, brokerDesc);
-        Assert.assertEquals(TEtlState.CANCELLED, status.getState());
+        // yarn application status failed
+        handler.getEtlJobStatus(null, appId, loadJobId, etlOutputPath, resource, brokerDesc);
     }
 
     @Test
@@ -344,7 +394,7 @@ public class SparkEtlJobHandlerTest {
 
         new Expectations() {
             {
-                Util.executeCommand(anyString, (String[]) any);
+                Util.executeCommand(anyString, (String[]) any, anyLong);
                 minTimes = 0;
                 result = commandResult;
             }
@@ -371,7 +421,7 @@ public class SparkEtlJobHandlerTest {
     }
 
     @Test
-    public void testGetEtlFilePaths(@Mocked TFileBrokerService.Client client, @Mocked Catalog catalog,
+    public void testGetEtlFilePaths(@Mocked TFileBrokerService.Client client, @Mocked GlobalStateMgr globalStateMgr,
                                     @Injectable BrokerMgr brokerMgr) throws Exception {
         // list response
         TBrokerListResponse response = new TBrokerListResponse();
@@ -404,7 +454,7 @@ public class SparkEtlJobHandlerTest {
             {
                 client.listPath((TBrokerListPathRequest) any);
                 result = response;
-                catalog.getBrokerMgr();
+                globalStateMgr.getBrokerMgr();
                 result = brokerMgr;
                 brokerMgr.getBroker(anyString, anyString);
                 result = fsBroker;

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/system/HeartbeatResponse.java
 
@@ -21,8 +34,10 @@
 
 package com.starrocks.system;
 
+import com.google.gson.annotations.SerializedName;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
+import com.starrocks.persist.gson.GsonUtils;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -42,17 +57,25 @@ public class HeartbeatResponse implements Writable {
         OK, BAD
     }
 
+    public enum AliveStatus {
+        ALIVE, NOT_ALIVE
+    }
+
+    @SerializedName(value = "type")
     protected Type type;
     protected boolean isTypeRead = false;
 
+    @SerializedName(value = "status")
     protected HbStatus status;
 
-    /**
-     * msg and hbTime are no need to be synchronized to other Frontends,
-     * and only Master Frontend has these info
-     */
+    @SerializedName(value = "msg")
     protected String msg;
+
+    @SerializedName(value = "hbTime")
     protected long hbTime;
+
+    @SerializedName(value = "aliveStatus")
+    public AliveStatus aliveStatus;
 
     public HeartbeatResponse(Type type) {
         this.type = type;
@@ -98,8 +121,7 @@ public class HeartbeatResponse implements Writable {
 
     @Override
     public void write(DataOutput out) throws IOException {
-        Text.writeString(out, type.name());
-        Text.writeString(out, status.name());
+        Text.writeString(out, GsonUtils.GSON.toJson(this));
     }
 
     public void readFields(DataInput in) throws IOException {

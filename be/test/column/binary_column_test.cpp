@@ -1,23 +1,16 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/test/column/binary_column_test.cpp
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "column/binary_column.h"
 
@@ -27,9 +20,10 @@
 #include "column/const_column.h"
 #include "column/fixed_length_column.h"
 #include "column/nullable_column.h"
+#include "column/vectorized_fwd.h"
 #include "testutil/parallel_test.h"
 
-namespace starrocks::vectorized {
+namespace starrocks {
 
 // NOLINTNEXTLINE
 PARALLEL_TEST(BinaryColumnTest, test_create) {
@@ -37,6 +31,81 @@ PARALLEL_TEST(BinaryColumnTest, test_create) {
     ASSERT_TRUE(column->is_binary());
     ASSERT_FALSE(column->is_nullable());
     ASSERT_EQ(0u, column->size());
+}
+
+// NOLINTNEXTLINE
+PARALLEL_TEST(BinaryColumnTest, test_binary_column_upgrade_if_overflow) {
+    // small column
+    auto column = BinaryColumn::create();
+    for (size_t i = 0; i < 10; i++) {
+        column->append(std::to_string(i));
+    }
+    auto ret = column->upgrade_if_overflow();
+    ASSERT_TRUE(ret.ok());
+    ASSERT_TRUE(ret.value() == nullptr);
+
+#ifdef NDEBUG
+    // offset overflow
+    column = BinaryColumn::create();
+    size_t count = 1 << 30;
+    for (size_t i = 0; i < count; i++) {
+        column->append(std::to_string(i));
+    }
+    ret = column->upgrade_if_overflow();
+    ASSERT_TRUE(ret.ok());
+    ASSERT_TRUE(ret.value()->is_large_binary());
+    ASSERT_EQ(ret.value()->size(), count);
+
+    for (size_t i = 0; i < count; i++) {
+        ASSERT_EQ(ret.value()->get(i).get_slice().to_string(), std::to_string(i));
+    }
+
+    /*
+    // row size overflow
+    // the case will allocate a lot of memory, so temp remove it
+    count = Column::MAX_CAPACITY_LIMIT + 5;
+    column = BinaryColumn::create();
+    column->reserve(count);
+    for (size_t i = 0; i < count; i++) {
+        column->append("a");
+    }
+    ret = column->upgrade_if_overflow();
+    ASSERT_TRUE(!ret.ok());
+    */
+#endif
+}
+
+// NOLINTNEXTLINE
+PARALLEL_TEST(BinaryColumnTest, test_binary_column_downgrade) {
+    auto column = BinaryColumn::create();
+    column->append_string("test");
+    ASSERT_FALSE(column->has_large_column());
+    auto ret = column->downgrade();
+    ASSERT_TRUE(ret.ok());
+    ASSERT_TRUE(ret.value() == nullptr);
+
+    auto large_column = LargeBinaryColumn::create();
+    ASSERT_TRUE(large_column->has_large_column());
+    for (size_t i = 0; i < 10; i++) {
+        large_column->append_string(std::to_string(i));
+    }
+    ret = large_column->downgrade();
+    ASSERT_TRUE(ret.ok());
+    ASSERT_FALSE(ret.value()->has_large_column());
+    ASSERT_EQ(ret.value()->size(), 10);
+    for (size_t i = 0; i < 10; i++) {
+        ASSERT_EQ(ret.value()->get(i).get_slice(), Slice(std::to_string(i)));
+    }
+
+#ifdef NDEBUG
+    large_column = LargeBinaryColumn::create();
+    size_t count = 1 << 29;
+    for (size_t i = 0; i < count; i++) {
+        large_column->append("0123456789");
+    }
+    ret = large_column->downgrade();
+    ASSERT_FALSE(ret.ok());
+#endif
 }
 
 // NOLINTNEXTLINE
@@ -71,7 +140,7 @@ PARALLEL_TEST(BinaryColumnTest, test_filter) {
         column->append(std::to_string(i));
     }
 
-    Column::Filter filter;
+    Filter filter;
     for (int k = 0; k < 100; ++k) {
         filter.push_back(k % 2);
     }
@@ -167,23 +236,6 @@ PARALLEL_TEST(BinaryColumnTest, test_compare_at) {
             ASSERT_LT(c1->compare_at(i, j, *c2, -1), 0);
             ASSERT_GT(c2->compare_at(j, i, *c1, -1), 0);
         }
-    }
-}
-
-// NOLINTNEXTLINE
-PARALLEL_TEST(BinaryColumnTest, test_serde) {
-    std::vector<Slice> strings{{"bbb"}, {"bbc"}, {"ccc"}};
-    auto c1 = BinaryColumn::create();
-    auto c2 = BinaryColumn::create();
-    c1->append_strings(strings);
-
-    std::vector<uint8_t> buffer;
-    buffer.resize(c1->serialize_size());
-    c1->serialize_column(buffer.data());
-    c2->deserialize_column(buffer.data());
-
-    for (size_t i = 0; i < c1->size(); i++) {
-        ASSERT_EQ(c1->get_slice(i), c2->get_slice(i));
     }
 }
 
@@ -495,4 +547,122 @@ PARALLEL_TEST(BinaryColumnTest, test_clone_empty) {
     ASSERT_EQ(0, c2->size());
 }
 
-} // namespace starrocks::vectorized
+// NOLINTNEXTLINE
+PARALLEL_TEST(BinaryColumnTest, test_update_rows) {
+    auto c1 = BinaryColumn::create();
+    c1->append_datum("abc");
+    c1->append_datum("def");
+    c1->append_datum("ghi");
+    c1->append_datum("jkl");
+    c1->append_datum("mno");
+
+    std::vector<uint32_t> replace_idxes = {1, 3};
+    auto c2 = BinaryColumn::create();
+    c2->append_datum("pq");
+    c2->append_datum("rstu");
+    c1->update_rows(*c2.get(), replace_idxes.data());
+
+    auto slices = c1->get_data();
+    EXPECT_EQ(5, c1->size());
+    ASSERT_EQ("abc", slices[0]);
+    ASSERT_EQ("pq", slices[1]);
+    ASSERT_EQ("ghi", slices[2]);
+    ASSERT_EQ("rstu", slices[3]);
+    ASSERT_EQ("mno", slices[4]);
+
+    auto c3 = BinaryColumn::create();
+    c3->append_datum("ab");
+    c3->append_datum("cdef");
+    c1->update_rows(*c3.get(), replace_idxes.data());
+
+    slices = c1->get_data();
+    EXPECT_EQ(5, c1->size());
+    ASSERT_EQ("abc", slices[0]);
+    EXPECT_EQ("ab", slices[1]);
+    ASSERT_EQ("ghi", slices[2]);
+    ASSERT_EQ("cdef", slices[3]);
+    ASSERT_EQ("mno", slices[4]);
+
+    auto c4 = BinaryColumn::create();
+    std::vector<uint32_t> new_replace_idxes = {0, 1};
+    c4->append_datum("ab");
+    c4->append_datum("cdef");
+    c1->update_rows(*c4.get(), new_replace_idxes.data());
+
+    slices = c1->get_data();
+    EXPECT_EQ(5, c1->size());
+    ASSERT_EQ("ab", slices[0]);
+    EXPECT_EQ("cdef", slices[1]);
+    ASSERT_EQ("ghi", slices[2]);
+    ASSERT_EQ("cdef", slices[3]);
+    ASSERT_EQ("mno", slices[4]);
+
+#ifdef NDEBUG
+    // This case will alloc a lot of memory (16G) and run slowly,
+    // So i temp comment it and will open if i find one better solution
+    /*
+    size_t count = (1ul << 31ul) + 5;
+    auto c5 = BinaryColumn::create();
+    c5->get_bytes().resize(count);
+    c5->get_offset().resize(count + 1);
+    for (size_t i = 0; i < c5->get_offset().size(); i++) {
+        c5->get_offset()[i] = i;
+    }
+
+    auto c6 = BinaryColumn::create();
+    c6->append("22");
+
+    std::vector<uint32_t> c6_replace_idxes = {0};
+    ASSERT_TRUE(c5->update_rows(*c6, c6_replace_idxes.data()).ok());
+    ASSERT_EQ(c5->size(), count);
+    */
+#endif
+}
+
+// NOLINTNEXTLINE
+PARALLEL_TEST(BinaryColumnTest, test_xor_checksum) {
+    auto column = BinaryColumn::create();
+    std::string str;
+    str.reserve(3000);
+    for (int i = 0; i <= 1000; i++) {
+        str.append(std::to_string(i));
+    }
+    column->append(str);
+    int64_t checksum = column->xor_checksum(0, 1);
+    int64_t expected_checksum = 3546653113525744178L;
+    ASSERT_EQ(checksum, expected_checksum);
+}
+
+// NOLINTNEXTLINE
+PARALLEL_TEST(BinaryColumnTest, test_replicate) {
+    auto c1 = BinaryColumn::create();
+    c1->append_datum("abc");
+    c1->append_datum("def");
+
+    Offsets offsets;
+    offsets.push_back(0);
+    offsets.push_back(3);
+    offsets.push_back(5);
+
+    auto c2 = c1->replicate(offsets);
+
+    auto slices = down_cast<BinaryColumn*>(c2.get())->get_data();
+    ASSERT_EQ(5, c2->size());
+    ASSERT_EQ("abc", slices[0]);
+    ASSERT_EQ("abc", slices[1]);
+    ASSERT_EQ("abc", slices[2]);
+    ASSERT_EQ("def", slices[3]);
+    ASSERT_EQ("def", slices[4]);
+}
+
+PARALLEL_TEST(BinaryColumnTest, test_reference_memory_usage) {
+    auto column = BinaryColumn::create();
+    column->append("");
+    column->append("1");
+    column->append("23");
+    column->append("456");
+
+    ASSERT_EQ(0, column->Column::reference_memory_usage());
+}
+
+} // namespace starrocks

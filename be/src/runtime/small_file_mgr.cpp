@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/runtime/small_file_mgr.cpp
 
@@ -21,34 +34,33 @@
 
 #include "runtime/small_file_mgr.h"
 
-#include <stdint.h>
-#include <stdio.h>
-
-#include <boost/algorithm/string/classification.hpp> // boost::is_any_of
-#include <boost/algorithm/string/predicate.hpp>      // boost::algorithm::starts_with
+#include <boost/algorithm/string/predicate.hpp> // boost::algorithm::starts_with
+#include <cstdint>
+#include <cstdio>
 #include <sstream>
+#include <utility>
 
+#include "agent/master_info.h"
 #include "common/status.h"
-#include "env/env.h"
-#include "gen_cpp/HeartbeatService.h"
+#include "fs/fs.h"
+#include "fs/fs_util.h"
 #include "gutil/strings/split.h"
 #include "gutil/strings/substitute.h"
 #include "http/http_client.h"
 #include "runtime/exec_env.h"
-#include "util/file_utils.h"
 #include "util/md5.h"
 #include "util/starrocks_metrics.h"
 
 namespace starrocks {
 
-SmallFileMgr::SmallFileMgr(ExecEnv* env, const std::string& local_path) : _exec_env(env), _local_path(local_path) {
+SmallFileMgr::SmallFileMgr(ExecEnv* env, std::string local_path) : _exec_env(env), _local_path(std::move(local_path)) {
     REGISTER_GAUGE_STARROCKS_METRIC(small_file_cache_count, [this]() {
         std::lock_guard<std::mutex> l(_lock);
         return _file_cache.size();
     });
 }
 
-SmallFileMgr::~SmallFileMgr() {}
+SmallFileMgr::~SmallFileMgr() = default;
 
 Status SmallFileMgr::init() {
     RETURN_IF_ERROR(_load_local_files());
@@ -56,20 +68,20 @@ Status SmallFileMgr::init() {
 }
 
 Status SmallFileMgr::_load_local_files() {
-    RETURN_IF_ERROR(FileUtils::create_dir(_local_path));
+    RETURN_IF_ERROR(fs::create_directories(_local_path));
 
-    auto scan_cb = [this](const char* file) {
-        if (is_dot_or_dotdot(file)) {
+    auto scan_cb = [this](std::string_view file) {
+        if (file == "." || file == "..") {
             return true;
         }
-        auto st = _load_single_file(_local_path, file);
+        auto st = _load_single_file(_local_path, std::string(file));
         if (!st.ok()) {
-            LOG(WARNING) << "load small file failed: " << st.get_error_msg();
+            LOG(WARNING) << "load small file failed: " << st.message();
         }
         return true;
     };
 
-    RETURN_IF_ERROR(Env::Default()->iterate_dir(_local_path, scan_cb));
+    RETURN_IF_ERROR(FileSystem::Default()->iterate_dir(_local_path, scan_cb));
     return Status::OK();
 }
 
@@ -87,8 +99,7 @@ Status SmallFileMgr::_load_single_file(const std::string& path, const std::strin
         return Status::InternalError(strings::Substitute("File with same id is already been loaded: $0", file_id));
     }
 
-    std::string file_md5;
-    RETURN_IF_ERROR(FileUtils::md5sum(path + "/" + file_name, &file_md5));
+    ASSIGN_OR_RETURN(auto file_md5, fs::md5sum(path + "/" + file_name));
     if (file_md5 != md5) {
         return Status::InternalError(strings::Substitute("Invalid md5 of file: $0", file_name));
     }
@@ -131,7 +142,7 @@ Status SmallFileMgr::get_file(int64_t file_id, const std::string& md5, std::stri
 }
 
 Status SmallFileMgr::_check_file(const CacheEntry& entry, const std::string& md5) {
-    if (!FileUtils::check_exist(entry.path)) {
+    if (!fs::path_exist(entry.path)) {
         return Status::InternalError("file not exist");
     }
     if (!boost::iequals(md5, entry.md5)) {
@@ -159,9 +170,9 @@ Status SmallFileMgr::_download_file(int64_t file_id, const std::string& md5, std
     HttpClient client;
 
     std::stringstream url_ss;
-    TMasterInfo* master_info = _exec_env->master_info();
-    url_ss << master_info->network_address.hostname << ":" << master_info->http_port << "/api/get_small_file?"
-           << "file_id=" << file_id << "&token=" << master_info->token;
+    TMasterInfo master_info = get_master_info();
+    url_ss << master_info.network_address.hostname << ":" << master_info.http_port << "/api/get_small_file?"
+           << "file_id=" << file_id << "&token=" << master_info.token;
 
     std::string url = url_ss.str();
 

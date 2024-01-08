@@ -19,14 +19,16 @@ applications, and to alter it and redistribute it freely, subject to the followi
 3. This notice may not be removed or altered from any source distribution.
 */
 
-#ifndef PDQSORT_H
-#define PDQSORT_H
+#pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <functional>
 #include <iterator>
 #include <utility>
+
+#include "common/compiler_util.h"
 
 #if __cplusplus >= 201103L
 #include <cstdint>
@@ -594,5 +596,3 @@ inline void pdqsort_branchless(Iter begin, Iter end) {
 }
 
 #undef PDQSORT_PREFER_MOVE
-
-#endif

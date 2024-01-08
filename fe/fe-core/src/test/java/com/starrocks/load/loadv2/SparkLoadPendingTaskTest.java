@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/load/loadv2/SparkLoadPendingTaskTest.java
 
@@ -24,13 +37,8 @@ package com.starrocks.load.loadv2;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.analysis.BrokerDesc;
-import com.starrocks.analysis.DataDescription;
-import com.starrocks.analysis.PartitionKeyDesc;
-import com.starrocks.analysis.PartitionNames;
-import com.starrocks.analysis.PartitionValue;
-import com.starrocks.analysis.SingleRangePartitionDesc;
+import com.starrocks.analysis.DateLiteral;
 import com.starrocks.catalog.AggregateType;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.DistributionInfo;
@@ -56,6 +64,12 @@ import com.starrocks.load.loadv2.etl.EtlJobConfig.EtlIndex;
 import com.starrocks.load.loadv2.etl.EtlJobConfig.EtlPartition;
 import com.starrocks.load.loadv2.etl.EtlJobConfig.EtlPartitionInfo;
 import com.starrocks.load.loadv2.etl.EtlJobConfig.EtlTable;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.DataDescription;
+import com.starrocks.sql.ast.PartitionKeyDesc;
+import com.starrocks.sql.ast.PartitionNames;
+import com.starrocks.sql.ast.PartitionValue;
+import com.starrocks.sql.ast.SingleRangePartitionDesc;
 import mockit.Expectations;
 import mockit.Injectable;
 import mockit.Mock;
@@ -73,7 +87,7 @@ public class SparkLoadPendingTaskTest {
     public void testExecuteTask(@Injectable SparkLoadJob sparkLoadJob,
                                 @Injectable SparkResource resource,
                                 @Injectable BrokerDesc brokerDesc,
-                                @Mocked Catalog catalog,
+                                @Mocked GlobalStateMgr globalStateMgr,
                                 @Injectable SparkLoadAppHandle handle,
                                 @Injectable Database database,
                                 @Injectable OlapTable table) throws LoadException {
@@ -108,7 +122,7 @@ public class SparkLoadPendingTaskTest {
 
         new Expectations() {
             {
-                catalog.getDb(dbId);
+                globalStateMgr.getDb(dbId);
                 result = database;
                 sparkLoadJob.getHandle();
                 result = handle;
@@ -139,7 +153,8 @@ public class SparkLoadPendingTaskTest {
             public void submitEtlJob(long loadJobId, String loadLabel, EtlJobConfig etlJobConfig,
                                      SparkResource resource, BrokerDesc brokerDesc,
                                      SparkLoadAppHandle handle,
-                                     SparkPendingTaskAttachment attachment) throws LoadException {
+                                     SparkPendingTaskAttachment attachment,
+                                     Long sparkLoadSubmitTimeout) throws LoadException {
                 attachment.setAppId(appId);
             }
         };
@@ -156,12 +171,12 @@ public class SparkLoadPendingTaskTest {
     public void testNoDb(@Injectable SparkLoadJob sparkLoadJob,
                          @Injectable SparkResource resource,
                          @Injectable BrokerDesc brokerDesc,
-                         @Mocked Catalog catalog) throws LoadException {
+                         @Mocked GlobalStateMgr globalStateMgr) throws LoadException {
         long dbId = 0L;
 
         new Expectations() {
             {
-                catalog.getDb(dbId);
+                globalStateMgr.getDb(dbId);
                 result = null;
             }
         };
@@ -174,7 +189,7 @@ public class SparkLoadPendingTaskTest {
     public void testNoTable(@Injectable SparkLoadJob sparkLoadJob,
                             @Injectable SparkResource resource,
                             @Injectable BrokerDesc brokerDesc,
-                            @Mocked Catalog catalog,
+                            @Mocked GlobalStateMgr globalStateMgr,
                             @Injectable Database database) throws LoadException {
         long dbId = 0L;
         long tableId = 1L;
@@ -190,7 +205,7 @@ public class SparkLoadPendingTaskTest {
 
         new Expectations() {
             {
-                catalog.getDb(dbId);
+                globalStateMgr.getDb(dbId);
                 result = database;
                 database.getTable(tableId);
                 result = null;
@@ -205,7 +220,7 @@ public class SparkLoadPendingTaskTest {
     public void testRangePartitionHashDistribution(@Injectable SparkLoadJob sparkLoadJob,
                                                    @Injectable SparkResource resource,
                                                    @Injectable BrokerDesc brokerDesc,
-                                                   @Mocked Catalog catalog,
+                                                   @Mocked GlobalStateMgr globalStateMgr,
                                                    @Injectable Database database,
                                                    @Injectable OlapTable table)
             throws LoadException, DdlException, AnalysisException {
@@ -258,7 +273,7 @@ public class SparkLoadPendingTaskTest {
 
         new Expectations() {
             {
-                catalog.getDb(dbId);
+                globalStateMgr.getDb(dbId);
                 result = database;
                 database.getTable(tableId);
                 result = table;
@@ -380,5 +395,16 @@ public class SparkLoadPendingTaskTest {
         etlPartitions = etlPartitionInfo.partitions;
         Assert.assertEquals(1, etlPartitions.size());
         Assert.assertEquals(partition3Id, etlPartitions.get(0).partitionId);
+    }
+
+    @Test
+    public void testConvertDateLiteralToDouble() throws AnalysisException {
+        Object result = SparkLoadPendingTask.convertDateLiteralToNumber(
+                new DateLiteral("2015-03-01", ScalarType.DATE));
+        Assert.assertEquals(1031777L, result);
+
+        result = SparkLoadPendingTask.convertDateLiteralToNumber(
+                new DateLiteral("2015-03-01 12:00:00", ScalarType.DATETIME));
+        Assert.assertEquals(20150301120000L, result);
     }
 }

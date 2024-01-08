@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/test/util/new_metrics_test.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -33,8 +29,8 @@ namespace starrocks {
 
 class MetricsTest : public testing::Test {
 public:
-    MetricsTest() {}
-    virtual ~MetricsTest() {}
+    MetricsTest() = default;
+    ~MetricsTest() override = default;
 };
 
 TEST_F(MetricsTest, Counter) {
@@ -224,8 +220,8 @@ TEST_F(MetricsTest, MetricLabels) {
 
 class TestMetricsVisitor : public MetricsVisitor {
 public:
-    virtual ~TestMetricsVisitor() {}
-    void visit(const std::string& prefix, const std::string& name, MetricCollector* collector) {
+    ~TestMetricsVisitor() override = default;
+    void visit(const std::string& prefix, const std::string& name, MetricCollector* collector) override {
         for (auto& it : collector->metrics()) {
             Metric* metric = it.second;
             auto& labels = it.first;

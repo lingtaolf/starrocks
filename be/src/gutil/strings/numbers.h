@@ -3,14 +3,12 @@
 //
 // Convert strings to numbers or numbers to strings.
 
-#ifndef STRINGS_NUMBERS_H_
-#define STRINGS_NUMBERS_H_
+#pragma once
 
-#include <stddef.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-
+#include <cstddef>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <functional>
 using std::binary_function;
 using std::less;
@@ -35,7 +33,7 @@ using std::vector;
 string FpToString(Fprint fp);
 
 // Formats a uint128 as a 32-digit hex string.
-string Uint128ToHexString(uint128 ui128);
+string Uint128ToHexString(const uint128& ui128);
 
 // Convert strings to numeric values, with strict error checking.
 // Leading and trailing spaces are allowed.
@@ -61,7 +59,7 @@ bool safe_strtod(const string& str, double* value);
 
 // Parses buffer_size many characters from startptr into value.
 bool safe_strto32(const char* startptr, int buffer_size, int32* value);
-bool safe_strto64(const char* startptr, int buffer_size, int64* value);
+bool safe_strto64(const char* startptr, int64 buffer_size, int64* value);
 
 // Parses with a fixed base between 2 and 36. For base 16, leading "0x" is ok.
 // If base is set to 0, its value is inferred from the beginning of str:
@@ -564,5 +562,3 @@ bool ParseDoubleRange(const char* text, int len, const char** end, double* from,
 // inline string UInt64ToString(uint64 ui64) {
 //   return StringPrintf("%7" PRIu64, ui64);
 // }
-
-#endif // STRINGS_NUMBERS_H_

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/wrap/gmock.h
-
 /*
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +12,7 @@
  * limitations under the License.
  */
 
-#ifndef GMOCK_WRAPPER_H
-#define GMOCK_WRAPPER_H
+#pragma once
 
 // we need to disable a whole set of warnings as we include gtest.h
 // restore most of the warnings after the file is loaded.
@@ -45,5 +40,3 @@ DIAGNOSTIC_IGNORE("-Wweak-vtables")
 #include "gmock/gmock.h"
 
 DIAGNOSTIC_POP
-
-#endif

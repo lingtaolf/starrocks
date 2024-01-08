@@ -1,52 +1,47 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package com.starrocks.statistic;
 
-import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.starrocks.catalog.Catalog;
-import com.starrocks.catalog.Column;
-import com.starrocks.catalog.Database;
-import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
-import com.starrocks.common.util.MasterDaemon;
-import com.starrocks.statistic.Constants.AnalyzeType;
-import com.starrocks.statistic.Constants.ScheduleStatus;
-import com.starrocks.statistic.Constants.ScheduleType;
+import com.starrocks.common.FeConstants;
+import com.starrocks.common.util.DateUtils;
+import com.starrocks.common.util.FrontendDaemon;
+import com.starrocks.common.util.TimeUtils;
+import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.statistic.StatsConstants.AnalyzeType;
+import com.starrocks.statistic.StatsConstants.ScheduleStatus;
+import com.starrocks.statistic.StatsConstants.ScheduleType;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.format.DateTimeParseException;
 import java.util.Collections;
-import java.util.Comparator;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.stream.Collectors;
 
-public class StatisticAutoCollector extends MasterDaemon {
+public class StatisticAutoCollector extends FrontendDaemon {
     private static final Logger LOG = LogManager.getLogger(StatisticAutoCollector.class);
 
-    private static final StatisticExecutor statisticExecutor = new StatisticExecutor();
+    private static final StatisticExecutor STATISTIC_EXECUTOR = new StatisticExecutor();
 
     public StatisticAutoCollector() {
-        super("statistic auto collector", Config.statistic_collect_interval_sec * 1000);
-    }
-
-    private static class TableCollectJob {
-        public AnalyzeJob job;
-        public Database db;
-        public Table table;
-        public List<String> columns;
-
-        private void tryCollect() throws Exception {
-            if (AnalyzeType.FULL == job.getType()) {
-                statisticExecutor.fullCollectStatisticSync(db.getId(), table.getId(), columns);
-            } else if (AnalyzeType.SAMPLE == job.getType()) {
-                statisticExecutor
-                        .sampleCollectStatisticSync(db.getId(), table.getId(), columns, job.getSampleCollectRows());
-            }
-        }
+        super("AutoStatistic", Config.statistic_collect_interval_sec * 1000);
     }
 
     @Override
@@ -56,226 +51,102 @@ public class StatisticAutoCollector extends MasterDaemon {
             setInterval(Config.statistic_collect_interval_sec * 1000);
         }
 
-        Catalog.getCurrentAnalyzeMgr().expireAnalyzeJob();
-
-        if (!Config.enable_statistic_collect) {
+        if (!Config.enable_statistic_collect || FeConstants.runningUnitTest) {
             return;
         }
 
-        // none statistic table
-        if (null == StatisticUtils.getStatisticsTable()) {
+        if (!checkoutAnalyzeTime(LocalTime.now(TimeUtils.getTimeZone().toZoneId()))) {
+            return;
+        }
+
+        // check statistic table state
+        if (!StatisticUtils.checkStatisticTableStateNormal()) {
             return;
         }
 
         initDefaultJob();
 
-        List<TableCollectJob> allJobs = generateAllJobs();
+        if (Config.enable_collect_full_statistic) {
+            LOG.info("auto collect full statistic on all databases start");
+            List<StatisticsCollectJob> allJobs = StatisticsCollectJobFactory.buildStatisticsCollectJob(
+                    new NativeAnalyzeJob(StatsConstants.DEFAULT_ALL_ID, StatsConstants.DEFAULT_ALL_ID, null,
+                            AnalyzeType.FULL, ScheduleType.SCHEDULE,
+                            Maps.newHashMap(),
+                            ScheduleStatus.PENDING,
+                            LocalDateTime.MIN));
+            for (StatisticsCollectJob statsJob : allJobs) {
+                AnalyzeStatus analyzeStatus = new NativeAnalyzeStatus(GlobalStateMgr.getCurrentState().getNextId(),
+                        statsJob.getDb().getId(), statsJob.getTable().getId(), statsJob.getColumns(),
+                        statsJob.getType(), statsJob.getScheduleType(), statsJob.getProperties(), LocalDateTime.now());
+                analyzeStatus.setStatus(StatsConstants.ScheduleStatus.FAILED);
+                GlobalStateMgr.getCurrentAnalyzeMgr().addAnalyzeStatus(analyzeStatus);
 
-        collectStatistics(allJobs);
+                ConnectContext statsConnectCtx = StatisticUtils.buildConnectContext();
+                statsConnectCtx.setThreadLocalInfo();
+                STATISTIC_EXECUTOR.collectStatistics(statsConnectCtx, statsJob, analyzeStatus, true);
+            }
+            LOG.info("auto collect full statistic on all databases end");
+        } else {
+            List<NativeAnalyzeJob> allNativeAnalyzeJobs = GlobalStateMgr.getCurrentAnalyzeMgr().getAllNativeAnalyzeJobList();
+            allNativeAnalyzeJobs.sort((o1, o2) -> Long.compare(o2.getId(), o1.getId()));
+            String jobIds = allNativeAnalyzeJobs.stream().map(j -> String.valueOf(j.getId()))
+                    .collect(Collectors.joining(", "));
+            LOG.info("auto collect statistic on analyze job[{}] start", jobIds);
+            for (NativeAnalyzeJob nativeAnalyzeJob : allNativeAnalyzeJobs) {
+                ConnectContext statsConnectCtx = StatisticUtils.buildConnectContext();
+                statsConnectCtx.setThreadLocalInfo();
+                nativeAnalyzeJob.run(statsConnectCtx, STATISTIC_EXECUTOR);
+            }
+            LOG.info("auto collect statistic on analyze job[{}] end", jobIds);
+        }
 
-        expireStatistic(allJobs);
+        // collect external table statistic
+        List<ExternalAnalyzeJob> allExternalAnalyzeJobs = GlobalStateMgr.getCurrentAnalyzeMgr().getAllExternalAnalyzeJobList();
+        if (!allExternalAnalyzeJobs.isEmpty()) {
+            allExternalAnalyzeJobs.sort((o1, o2) -> Long.compare(o2.getId(), o1.getId()));
+            String jobIds = allExternalAnalyzeJobs.stream().map(j -> String.valueOf(j.getId()))
+                    .collect(Collectors.joining(", "));
+            LOG.info("auto collect external statistic on analyze job[{}] start", jobIds);
+            for (ExternalAnalyzeJob externalAnalyzeJob : allExternalAnalyzeJobs) {
+                ConnectContext statsConnectCtx = StatisticUtils.buildConnectContext();
+                statsConnectCtx.setThreadLocalInfo();
+                externalAnalyzeJob.run(statsConnectCtx, STATISTIC_EXECUTOR);
+            }
+            LOG.info("auto collect external statistic on analyze job[{}] end", jobIds);
+        }
     }
 
     private void initDefaultJob() {
-        // Add a default sample job if was't been collect
-        List<AnalyzeJob> allAnalyzeJobs = Catalog.getCurrentAnalyzeMgr().getAllAnalyzeJobList();
-        if (allAnalyzeJobs.stream().anyMatch(j -> j.getScheduleType() == ScheduleType.SCHEDULE)) {
+        // Add a default sample job if wasn't collect
+        List<NativeAnalyzeJob> allNativeAnalyzeJobs = GlobalStateMgr.getCurrentAnalyzeMgr().getAllNativeAnalyzeJobList();
+        if (allNativeAnalyzeJobs.stream().anyMatch(j -> j.getScheduleType() == ScheduleType.SCHEDULE)) {
             return;
         }
 
-        AnalyzeJob analyzeJob = new AnalyzeJob();
-        // all databases
-        analyzeJob.setDbId(AnalyzeJob.DEFAULT_ALL_ID);
-        analyzeJob.setTableId(AnalyzeJob.DEFAULT_ALL_ID);
-        analyzeJob.setColumns(Collections.emptyList());
-        analyzeJob.setScheduleType(ScheduleType.SCHEDULE);
-        analyzeJob.setType(AnalyzeType.SAMPLE);
-        analyzeJob.setStatus(ScheduleStatus.PENDING);
-
-        Catalog.getCurrentAnalyzeMgr().addAnalyzeJob(analyzeJob);
+        NativeAnalyzeJob nativeAnalyzeJob = new NativeAnalyzeJob(StatsConstants.DEFAULT_ALL_ID, StatsConstants.DEFAULT_ALL_ID,
+                Collections.emptyList(), AnalyzeType.SAMPLE, ScheduleType.SCHEDULE, Maps.newHashMap(),
+                ScheduleStatus.PENDING, LocalDateTime.MIN);
+        GlobalStateMgr.getCurrentAnalyzeMgr().addAnalyzeJob(nativeAnalyzeJob);
     }
 
-    private void collectStatistics(List<TableCollectJob> allJobs) {
-        // AnalyzeJob-List<TableCollectJob> for update AnalyzeJob status
-        Map<AnalyzeJob, List<TableCollectJob>> analyzeJobMap = Maps.newHashMap();
-
-        for (TableCollectJob tjb : allJobs) {
-            if (!analyzeJobMap.containsKey(tjb.job)) {
-                analyzeJobMap.put(tjb.job, Lists.newArrayList(tjb));
-            } else {
-                analyzeJobMap.get(tjb.job).add(tjb);
-            }
-        }
-
-        for (Map.Entry<AnalyzeJob, List<TableCollectJob>> entry : analyzeJobMap.entrySet()) {
-            AnalyzeJob analyzeJob = entry.getKey();
-            if (analyzeJob.getStatus() == ScheduleStatus.FINISH) {
-                continue;
-            }
-
-            if (ScheduleType.SCHEDULE == analyzeJob.getScheduleType() &&
-                    LocalDateTime.now().minusSeconds(analyzeJob.getUpdateIntervalSec())
-                            .isBefore(analyzeJob.getWorkTime())) {
-                continue;
-            }
-
-            analyzeJob.setStatus(ScheduleStatus.RUNNING);
-            analyzeJob.setReason("");
-            // only update job
-            Catalog.getCurrentAnalyzeMgr().updateAnalyzeJobWithoutLog(analyzeJob);
-            for (TableCollectJob tcj : entry.getValue()) {
-                try {
-                    LOG.info("Statistic collect work once on job: {}, type: {}, db: {}, table: {}",
-                            analyzeJob.getId(), analyzeJob.getType(), tcj.db.getFullName(), tcj.table.getName());
-                    tcj.tryCollect();
-
-                    // sleep 1s per column
-                    // @TODO: It's necessary?
-                    //                    trySleep(tcj.columns.size() * 1000);
-                    Catalog.getCurrentStatisticStorage().expireColumnStatistics(tcj.table, tcj.columns);
-                } catch (Exception e) {
-                    LOG.warn("Statistic collect work once on job: {}, type: {}, db: {}, table: {}. throw exception.",
-                            analyzeJob.getId(), analyzeJob.getType(), tcj.db.getFullName(), tcj.table.getName(), e);
-                    String error = analyzeJob.getReason() + "\n" + tcj.db.getFullName() + "." + tcj.table.getName() +
-                            ": " + e.getMessage();
-                    analyzeJob.setReason(error);
-                }
-            }
-
-            // update & record
-            if (ScheduleType.ONCE == analyzeJob.getScheduleType()) {
-                analyzeJob.setStatus(ScheduleStatus.FINISH);
-            } else {
-                analyzeJob.setStatus(ScheduleStatus.PENDING);
-            }
-            analyzeJob.setWorkTime(LocalDateTime.now());
-            Catalog.getCurrentAnalyzeMgr().updateAnalyzeJobWithLog(analyzeJob);
-        }
-    }
-
-    private List<TableCollectJob> generateAllJobs() {
-        List<AnalyzeJob> allAnalyzeJobs = Catalog.getCurrentAnalyzeMgr().getAllAnalyzeJobList();
-        allAnalyzeJobs.sort(Comparator.comparing(AnalyzeJob::getId));
-
-        Map<Long, List<TableCollectJob>> allTableJobMap = Maps.newHashMap();
-
-        for (AnalyzeJob analyzeJob : allAnalyzeJobs) {
-            if (AnalyzeJob.DEFAULT_ALL_ID == analyzeJob.getDbId()) {
-                // all database
-                List<Long> dbIds = Catalog.getCurrentCatalog().getDbIds();
-
-                for (Long dbId : dbIds) {
-                    Database db = Catalog.getCurrentCatalog().getDb(dbId);
-                    if (null == db || StatisticUtils.statisticDatabaseBlackListCheck(db.getFullName())) {
-                        continue;
-                    }
-
-                    for (Table table : db.getTables()) {
-                        createTableJobs(allTableJobMap, analyzeJob, db, table);
-                    }
-                }
-            } else if (AnalyzeJob.DEFAULT_ALL_ID == analyzeJob.getTableId()
-                    && AnalyzeJob.DEFAULT_ALL_ID != analyzeJob.getDbId()) {
-                // all table
-                Database db = Catalog.getCurrentCatalog().getDb(analyzeJob.getDbId());
-                if (null == db) {
-                    continue;
-                }
-
-                for (Table table : db.getTables()) {
-                    createTableJobs(allTableJobMap, analyzeJob, db, table);
-                }
-            } else if ((null == analyzeJob.getColumns() || analyzeJob.getColumns().isEmpty())
-                    && AnalyzeJob.DEFAULT_ALL_ID != analyzeJob.getTableId()
-                    && AnalyzeJob.DEFAULT_ALL_ID != analyzeJob.getDbId()) {
-                // all column
-                Database db = Catalog.getCurrentCatalog().getDb(analyzeJob.getDbId());
-                if (null == db) {
-                    continue;
-                }
-
-                createTableJobs(allTableJobMap, analyzeJob, db, db.getTable(analyzeJob.getTableId()));
-            } else if (!analyzeJob.getColumns().isEmpty() && AnalyzeJob.DEFAULT_ALL_ID != analyzeJob.getTableId()
-                    && AnalyzeJob.DEFAULT_ALL_ID != analyzeJob.getDbId()) {
-                // some column
-                Database db = Catalog.getCurrentCatalog().getDb(analyzeJob.getDbId());
-                if (null == db) {
-                    continue;
-                }
-
-                Table table = db.getTable(analyzeJob.getTableId());
-                if (table == null || !Table.TableType.OLAP.equals(table.getType())) {
-                    continue;
-                }
-
-                createJobs(allTableJobMap, analyzeJob, db, table, analyzeJob.getColumns());
-            }
-        }
-
-        List<TableCollectJob> list = Lists.newLinkedList();
-        allTableJobMap.values().forEach(list::addAll);
-        return list;
-    }
-
-    private void createTableJobs(Map<Long, List<TableCollectJob>> tableJobs, AnalyzeJob job,
-                                 Database db, Table table) {
-        if (null == table || !Table.TableType.OLAP.equals(table.getType())) {
-            return;
-        }
-
-        List<String> columns =
-                table.getFullSchema().stream().filter(d -> !d.isAggregated()).map(Column::getName)
-                        .collect(Collectors.toList());
-        createJobs(tableJobs, job, db, table, columns);
-    }
-
-    private void createJobs(Map<Long, List<TableCollectJob>> result,
-                            AnalyzeJob job, Database db, Table table, List<String> columns) {
-        if (result.containsKey(table.getId())) {
-            List<TableCollectJob> tableJobs = result.get(table.getId());
-            Iterator<TableCollectJob> iter = tableJobs.iterator();
-            while (iter.hasNext()) {
-                TableCollectJob tJob = iter.next();
-                tJob.columns.removeAll(columns);
-
-                if (tJob.columns.isEmpty()) {
-                    iter.remove();
-                }
-            }
-        } else {
-            result.put(table.getId(), Lists.newLinkedList());
-        }
-
-        TableCollectJob tableJob = new TableCollectJob();
-        tableJob.job = job;
-        tableJob.db = db;
-        tableJob.table = table;
-        tableJob.columns = columns;
-        result.get(table.getId()).add(tableJob);
-    }
-
-    private void expireStatistic(List<TableCollectJob> allJobs) {
+    private boolean checkoutAnalyzeTime(LocalTime now) {
         try {
-            if (allJobs.isEmpty()) {
-                return;
+            LocalTime start = LocalTime.parse(Config.statistic_auto_analyze_start_time, DateUtils.TIME_FORMATTER);
+            LocalTime end = LocalTime.parse(Config.statistic_auto_analyze_end_time, DateUtils.TIME_FORMATTER);
+
+            if (start.isAfter(end) && (now.isAfter(start) || now.isBefore(end))) {
+                return true;
+            } else if (now.isAfter(start) && now.isBefore(end)) {
+                return true;
+            } else {
+                return false;
             }
+        } catch (DateTimeParseException e) {
+            LOG.warn("Parse analyze start/end time format fail : " + e.getMessage());
 
-            LocalDateTime expireTime =
-                    allJobs.stream().map(tcj -> LocalDateTime.now().minusSeconds(tcj.job.getExpireSec()))
-                            .min(LocalDateTime::compareTo).orElse(LocalDateTime.MIN);
-
-            List<String> tableIds = statisticExecutor.queryExpireTableSync(expireTime);
-
-            if (!tableIds.isEmpty()) {
-                LOG.info("Statistic expire tableIds: {}, expireTime: {}", tableIds, expireTime.toString());
-
-                for (int i = 0; i < tableIds.size() && i < 10; i++) {
-                    statisticExecutor.expireStatisticSync(tableIds.get(i));
-                }
-            }
-        } catch (Exception e) {
-            LOG.warn("expire statistic failed.", e);
+            // If the time format configuration is incorrect,
+            // processing can be run at any time without affecting the normal process
+            return true;
         }
     }
-
 }

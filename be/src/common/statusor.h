@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      https://www.apache.org/licenses/LICENSE-2.0
+//     https://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -44,6 +44,7 @@
 
 #include "common/status.h"
 #include "common/statusor_internal.h"
+#include "gutil/macros.h"
 
 namespace starrocks {
 
@@ -195,10 +196,10 @@ public:
     StatusOr& operator=(const StatusOr&) = default;
 
     // `StatusOr<T>` is move constructible if `T` is move constructible.
-    StatusOr(StatusOr&&) = default;
+    StatusOr(StatusOr&&) noexcept = default;
     // `StatusOr<T>` is moveAssignable if `T` is move constructible and move
     // assignable.
-    StatusOr& operator=(StatusOr&&) = default;
+    StatusOr& operator=(StatusOr&&) noexcept = default;
 
     // Converting Constructors
 
@@ -244,7 +245,7 @@ public:
                       int> = 0>
     explicit StatusOr(StatusOr<U>&& other) : Base(static_cast<typename StatusOr<U>::Base&&>(other)) {}
 
-    // Converting Assignment Operators
+    // Converting Assignment Operators.
 
     // Creates an `starrocks::StatusOr<T>` through assignment from an
     // `starrocks::StatusOr<U>` when:
@@ -701,5 +702,30 @@ template <typename T>
 void StatusOr<T>::IgnoreError() const {
     // no-op
 }
+
+#define ASSIGN_OR_RETURN_IMPL(varname, lhs, rhs) \
+    auto&& varname = (rhs);                      \
+    RETURN_IF_ERROR(varname);                    \
+    lhs = std::move(varname).value();
+
+// ASSIGN_OR_RETURN is modelled after Apache Arrow's ARROW_ASSIGN_OR_RAISE macro.
+//
+// Execute an expression that returns a StatusOr, extracting its value
+/// into the variable defined by `lhs` (or returning a Status on error).
+//
+// Example: Assigning to a new value:
+//   ARROW_ASSIGN_OR_RETURN(auto value, MaybeGetValue(arg));
+//
+// Example: Assigning to an existing value:
+//   ValueType value;
+//   ARROW_ASSIGN_OR_RETURN(value, MaybeGetValue(arg));
+//
+// WARNING: ARROW_ASSIGN_OR_RETURN expands into multiple statements;
+// it cannot be used in a single statement (e.g. as the body of an if
+// statement without {})!
+//
+// WARNING: ARROW_ASSIGN_OR_RETURN `std::move`s its right operand. If you have
+// an lvalue StatusOr which you *don't* want to move out of cast appropriately.
+#define ASSIGN_OR_RETURN(lhs, rhs) ASSIGN_OR_RETURN_IMPL(VARNAME_LINENUM(value_or_err), lhs, rhs)
 
 } // namespace starrocks

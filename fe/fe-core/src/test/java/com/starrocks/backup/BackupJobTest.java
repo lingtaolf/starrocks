@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/backup/BackupJobTest.java
 
@@ -26,15 +39,17 @@ import com.google.common.collect.Maps;
 import com.starrocks.analysis.TableName;
 import com.starrocks.analysis.TableRef;
 import com.starrocks.backup.BackupJob.BackupJobState;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.FsBroker;
+import com.starrocks.catalog.KeysType;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.common.util.UnitTestUtil;
+import com.starrocks.metric.MetricRepo;
 import com.starrocks.persist.EditLog;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.task.AgentBatchTask;
 import com.starrocks.task.AgentTask;
 import com.starrocks.task.AgentTaskExecutor;
@@ -79,13 +94,12 @@ public class BackupJobTest {
     private long tabletId = 5;
     private long backendId = 10000;
     private long version = 6;
-    private long versionHash = 7;
 
     private long repoId = 20000;
     private AtomicLong id = new AtomicLong(50000);
 
     @Mocked
-    private Catalog catalog;
+    private GlobalStateMgr globalStateMgr;
 
     private MockBackupHandler backupHandler;
 
@@ -93,8 +107,8 @@ public class BackupJobTest {
 
     // Thread is not mockable in Jmockit, use subclass instead
     private final class MockBackupHandler extends BackupHandler {
-        public MockBackupHandler(Catalog catalog) {
-            super(catalog);
+        public MockBackupHandler(GlobalStateMgr globalStateMgr) {
+            super(globalStateMgr);
         }
 
         @Override
@@ -126,6 +140,8 @@ public class BackupJobTest {
         Config.tmp_dir = "./";
         File backupDir = new File(BackupHandler.BACKUP_ROOT_DIR.toString());
         backupDir.mkdirs();
+
+        MetricRepo.init();
     }
 
     @AfterClass
@@ -134,7 +150,7 @@ public class BackupJobTest {
         File backupDir = new File(BackupHandler.BACKUP_ROOT_DIR.toString());
         if (backupDir.exists()) {
             Files.walk(BackupHandler.BACKUP_ROOT_DIR,
-                    FileVisitOption.FOLLOW_LINKS).sorted(Comparator.reverseOrder()).map(Path::toFile)
+                            FileVisitOption.FOLLOW_LINKS).sorted(Comparator.reverseOrder()).map(Path::toFile)
                     .forEach(File::delete);
         }
     }
@@ -143,28 +159,24 @@ public class BackupJobTest {
     public void setUp() {
 
         repoMgr = new MockRepositoryMgr();
-        backupHandler = new MockBackupHandler(catalog);
+        backupHandler = new MockBackupHandler(globalStateMgr);
 
         // Thread is unmockable after Jmockit version 1.48, so use reflection to set field instead.
-        Deencapsulation.setField(catalog, "backupHandler", backupHandler);
+        Deencapsulation.setField(globalStateMgr, "backupHandler", backupHandler);
 
-        db = UnitTestUtil.createDb(dbId, tblId, partId, idxId, tabletId, backendId, version, versionHash);
+        db = UnitTestUtil.createDb(dbId, tblId, partId, idxId, tabletId, backendId, version, KeysType.AGG_KEYS);
 
-        new Expectations(catalog) {
+        new Expectations(globalStateMgr) {
             {
-                catalog.getDb(anyLong);
+                globalStateMgr.getDb(anyLong);
                 minTimes = 0;
                 result = db;
 
-                Catalog.getCurrentCatalogJournalVersion();
-                minTimes = 0;
-                result = FeConstants.meta_version;
-
-                catalog.getNextId();
+                globalStateMgr.getNextId();
                 minTimes = 0;
                 result = id.getAndIncrement();
 
-                catalog.getEditLog();
+                globalStateMgr.getEditLog();
                 minTimes = 0;
                 result = editLog;
             }
@@ -196,7 +208,7 @@ public class BackupJobTest {
             }
 
             @Mock
-            Status getBrokerAddress(Long beId, Catalog catalog, List<FsBroker> brokerAddrs) {
+            Status getBrokerAddress(Long beId, GlobalStateMgr globalStateMgr, List<FsBroker> brokerAddrs) {
                 brokerAddrs.add(new FsBroker());
                 return Status.OK;
             }
@@ -204,7 +216,7 @@ public class BackupJobTest {
 
         List<TableRef> tableRefs = Lists.newArrayList();
         tableRefs.add(new TableRef(new TableName(UnitTestUtil.DB_NAME, UnitTestUtil.TABLE_NAME), null));
-        job = new BackupJob("label", dbId, UnitTestUtil.DB_NAME, tableRefs, 13600 * 1000, catalog, repo.getId());
+        job = new BackupJob("label", dbId, UnitTestUtil.DB_NAME, tableRefs, 13600 * 1000, globalStateMgr, repo.getId());
     }
 
     @Test
@@ -220,8 +232,8 @@ public class BackupJobTest {
         OlapTable backupTbl = (OlapTable) backupMeta.getTable(UnitTestUtil.TABLE_NAME);
         List<String> partNames = Lists.newArrayList(backupTbl.getPartitionNames());
         Assert.assertNotNull(backupTbl);
-        Assert.assertEquals(backupTbl.getSignature(BackupHandler.SIGNATURE_VERSION, partNames),
-                ((OlapTable) db.getTable(tblId)).getSignature(BackupHandler.SIGNATURE_VERSION, partNames));
+        Assert.assertEquals(backupTbl.getSignature(BackupHandler.SIGNATURE_VERSION, partNames, true),
+                ((OlapTable) db.getTable(tblId)).getSignature(BackupHandler.SIGNATURE_VERSION, partNames, true));
         Assert.assertEquals(1, AgentTaskQueue.getTaskNum());
         AgentTask task = AgentTaskQueue.getTask(backendId, TTaskType.MAKE_SNAPSHOT, tabletId);
         Assert.assertTrue(task instanceof SnapshotTask);
@@ -238,10 +250,10 @@ public class BackupJobTest {
         snapshotFiles.add("1.dat");
         snapshotFiles.add("1.idx");
         snapshotFiles.add("1.hdr");
-        TStatus task_status = new TStatus(TStatusCode.OK);
+        TStatus taskStatus = new TStatus(TStatusCode.OK);
         TBackend tBackend = new TBackend("", 0, 1);
         TFinishTaskRequest request = new TFinishTaskRequest(tBackend, TTaskType.MAKE_SNAPSHOT,
-                snapshotTask.getSignature(), task_status);
+                snapshotTask.getSignature(), taskStatus);
         request.setSnapshot_files(snapshotFiles);
         request.setSnapshot_path(snapshotPath);
         Assert.assertTrue(job.finishTabletSnapshotTask(snapshotTask, request));
@@ -272,7 +284,7 @@ public class BackupJobTest {
         Assert.assertEquals(BackupJobState.UPLOADING, job.getState());
         Map<Long, List<String>> tabletFileMap = Maps.newHashMap();
         request = new TFinishTaskRequest(tBackend, TTaskType.UPLOAD,
-                upTask.getSignature(), task_status);
+                upTask.getSignature(), taskStatus);
         request.setTablet_files(tabletFileMap);
 
         Assert.assertFalse(job.finishSnapshotUploadTask(upTask, request));
@@ -304,14 +316,14 @@ public class BackupJobTest {
         BackupMeta restoreMetaInfo = null;
         BackupJobInfo restoreJobInfo = null;
         try {
-            restoreMetaInfo = BackupMeta.fromFile(job.getLocalMetaInfoFilePath(), -1, -1);
+            restoreMetaInfo = BackupMeta.fromFile(job.getLocalMetaInfoFilePath(), FeConstants.STARROCKS_META_VERSION);
             Assert.assertEquals(1, restoreMetaInfo.getTables().size());
             OlapTable olapTable = (OlapTable) restoreMetaInfo.getTable(tblId);
             Assert.assertNotNull(olapTable);
             Assert.assertNotNull(restoreMetaInfo.getTable(UnitTestUtil.TABLE_NAME));
             List<String> names = Lists.newArrayList(olapTable.getPartitionNames());
-            Assert.assertEquals(((OlapTable) db.getTable(tblId)).getSignature(BackupHandler.SIGNATURE_VERSION, names),
-                    olapTable.getSignature(BackupHandler.SIGNATURE_VERSION, names));
+            Assert.assertEquals(((OlapTable) db.getTable(tblId)).getSignature(BackupHandler.SIGNATURE_VERSION, names, true),
+                    olapTable.getSignature(BackupHandler.SIGNATURE_VERSION, names, true));
 
             restoreJobInfo = BackupJobInfo.fromFile(job.getLocalJobInfoFilePath());
             Assert.assertEquals(UnitTestUtil.DB_NAME, restoreJobInfo.dbName);
@@ -338,7 +350,7 @@ public class BackupJobTest {
 
         List<TableRef> tableRefs = Lists.newArrayList();
         tableRefs.add(new TableRef(new TableName(UnitTestUtil.DB_NAME, "unknown_tbl"), null));
-        job = new BackupJob("label", dbId, UnitTestUtil.DB_NAME, tableRefs, 13600 * 1000, catalog, repo.getId());
+        job = new BackupJob("label", dbId, UnitTestUtil.DB_NAME, tableRefs, 13600 * 1000, globalStateMgr, repo.getId());
         job.run();
         Assert.assertEquals(Status.ErrCode.NOT_FOUND, job.getStatus().getErrCode());
         Assert.assertEquals(BackupJobState.CANCELLED, job.getState());

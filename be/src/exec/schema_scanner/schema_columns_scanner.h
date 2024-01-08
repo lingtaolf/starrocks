@@ -1,26 +1,18 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/schema_scanner/schema_columns_scanner.h
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-#ifndef STARROCKS_BE_SRC_QUERY_EXEC_SCHEMA_SCANNER_SCHEMA_COLUMNS_SCANNER_H
-#define STARROCKS_BE_SRC_QUERY_EXEC_SCHEMA_SCANNER_SCHEMA_COLUMNS_SCANNER_H
+#pragma once
 
 #include <string>
 
@@ -32,27 +24,27 @@ namespace starrocks {
 class SchemaColumnsScanner : public SchemaScanner {
 public:
     SchemaColumnsScanner();
-    virtual ~SchemaColumnsScanner();
-    virtual Status start(RuntimeState* state);
-    virtual Status get_next_row(Tuple* tuple, MemPool* pool, bool* eos);
+    ~SchemaColumnsScanner() override;
+    Status start(RuntimeState* state) override;
+    Status get_next(ChunkPtr* chunk, bool* eos) override;
     std::string to_mysql_data_type_string(TColumnDesc& desc);
     std::string type_to_string(TColumnDesc& desc);
 
 private:
     Status get_new_table();
-    Status fill_one_row(Tuple* tuple, MemPool* pool);
+    Status fill_chunk(ChunkPtr* chunk);
     Status get_new_desc();
     Status get_create_table(std::string* result);
 
-    int _db_index;
-    int _table_index;
-    int _column_index;
+    int _db_index{0};
+    int _table_index{0};
+    int _column_index{0};
     TGetDbsResult _db_result;
     TGetTablesResult _table_result;
     TDescribeTableResult _desc_result;
+    int _timeout_ms;
+
     static SchemaScanner::ColumnDesc _s_col_columns[];
 };
 
 } // namespace starrocks
-
-#endif

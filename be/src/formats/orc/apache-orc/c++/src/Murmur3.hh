@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/Murmur3.hh
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -20,8 +16,7 @@
  * limitations under the License.
  */
 
-#ifndef ORC_MURMUR3_HH
-#define ORC_MURMUR3_HH
+#pragma once
 
 #include "orc/orc-config.hh"
 
@@ -40,5 +35,3 @@ private:
 };
 
 } // namespace orc
-
-#endif //ORC_MURMUR3_HH

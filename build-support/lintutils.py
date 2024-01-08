@@ -69,7 +69,9 @@ _source_extensions = '''
 .h
 .cc
 .cpp
+.tpp
 .hh
+.hpp
 '''.split()
 
 

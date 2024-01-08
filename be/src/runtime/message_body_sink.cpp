@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/runtime/message_body_sink.cpp
 
@@ -23,11 +36,6 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/types.h>
-
-#include <algorithm>
-
-#include "util/runtime_profile.h"
 
 namespace starrocks {
 
@@ -55,6 +63,10 @@ Status MessageBodyFileSink::append(const char* data, size_t size) {
     return Status::InternalError("fail to write file");
 }
 
+Status MessageBodyFileSink::append(ByteBufferPtr&& buf) {
+    return append(buf->ptr, buf->pos);
+}
+
 Status MessageBodyFileSink::finish() {
     if (::close(_fd) < 0) {
         PLOG(WARNING) << "fail to close " << _path;
@@ -65,7 +77,7 @@ Status MessageBodyFileSink::finish() {
     return Status::OK();
 }
 
-void MessageBodyFileSink::cancel() {
+void MessageBodyFileSink::cancel(const Status& status) {
     unlink(_path.data());
 }
 

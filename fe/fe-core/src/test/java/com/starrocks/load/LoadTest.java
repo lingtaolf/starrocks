@@ -1,4 +1,17 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.load;
 
@@ -6,22 +19,24 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.analysis.Analyzer;
 import com.starrocks.analysis.ArithmeticExpr;
+import com.starrocks.analysis.CompoundPredicate;
 import com.starrocks.analysis.DescriptorTable;
 import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.FunctionCallExpr;
-import com.starrocks.analysis.ImportColumnDesc;
 import com.starrocks.analysis.IntLiteral;
 import com.starrocks.analysis.SlotDescriptor;
 import com.starrocks.analysis.SlotRef;
 import com.starrocks.analysis.TupleDescriptor;
 import com.starrocks.catalog.AggregateType;
 import com.starrocks.catalog.Column;
+import com.starrocks.catalog.FunctionSet;
 import com.starrocks.catalog.KeysType;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.RandomDistributionInfo;
 import com.starrocks.catalog.SinglePartitionInfo;
 import com.starrocks.catalog.Type;
 import com.starrocks.common.UserException;
+import com.starrocks.sql.ast.ImportColumnDesc;
 import com.starrocks.thrift.TBrokerScanRangeParams;
 import mockit.Expectations;
 import mockit.Mocked;
@@ -89,8 +104,10 @@ public class LoadTest {
         // c1 = year(c1)
         List<Expr> params1 = Lists.newArrayList();
         params1.add(new SlotRef(null, c1Name));
-        Expr mapping1 = new FunctionCallExpr("year", params1);
-        columnExprs.add(new ImportColumnDesc(c1Name, mapping1));
+        Expr mapping1 = new FunctionCallExpr(FunctionSet.YEAR, params1);
+        CompoundPredicate compoundPredicate = new CompoundPredicate(CompoundPredicate.Operator.OR,
+                mapping1, new SlotRef(null, c0Name));
+        columnExprs.add(new ImportColumnDesc(c1Name, compoundPredicate));
 
         // c1 is from path
         // path/c1=2021-03-01/file
@@ -145,13 +162,13 @@ public class LoadTest {
         // c1 = year(c1)
         List<Expr> params1 = Lists.newArrayList();
         params1.add(new SlotRef(null, c1Name));
-        Expr mapping1 = new FunctionCallExpr("year", params1);
+        Expr mapping1 = new FunctionCallExpr(FunctionSet.YEAR, params1);
         columnExprs.add(new ImportColumnDesc(c1Name, mapping1));
 
         // c2 = to_bitmap(c2)
         List<Expr> params2 = Lists.newArrayList();
         params2.add(new SlotRef(null, c2Name));
-        Expr mapping2 = new FunctionCallExpr("to_bitmap", params2);
+        Expr mapping2 = new FunctionCallExpr(FunctionSet.TO_BITMAP, params2);
         columnExprs.add(new ImportColumnDesc(c2Name, mapping2));
 
         // c31 = c3 + 1
@@ -211,7 +228,7 @@ public class LoadTest {
         // C1 = year(c1)
         List<Expr> params1 = Lists.newArrayList();
         params1.add(new SlotRef(null, c1NameInSource));
-        Expr mapping1 = new FunctionCallExpr("year", params1);
+        Expr mapping1 = new FunctionCallExpr(FunctionSet.YEAR, params1);
         columnExprs.add(new ImportColumnDesc(c1Name, mapping1));
 
         new Expectations() {

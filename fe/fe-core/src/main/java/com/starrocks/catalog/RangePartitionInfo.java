@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/RangePartitionInfo.java
 
@@ -25,32 +38,58 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Range;
-import com.starrocks.analysis.PartitionKeyDesc;
-import com.starrocks.analysis.SingleRangePartitionDesc;
+import com.google.gson.annotations.SerializedName;
+import com.starrocks.analysis.Expr;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.DdlException;
-import com.starrocks.common.FeMetaVersion;
+import com.starrocks.common.Pair;
 import com.starrocks.common.util.RangeUtils;
+import com.starrocks.lake.DataCacheInfo;
+import com.starrocks.persist.RangePartitionPersistInfo;
+import com.starrocks.server.RunMode;
+import com.starrocks.sql.ast.PartitionDesc;
+import com.starrocks.sql.ast.PartitionKeyDesc;
+import com.starrocks.sql.ast.SingleRangePartitionDesc;
+import com.starrocks.thrift.TStorageMedium;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.DataInput;
+import java.io.DataInputStream;
 import java.io.DataOutput;
+import java.io.DataOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class RangePartitionInfo extends PartitionInfo {
     private static final Logger LOG = LogManager.getLogger(RangePartitionInfo.class);
 
-    private List<Column> partitionColumns = Lists.newArrayList();
+    @SerializedName(value = "partitionColumns")
+    protected List<Column> partitionColumns = Lists.newArrayList();
     // formal partition id -> partition range
-    private Map<Long, Range<PartitionKey>> idToRange = Maps.newHashMap();
+    protected Map<Long, Range<PartitionKey>> idToRange = Maps.newConcurrentMap();
     // temp partition id -> partition range
-    private Map<Long, Range<PartitionKey>> idToTempRange = Maps.newHashMap();
+    private Map<Long, Range<PartitionKey>> idToTempRange = Maps.newConcurrentMap();
+
+    // partitionId -> serialized Range<PartitionKey>
+    // because Range<PartitionKey> and PartitionKey can not be serialized by gson
+    // ATTN: call preSerialize before serialization and postDeserialized after deserialization
+    @SerializedName(value = "serializedIdToRange")
+    private Map<Long, byte[]> serializedIdToRange;
+
+    // partitionId -> serialized Range<PartitionKey>
+    // because Range<PartitionKey> and PartitionKey can not be serialized by gson
+    // ATTN: call preSerialize before serialization and postDeserialized after deserialization
+    @SerializedName(value = "serializedIdToTempRange")
+    private Map<Long, byte[]> serializedIdToTempRange;
 
     public RangePartitionInfo() {
         // for persist
@@ -63,6 +102,15 @@ public class RangePartitionInfo extends PartitionInfo {
         this.isMultiColumnPartition = partitionColumns.size() > 1;
     }
 
+    public RangePartitionInfo(RangePartitionInfo other) {
+        super(other.type);
+        this.partitionColumns = Lists.newArrayList(other.partitionColumns);
+        this.idToRange.putAll(other.idToRange);
+        this.idToTempRange.putAll(other.idToTempRange);
+        this.isMultiColumnPartition = partitionColumns.size() > 1;
+    }
+
+    @Override
     public List<Column> getPartitionColumns() {
         return partitionColumns;
     }
@@ -75,9 +123,14 @@ public class RangePartitionInfo extends PartitionInfo {
     }
 
     public void addPartition(long partitionId, boolean isTemp, Range<PartitionKey> range, DataProperty dataProperty,
-                             short replicationNum, boolean isInMemory) {
-        addPartition(partitionId, dataProperty, replicationNum, isInMemory);
+                             short replicationNum, boolean isInMemory, DataCacheInfo dataCacheInfo) {
+        addPartition(partitionId, dataProperty, replicationNum, isInMemory, dataCacheInfo);
         setRangeInternal(partitionId, isTemp, range);
+    }
+
+    public void addPartition(long partitionId, boolean isTemp, Range<PartitionKey> range, DataProperty dataProperty,
+                             short replicationNum, boolean isInMemory) {
+        this.addPartition(partitionId, isTemp, range, dataProperty, replicationNum, isInMemory, null);
     }
 
     public Range<PartitionKey> checkAndCreateRange(SingleRangePartitionDesc desc, boolean isTemp) throws DdlException {
@@ -109,7 +162,7 @@ public class RangePartitionInfo extends PartitionInfo {
             newRangeUpper = PartitionKey.createPartitionKey(partKeyDesc.getUpperValues(), partitionColumns);
         }
         if (newRangeUpper.isMinValue()) {
-            throw new DdlException("Partition's upper value should not be MIN VALUE: " + partKeyDesc.toSql());
+            throw new DdlException("Partition's upper value should not be MIN VALUE: " + partKeyDesc);
         }
 
         Range<PartitionKey> lastRange = null;
@@ -162,7 +215,7 @@ public class RangePartitionInfo extends PartitionInfo {
     public Range<PartitionKey> handleNewSinglePartitionDesc(SingleRangePartitionDesc desc,
                                                             long partitionId, boolean isTemp) throws DdlException {
         Preconditions.checkArgument(desc.isAnalyzed());
-        Range<PartitionKey> range = null;
+        Range<PartitionKey> range;
         try {
             range = checkAndCreateRange(desc, isTemp);
             setRangeInternal(partitionId, isTemp, range);
@@ -173,21 +226,41 @@ public class RangePartitionInfo extends PartitionInfo {
         idToDataProperty.put(partitionId, desc.getPartitionDataProperty());
         idToReplicationNum.put(partitionId, desc.getReplicationNum());
         idToInMemory.put(partitionId, desc.isInMemory());
+        idToStorageCacheInfo.put(partitionId, desc.getDataCacheInfo());
         return range;
     }
 
-    public void handleNewRangePartitionDescs(List<SingleRangePartitionDesc> listDesc,
-                                             List<Partition> partitionList, Set<String> existPartitionNameSet,
+    @Override
+    public void createAutomaticShadowPartition(long partitionId, String replicateNum) throws DdlException {
+        Range<PartitionKey> range = null;
+        try {
+            PartitionKey shadowPartitionKey = PartitionKey.createShadowPartitionKey(partitionColumns);
+            range = Range.closedOpen(shadowPartitionKey, shadowPartitionKey);
+            setRangeInternal(partitionId, false, range);
+        } catch (IllegalArgumentException e) {
+            // Range.closedOpen may throw this if (lower > upper)
+            throw new DdlException("Invalid key range: " + e.getMessage());
+        } catch (AnalysisException e) {
+            throw new DdlException("Invalid key range: " + e.getMessage());
+        }
+        idToDataProperty.put(partitionId, new DataProperty(TStorageMedium.HDD));
+        idToReplicationNum.put(partitionId, Short.valueOf(replicateNum));
+        idToInMemory.put(partitionId, false);
+        idToStorageCacheInfo.put(partitionId, new DataCacheInfo(true, false));
+    }
+
+    public void handleNewRangePartitionDescs(List<Pair<Partition, PartitionDesc>> partitionList,
+                                             Set<String> existPartitionNameSet,
                                              boolean isTemp) throws DdlException {
-        int len = listDesc.size();
-        for (int i = 0; i < len; i++) {
-            if (!existPartitionNameSet.contains(partitionList.get(i).getName())) {
-                long partitionId = partitionList.get(i).getId();
-                SingleRangePartitionDesc desc = listDesc.get(i);
+        for (Pair<Partition, PartitionDesc> entry : partitionList) {
+            Partition partition = entry.first;
+            if (!existPartitionNameSet.contains(partition.getName())) {
+                long partitionId = partition.getId();
+                SingleRangePartitionDesc desc = (SingleRangePartitionDesc) entry.second;
                 Preconditions.checkArgument(desc.isAnalyzed());
                 Range<PartitionKey> range;
                 try {
-                    range = checkAndCreateRange(listDesc.get(i), isTemp);
+                    range = checkAndCreateRange((SingleRangePartitionDesc) entry.second, isTemp);
                     setRangeInternal(partitionId, isTemp, range);
                 } catch (IllegalArgumentException e) {
                     // Range.closedOpen may throw this if (lower > upper)
@@ -196,6 +269,7 @@ public class RangePartitionInfo extends PartitionInfo {
                 idToDataProperty.put(partitionId, desc.getPartitionDataProperty());
                 idToReplicationNum.put(partitionId, desc.getReplicationNum());
                 idToInMemory.put(partitionId, desc.isInMemory());
+                idToStorageCacheInfo.put(partitionId, desc.getDataCacheInfo());
             }
         }
     }
@@ -207,6 +281,20 @@ public class RangePartitionInfo extends PartitionInfo {
         idToDataProperty.put(partitionId, dataProperty);
         idToReplicationNum.put(partitionId, replicationNum);
         idToInMemory.put(partitionId, isInMemory);
+    }
+
+    /**
+     * @param info
+     * @TODO This method may be used in future
+     */
+    public void unprotectHandleNewSinglePartitionDesc(RangePartitionPersistInfo info) {
+        Partition partition = info.getPartition();
+        long partitionId = partition.getId();
+        setRangeInternal(partitionId, info.isTempPartition(), info.getRange());
+        idToDataProperty.put(partitionId, info.getDataProperty());
+        idToReplicationNum.put(partitionId, info.getReplicationNum());
+        idToInMemory.put(partitionId, info.isInMemory());
+        idToStorageCacheInfo.put(partitionId, info.getDataCacheInfo());
     }
 
     public void setRange(long partitionId, boolean isTemp, Range<PartitionKey> range) {
@@ -233,6 +321,14 @@ public class RangePartitionInfo extends PartitionInfo {
         PrimitiveType type = column.getPrimitiveType();
         if (!type.isFixedPointType() && !type.isDateType()) {
             throw new AnalysisException("Column[" + column.getName() + "] type[" + type
+                    + "] cannot be a range partition key.");
+        }
+    }
+
+    public static void checkExpressionRangeColumnType(Column column, Expr expr) throws AnalysisException {
+        PrimitiveType type = column.getPrimitiveType();
+        if (!type.isFixedPointType() && !type.isDateType()) {
+            throw new AnalysisException("Expr[" + expr.toSql() + "] type[" + type
                     + "] cannot be a range partition key.");
         }
     }
@@ -316,6 +412,55 @@ public class RangePartitionInfo extends PartitionInfo {
         return partitionInfo;
     }
 
+    byte[] serializeRange(Range<PartitionKey> range) throws IOException {
+        ByteArrayOutputStream stream = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(stream);
+        RangeUtils.writeRange(dos, range);
+        return stream.toByteArray();
+    }
+
+    Range<PartitionKey> deserializeRange(byte[] serializedRange) throws IOException {
+        InputStream inputStream = new ByteArrayInputStream(serializedRange);
+        DataInput dataInput = new DataInputStream(inputStream);
+        Range<PartitionKey> range = RangeUtils.readRange(dataInput);
+        return range;
+    }
+
+    @Override
+    public void gsonPreProcess() throws IOException {
+        super.gsonPreProcess();
+        serializedIdToRange = Maps.newConcurrentMap();
+        for (Map.Entry<Long, Range<PartitionKey>> entry : idToRange.entrySet()) {
+            byte[] serializedRange = serializeRange(entry.getValue());
+            serializedIdToRange.put(entry.getKey(), serializedRange);
+        }
+
+        serializedIdToTempRange = Maps.newConcurrentMap();
+        for (Map.Entry<Long, Range<PartitionKey>> entry : idToTempRange.entrySet()) {
+            byte[] serializedRange = serializeRange(entry.getValue());
+            serializedIdToTempRange.put(entry.getKey(), serializedRange);
+        }
+    }
+
+    @Override
+    public void gsonPostProcess() throws IOException {
+        super.gsonPostProcess();
+        idToRange = Maps.newConcurrentMap();
+        if (serializedIdToRange != null && !serializedIdToRange.isEmpty()) {
+            for (Map.Entry<Long, byte[]> entry : serializedIdToRange.entrySet()) {
+                idToRange.put(entry.getKey(), deserializeRange(entry.getValue()));
+            }
+            serializedIdToRange = null;
+        }
+        idToTempRange = Maps.newConcurrentMap();
+        if (serializedIdToTempRange != null && !serializedIdToTempRange.isEmpty()) {
+            for (Map.Entry<Long, byte[]> entry : serializedIdToTempRange.entrySet()) {
+                idToTempRange.put(entry.getKey(), deserializeRange(entry.getValue()));
+            }
+            serializedIdToTempRange = null;
+        }
+    }
+
     @Override
     public void write(DataOutput out) throws IOException {
         super.write(out);
@@ -357,13 +502,11 @@ public class RangePartitionInfo extends PartitionInfo {
             idToRange.put(partitionId, range);
         }
 
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_77) {
-            counter = in.readInt();
-            for (int i = 0; i < counter; i++) {
-                long partitionId = in.readLong();
-                Range<PartitionKey> range = RangeUtils.readRange(in);
-                idToTempRange.put(partitionId, range);
-            }
+        counter = in.readInt();
+        for (int i = 0; i < counter; i++) {
+            long partitionId = in.readLong();
+            Range<PartitionKey> range = RangeUtils.readRange(in);
+            idToTempRange.put(partitionId, range);
         }
     }
 
@@ -387,6 +530,16 @@ public class RangePartitionInfo extends PartitionInfo {
         Collections.sort(entries, RangeUtils.RANGE_MAP_ENTRY_COMPARATOR);
 
         idx = 0;
+        PartitionInfo tblPartitionInfo = table.getPartitionInfo();
+
+        String replicationNumStr = table.getTableProperty().getProperties().get("replication_num");
+        short replicationNum;
+        if (replicationNumStr == null) {
+            replicationNum = RunMode.defaultReplicationNum();
+        } else {
+            replicationNum = Short.parseShort(replicationNumStr);
+        }
+
         for (Map.Entry<Long, Range<PartitionKey>> entry : entries) {
             Partition partition = table.getPartition(entry.getKey());
             String partitionName = partition.getName();
@@ -401,7 +554,10 @@ public class RangePartitionInfo extends PartitionInfo {
                 partitionId.add(entry.getKey());
                 break;
             }
-
+            short curPartitionReplicationNum = tblPartitionInfo.getReplicationNum(entry.getKey());
+            if (curPartitionReplicationNum != replicationNum) {
+                sb.append("(").append("\"replication_num\" = \"").append(curPartitionReplicationNum).append("\")");
+            }
             if (idx != entries.size() - 1) {
                 sb.append(",\n");
             }
@@ -409,6 +565,20 @@ public class RangePartitionInfo extends PartitionInfo {
         }
         sb.append(")");
         return sb.toString();
+    }
+
+    public boolean isPartitionedBy(PrimitiveType type) {
+        return partitionColumns.size() == 1 && partitionColumns.get(0).getType().getPrimitiveType() == type;
+    }
+
+    @Override
+    protected Object clone() {
+        RangePartitionInfo info = (RangePartitionInfo) super.clone();
+        info.partitionColumns = Lists.newArrayList(this.partitionColumns);
+        info.idToRange = new ConcurrentHashMap<>(this.idToRange);
+        info.idToTempRange = new ConcurrentHashMap<>(this.idToTempRange);
+        info.isMultiColumnPartition = partitionColumns.size() > 1;
+        return info;
     }
 }
 

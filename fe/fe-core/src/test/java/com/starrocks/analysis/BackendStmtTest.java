@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/analysis/BackendStmtTest.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -22,7 +18,12 @@
 package com.starrocks.analysis;
 
 import com.google.common.collect.Lists;
-import com.starrocks.common.AnalysisException;
+import com.starrocks.qe.ConnectContext;
+import com.starrocks.sql.analyzer.SemanticException;
+import com.starrocks.sql.ast.AddBackendClause;
+import com.starrocks.sql.ast.AlterSystemStmt;
+import com.starrocks.sql.ast.BackendClause;
+import com.starrocks.sql.ast.DropBackendClause;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -33,7 +34,7 @@ public class BackendStmtTest {
 
     @BeforeClass
     public static void setUp() throws Exception {
-        analyzer = AccessTestUtil.fetchAdminAnalyzer(false);
+        analyzer = AccessTestUtil.fetchAdminAnalyzer();
     }
 
     public BackendClause createStmt(int type) {
@@ -65,29 +66,32 @@ public class BackendStmtTest {
         return stmt;
     }
 
-    @Test(expected = AnalysisException.class)
+    @Test(expected = SemanticException.class)
     public void initBackendsTest1() throws Exception {
         BackendClause stmt = createStmt(1);
-        stmt.analyze(analyzer);
+        com.starrocks.sql.analyzer.Analyzer.analyze(new AlterSystemStmt(stmt), new ConnectContext());
     }
 
-    @Test(expected = AnalysisException.class)
+    @Test(expected = SemanticException.class)
     public void initBackendsTest3() throws Exception {
         BackendClause stmt = createStmt(3);
-        stmt.analyze(analyzer);
+        com.starrocks.sql.analyzer.Analyzer.analyze(new AlterSystemStmt(stmt), new ConnectContext());
+
     }
 
     @Test
     public void initBackendsTest4() throws Exception {
         BackendClause stmt = createStmt(4);
-        stmt.analyze(analyzer);
-        Assert.assertEquals("ADD FREE BACKEND \"192.168.1.1:12345\"", stmt.toSql());
+        com.starrocks.sql.analyzer.Analyzer.analyze(new AlterSystemStmt(stmt), new ConnectContext());
+
+        Assert.assertEquals("[192.168.1.1:12345]", stmt.getHostPortPairs().toString());
     }
 
     @Test
     public void initBackendsTest5() throws Exception {
         BackendClause stmt = createStmt(5);
-        stmt.analyze(analyzer);
-        Assert.assertEquals("DROP BACKEND \"192.168.1.2:12345\"", stmt.toSql());
+        com.starrocks.sql.analyzer.Analyzer.analyze(new AlterSystemStmt(stmt), new ConnectContext());
+
+        Assert.assertEquals("[192.168.1.2:12345]", stmt.getHostPortPairs().toString());
     }
 }

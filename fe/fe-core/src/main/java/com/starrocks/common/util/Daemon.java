@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/util/Daemon.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -32,9 +28,9 @@ public class Daemon extends Thread {
     private static final int DEFAULT_INTERVAL_SECONDS = 30; // 30 seconds
 
     private long intervalMs;
-    private AtomicBoolean isStop;
     private Runnable runnable;
-    private AtomicBoolean isStart = new AtomicBoolean(false);
+    private final AtomicBoolean isStopped = new AtomicBoolean(false);
+    private final AtomicBoolean isRunning = new AtomicBoolean(false);
 
     private MetaContext metaContext = null;
 
@@ -45,19 +41,6 @@ public class Daemon extends Thread {
     public Daemon() {
         super();
         intervalMs = DEFAULT_INTERVAL_SECONDS * 1000L;
-        isStop = new AtomicBoolean(false);
-    }
-
-    public Daemon(Runnable runnable) {
-        super(runnable);
-        this.runnable = runnable;
-        this.setName(((Object) runnable).toString());
-    }
-
-    public Daemon(ThreadGroup group, Runnable runnable) {
-        super(group, runnable);
-        this.runnable = runnable;
-        this.setName(((Object) runnable).toString());
     }
 
     public Daemon(String name) {
@@ -80,7 +63,8 @@ public class Daemon extends Thread {
 
     @Override
     public synchronized void start() {
-        if (isStart.compareAndSet(false, true)) {
+        if (isRunning.compareAndSet(false, true)) {
+            isStopped.set(false);
             super.start();
         }
     }
@@ -89,8 +73,12 @@ public class Daemon extends Thread {
         this.metaContext = metaContext;
     }
 
-    public void exit() {
-        isStop.set(true);
+    public void setStop() {
+        isStopped.set(true);
+    }
+
+    public boolean isRunning() {
+        return isRunning.get();
     }
 
     public long getInterval() {
@@ -114,7 +102,7 @@ public class Daemon extends Thread {
             metaContext.setThreadLocalInfo();
         }
 
-        while (!isStop.get()) {
+        while (!isStopped.get()) {
             try {
                 runOneCycle();
             } catch (Throwable e) {
@@ -132,5 +120,8 @@ public class Daemon extends Thread {
             MetaContext.remove();
         }
         LOG.error("daemon thread exits. name=" + this.getName());
+        if (!isRunning.compareAndSet(true, false)) {
+            LOG.warn("set daemon thread {} to stop failed", getName());
+        }
     }
 }

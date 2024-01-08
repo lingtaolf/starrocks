@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/backup/BackupHandler.java
 
@@ -25,33 +38,39 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import com.starrocks.analysis.AbstractBackupStmt;
-import com.starrocks.analysis.BackupStmt;
-import com.starrocks.analysis.BackupStmt.BackupType;
-import com.starrocks.analysis.CancelBackupStmt;
-import com.starrocks.analysis.CreateRepositoryStmt;
-import com.starrocks.analysis.DropRepositoryStmt;
-import com.starrocks.analysis.PartitionNames;
-import com.starrocks.analysis.RestoreStmt;
+import com.google.gson.annotations.SerializedName;
 import com.starrocks.analysis.TableRef;
 import com.starrocks.backup.AbstractJob.JobType;
 import com.starrocks.backup.BackupJob.BackupJobState;
 import com.starrocks.backup.BackupJobInfo.BackupTableInfo;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.MaterializedIndex.IndexExtState;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Table;
-import com.starrocks.catalog.Table.TableType;
-import com.starrocks.cluster.ClusterNamespace;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReport;
 import com.starrocks.common.Pair;
 import com.starrocks.common.io.Writable;
-import com.starrocks.common.util.MasterDaemon;
+import com.starrocks.common.util.FrontendDaemon;
+import com.starrocks.meta.lock.LockType;
+import com.starrocks.meta.lock.Locker;
+import com.starrocks.persist.metablock.SRMetaBlockEOFException;
+import com.starrocks.persist.metablock.SRMetaBlockException;
+import com.starrocks.persist.metablock.SRMetaBlockID;
+import com.starrocks.persist.metablock.SRMetaBlockReader;
+import com.starrocks.persist.metablock.SRMetaBlockWriter;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.AbstractBackupStmt;
+import com.starrocks.sql.ast.BackupStmt;
+import com.starrocks.sql.ast.BackupStmt.BackupType;
+import com.starrocks.sql.ast.CancelBackupStmt;
+import com.starrocks.sql.ast.CreateRepositoryStmt;
+import com.starrocks.sql.ast.DropRepositoryStmt;
+import com.starrocks.sql.ast.PartitionNames;
+import com.starrocks.sql.ast.RestoreStmt;
 import com.starrocks.task.DirMoveTask;
 import com.starrocks.task.DownloadTask;
 import com.starrocks.task.SnapshotTask;
@@ -62,24 +81,30 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.DataInput;
+import java.io.DataInputStream;
 import java.io.DataOutput;
+import java.io.DataOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
-public class BackupHandler extends MasterDaemon implements Writable {
+public class BackupHandler extends FrontendDaemon implements Writable {
     private static final Logger LOG = LogManager.getLogger(BackupHandler.class);
 
     public static final int SIGNATURE_VERSION = 1;
     public static final Path BACKUP_ROOT_DIR = Paths.get(Config.tmp_dir, "backup").normalize();
     public static final Path RESTORE_ROOT_DIR = Paths.get(Config.tmp_dir, "restore").normalize();
 
+    public static final Path TEST_BACKUP_ROOT_DIR = Paths.get(Config.tmp_dir, "test_backup").normalize();
+
+    @SerializedName("rm")
     private RepositoryMgr repoMgr = new RepositoryMgr();
 
     // db id -> last running or finished backup/restore jobs
@@ -88,31 +113,31 @@ public class BackupHandler extends MasterDaemon implements Writable {
     // If the last job is finished, user can get the job info from repository. If the last job is cancelled,
     // user can get the error message before submitting the next one.
     // Use ConcurrentMap to get rid of locks.
-    private Map<Long, AbstractJob> dbIdToBackupOrRestoreJob = Maps.newConcurrentMap();
+    protected Map<Long, AbstractJob> dbIdToBackupOrRestoreJob = Maps.newConcurrentMap();
 
     // this lock is used for handling one backup or restore request at a time.
     private ReentrantLock seqlock = new ReentrantLock();
 
     private boolean isInit = false;
 
-    private Catalog catalog;
+    private GlobalStateMgr globalStateMgr;
 
     public BackupHandler() {
         // for persist
     }
 
-    public BackupHandler(Catalog catalog) {
+    public BackupHandler(GlobalStateMgr globalStateMgr) {
         super("backupHandler", 3000L);
-        this.catalog = catalog;
+        this.globalStateMgr = globalStateMgr;
     }
 
-    public void setCatalog(Catalog catalog) {
-        this.catalog = catalog;
+    public void setGlobalStateMgr(GlobalStateMgr globalStateMgr) {
+        this.globalStateMgr = globalStateMgr;
     }
 
     @Override
     public synchronized void start() {
-        Preconditions.checkNotNull(catalog);
+        Preconditions.checkNotNull(globalStateMgr);
         super.start();
         repoMgr.start();
     }
@@ -166,20 +191,22 @@ public class BackupHandler extends MasterDaemon implements Writable {
         }
 
         for (AbstractJob job : dbIdToBackupOrRestoreJob.values()) {
-            job.setCatalog(catalog);
+            job.setGlobalStateMgr(globalStateMgr);
             job.run();
         }
     }
 
     // handle create repository stmt
     public void createRepository(CreateRepositoryStmt stmt) throws DdlException {
-        if (!catalog.getBrokerMgr().containsBroker(stmt.getBrokerName())) {
-            ErrorReport
-                    .reportDdlException(ErrorCode.ERR_COMMON_ERROR, "broker does not exist: " + stmt.getBrokerName());
+        if (stmt.hasBroker()) {
+            if (!globalStateMgr.getBrokerMgr().containsBroker(stmt.getBrokerName())) {
+                ErrorReport
+                        .reportDdlException(ErrorCode.ERR_COMMON_ERROR, "broker does not exist: " + stmt.getBrokerName());
+            }
         }
 
-        BlobStorage storage = new BlobStorage(stmt.getBrokerName(), stmt.getProperties());
-        long repoId = catalog.getNextId();
+        BlobStorage storage = new BlobStorage(stmt.getBrokerName(), stmt.getProperties(), stmt.hasBroker());
+        long repoId = globalStateMgr.getNextId();
         Repository repo = new Repository(repoId, stmt.getName(), stmt.isReadOnly(), stmt.getLocation(), storage);
 
         Status st = repoMgr.addAndInitRepoIfNotExist(repo, false);
@@ -227,7 +254,7 @@ public class BackupHandler extends MasterDaemon implements Writable {
 
         // check if db exist
         String dbName = stmt.getDbName();
-        Database db = catalog.getDb(dbName);
+        Database db = globalStateMgr.getDb(dbName);
         if (db == null) {
             ErrorReport.reportDdlException(ErrorCode.ERR_BAD_DB_ERROR, dbName);
         }
@@ -274,11 +301,12 @@ public class BackupHandler extends MasterDaemon implements Writable {
         }
 
         // Check if backup objects are valid
-        // This is just a pre-check to avoid most of invalid backup requests.
+        // This is just a pre-check to avoid most of the invalid backup requests.
         // Also calculate the signature for incremental backup check.
         List<TableRef> tblRefs = stmt.getTableRefs();
         BackupMeta curBackupMeta = null;
-        db.readLock();
+        Locker locker = new Locker();
+        locker.lockDatabase(db, LockType.READ);
         try {
             List<Table> backupTbls = Lists.newArrayList();
             for (TableRef tblRef : tblRefs) {
@@ -286,22 +314,23 @@ public class BackupHandler extends MasterDaemon implements Writable {
                 Table tbl = db.getTable(tblName);
                 if (tbl == null) {
                     ErrorReport.reportDdlException(ErrorCode.ERR_BAD_TABLE_ERROR, tblName);
+                    return;
                 }
-                if (tbl.getType() != TableType.OLAP) {
+                if (!tbl.isOlapTableOrMaterializedView()) {
                     ErrorReport.reportDdlException(ErrorCode.ERR_NOT_OLAP_TABLE, tblName);
                 }
 
                 OlapTable olapTbl = (OlapTable) tbl;
                 if (olapTbl.existTempPartitions()) {
                     ErrorReport.reportDdlException(ErrorCode.ERR_COMMON_ERROR,
-                            "Do not support backup table with temp partitions");
+                            "Do not support backing up table with temp partitions");
                 }
 
                 PartitionNames partitionNames = tblRef.getPartitionNames();
                 if (partitionNames != null) {
                     if (partitionNames.isTemp()) {
                         ErrorReport.reportDdlException(ErrorCode.ERR_COMMON_ERROR,
-                                "Do not support backuping temp partitions");
+                                "Do not support backing up temp partitions");
                     }
 
                     for (String partName : partitionNames.getPartitionNames()) {
@@ -324,7 +353,7 @@ public class BackupHandler extends MasterDaemon implements Writable {
             }
             curBackupMeta = new BackupMeta(backupTbls);
         } finally {
-            db.readUnlock();
+            locker.unLockDatabase(db, LockType.READ);
         }
 
         // Check if label already be used
@@ -362,12 +391,10 @@ public class BackupHandler extends MasterDaemon implements Writable {
         }
 
         // Create a backup job
-        BackupJob backupJob = new BackupJob(stmt.getLabel(), db.getId(),
-                ClusterNamespace.getNameFromFullName(db.getFullName()),
-                tblRefs, stmt.getTimeoutMs(),
-                catalog, repository.getId());
+        BackupJob backupJob = new BackupJob(stmt.getLabel(), db.getId(), db.getOriginName(), tblRefs,
+                stmt.getTimeoutMs(), globalStateMgr, repository.getId());
         // write log
-        catalog.getEditLog().logBackupJob(backupJob);
+        globalStateMgr.getEditLog().logBackupJob(backupJob);
 
         // must put to dbIdToBackupOrRestoreJob after edit log, otherwise the state of job may be changed.
         dbIdToBackupOrRestoreJob.put(db.getId(), backupJob);
@@ -389,18 +416,52 @@ public class BackupHandler extends MasterDaemon implements Writable {
         // Also remove all unrelated objs
         Preconditions.checkState(infos.size() == 1);
         BackupJobInfo jobInfo = infos.get(0);
-        checkAndFilterRestoreObjsExistInSnapshot(jobInfo, stmt.getTableRefs());
+        // If TableRefs is empty, it means that we do not specify any table in Restore stmt.
+        // So, we should restore all table in current database.
+        if (stmt.getTableRefs().size() != 0) {
+            checkAndFilterRestoreObjsExistInSnapshot(jobInfo, stmt.getTableRefs());
+        }
+
+        BackupMeta backupMeta = downloadAndDeserializeMetaInfo(jobInfo, repository, stmt);
 
         // Create a restore job
-        RestoreJob restoreJob = new RestoreJob(stmt.getLabel(), stmt.getBackupTimestamp(),
-                db.getId(), db.getFullName(), jobInfo, stmt.allowLoad(), stmt.getReplicationNum(),
-                stmt.getTimeoutMs(), stmt.getMetaVersion(), stmt.getStarRocksMetaVersion(), catalog, repository.getId());
-        catalog.getEditLog().logRestoreJob(restoreJob);
+        RestoreJob restoreJob = null;
+        if (backupMeta != null) {
+            for (BackupTableInfo tblInfo : jobInfo.tables.values()) {
+                Table remoteTbl = backupMeta.getTable(tblInfo.name);
+                if (remoteTbl.isCloudNativeTable()) {
+                    ErrorReport.reportDdlException(ErrorCode.ERR_NOT_OLAP_TABLE, remoteTbl.getName());
+                }
+            }
+        }
+        restoreJob = new RestoreJob(stmt.getLabel(), stmt.getBackupTimestamp(),
+                db.getId(), db.getOriginName(), jobInfo, stmt.allowLoad(), stmt.getReplicationNum(),
+                stmt.getTimeoutMs(), globalStateMgr, repository.getId(), backupMeta);
+        globalStateMgr.getEditLog().logRestoreJob(restoreJob);
 
         // must put to dbIdToBackupOrRestoreJob after edit log, otherwise the state of job may be changed.
         dbIdToBackupOrRestoreJob.put(db.getId(), restoreJob);
 
         LOG.info("finished to submit restore job: {}", restoreJob);
+    }
+
+    private BackupMeta downloadAndDeserializeMetaInfo(BackupJobInfo jobInfo, Repository repo, RestoreStmt stmt) {
+        // the meta version is used when reading backup meta from file.
+        // we do not persist this field, because this is just a temporary solution.
+        // the true meta version should be getting from backup job info, which is saved when doing backup job.
+        // But the earlier version of StarRocks do not save the meta version in backup job info, so we allow user to
+        // set this 'metaVersion' in restore stmt.
+        // NOTICE: because we do not persist it, this info may be lost if Frontend restart,
+        // and if you don't want to lose it, backup your data again by using latest StarRocks version.
+        List<BackupMeta> backupMetas = Lists.newArrayList();
+        Status st = repo.getSnapshotMetaFile(jobInfo.name, backupMetas,
+                stmt.getMetaVersion() == -1 ? jobInfo.metaVersion : stmt.getMetaVersion(),
+                stmt.getStarRocksMetaVersion() == -1 ? jobInfo.starrocksMetaVersion : stmt.getStarRocksMetaVersion());
+        if (!st.ok()) {
+            return null;
+        }
+        Preconditions.checkState(backupMetas.size() == 1);
+        return backupMetas.get(0);
     }
 
     private void checkAndFilterRestoreObjsExistInSnapshot(BackupJobInfo jobInfo, List<TableRef> tblRefs)
@@ -443,14 +504,16 @@ public class BackupHandler extends MasterDaemon implements Writable {
         jobInfo.retainTables(allTbls);
     }
 
-    public void cancel(CancelBackupStmt stmt) throws DdlException {
-        String dbName = stmt.getDbName();
-        Database db = catalog.getDb(dbName);
+    public AbstractJob getAbstractJobByDbName(String dbName) throws DdlException {
+        Database db = globalStateMgr.getDb(dbName);
         if (db == null) {
             ErrorReport.reportDdlException(ErrorCode.ERR_BAD_DB_ERROR, dbName);
         }
+        return dbIdToBackupOrRestoreJob.get(db.getId());
+    }
 
-        AbstractJob job = dbIdToBackupOrRestoreJob.get(db.getId());
+    public void cancel(CancelBackupStmt stmt) throws DdlException {
+        AbstractJob job = getAbstractJobByDbName(stmt.getDbName());
         if (job == null || (job instanceof BackupJob && stmt.isRestore())
                 || (job instanceof RestoreJob && !stmt.isRestore())) {
             ErrorReport.reportDdlException(ErrorCode.ERR_COMMON_ERROR, "No "
@@ -536,7 +599,7 @@ public class BackupHandler extends MasterDaemon implements Writable {
                         existingJob, job);
                 return;
             }
-            existingJob.setCatalog(catalog);
+            existingJob.setGlobalStateMgr(globalStateMgr);
             existingJob.replayCancel();
         } else if (!job.isPending()) {
             AbstractJob existingJob = dbIdToBackupOrRestoreJob.get(job.getDbId());
@@ -549,6 +612,10 @@ public class BackupHandler extends MasterDaemon implements Writable {
             // Because if we use the existing job to run again,
             // for example: In restore job, PENDING will transfer to SNAPSHOTING, not DOWNLOAD.
             job.replayRun();
+        }
+        if (isJobExpired(job, System.currentTimeMillis())) {
+            LOG.warn("skip expired job {}", job);
+            return;
         }
         dbIdToBackupOrRestoreJob.put(job.getDbId(), job);
     }
@@ -589,10 +656,79 @@ public class BackupHandler extends MasterDaemon implements Writable {
     public void readFields(DataInput in) throws IOException {
         repoMgr = RepositoryMgr.read(in);
 
+        long currentTimeMs = System.currentTimeMillis();
         int size = in.readInt();
         for (int i = 0; i < size; i++) {
             AbstractJob job = AbstractJob.read(in);
+            if (isJobExpired(job, currentTimeMs)) {
+                LOG.warn("skip expired job {}", job);
+                continue;
+            }
             dbIdToBackupOrRestoreJob.put(job.getDbId(), job);
+        }
+        LOG.info("finished replay {} backup/store jobs from image", dbIdToBackupOrRestoreJob.size());
+    }
+
+    public long saveBackupHandler(DataOutputStream dos, long checksum) throws IOException {
+        write(dos);
+        return checksum;
+    }
+
+    public long loadBackupHandler(DataInputStream dis, long checksum, GlobalStateMgr globalStateMgr) throws IOException {
+        readFields(dis);
+        setGlobalStateMgr(globalStateMgr);
+        LOG.info("finished replay backupHandler from image");
+        return checksum;
+    }
+
+    public void saveBackupHandlerV2(DataOutputStream dos) throws IOException, SRMetaBlockException {
+        SRMetaBlockWriter writer = new SRMetaBlockWriter(dos,
+                SRMetaBlockID.BACKUP_MGR, 2 + dbIdToBackupOrRestoreJob.size());
+        writer.writeJson(this);
+        writer.writeJson(dbIdToBackupOrRestoreJob.size());
+        for (AbstractJob job : dbIdToBackupOrRestoreJob.values()) {
+            writer.writeJson(job);
+        }
+        writer.close();
+    }
+
+    public void loadBackupHandlerV2(SRMetaBlockReader reader) throws IOException, SRMetaBlockException, SRMetaBlockEOFException {
+        BackupHandler data = reader.readJson(BackupHandler.class);
+        this.repoMgr = data.repoMgr;
+        int size = reader.readInt();
+        long currentTimeMs = System.currentTimeMillis();
+        while (size-- > 0) {
+            AbstractJob job = reader.readJson(AbstractJob.class);
+            if (isJobExpired(job, currentTimeMs)) {
+                LOG.warn("skip expired job {}", job);
+                continue;
+            }
+            dbIdToBackupOrRestoreJob.put(job.getDbId(), job);
+        }
+    }
+
+    /**
+     * will remove finished/cancelled job periodically
+     */
+    private boolean isJobExpired(AbstractJob job, long currentTimeMs) {
+        return (job.isDone() || job.isCancelled())
+                && (currentTimeMs - job.getFinishedTime()) / 1000 > Config.history_job_keep_max_second;
+    }
+
+    public void removeOldJobs() throws DdlException {
+        tryLock();
+        try {
+            long currentTimeMs = System.currentTimeMillis();
+            Iterator<Map.Entry<Long, AbstractJob>> iterator = dbIdToBackupOrRestoreJob.entrySet().iterator();
+            while (iterator.hasNext()) {
+                AbstractJob job = iterator.next().getValue();
+                if (isJobExpired(job, currentTimeMs)) {
+                    LOG.warn("discard expired job {}", job);
+                    iterator.remove();
+                }
+            }
+        } finally {
+            seqlock.unlock();
         }
     }
 }

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/http/download_action.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_HTTP_DOWNLOAD_ACTION_H
-#define STARROCKS_BE_SRC_HTTP_DOWNLOAD_ACTION_H
+#pragma once
 
 #include "exec/scan_node.h"
 #include "http/http_handler.h"
@@ -42,7 +37,7 @@ public:
     // for load error
     DownloadAction(ExecEnv* exec_env, const std::string& error_log_root_dir);
 
-    virtual ~DownloadAction() {}
+    ~DownloadAction() override = default;
 
     void handle(HttpRequest* req) override;
 
@@ -67,4 +62,3 @@ private:
 }; // end class DownloadAction
 
 } // end namespace starrocks
-#endif // STARROCKS_BE_SRC_HTTP_DOWNLOAD_ACTION_H

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/proc/IndexInfoProcDir.java
 
@@ -32,6 +45,8 @@ import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.Table.TableType;
 import com.starrocks.common.AnalysisException;
+import com.starrocks.meta.lock.LockType;
+import com.starrocks.meta.lock.Locker;
 
 import java.util.List;
 import java.util.Set;
@@ -61,9 +76,10 @@ public class IndexInfoProcDir implements ProcDirInterface {
 
         BaseProcResult result = new BaseProcResult();
         result.setNames(TITLE_NAMES);
-        db.readLock();
+        Locker locker = new Locker();
+        locker.lockDatabase(db, LockType.READ);
         try {
-            if (table.getType() == TableType.OLAP) {
+            if (table.isNativeTableOrMaterializedView()) {
                 OlapTable olapTable = (OlapTable) table;
 
                 // indices order
@@ -100,7 +116,7 @@ public class IndexInfoProcDir implements ProcDirInterface {
 
             return result;
         } finally {
-            db.readUnlock();
+            locker.unLockDatabase(db, LockType.READ);
         }
     }
 
@@ -121,7 +137,8 @@ public class IndexInfoProcDir implements ProcDirInterface {
             throw new AnalysisException("Invalid index id format: " + idxIdStr);
         }
 
-        db.readLock();
+        Locker locker = new Locker();
+        locker.lockDatabase(db, LockType.READ);
         try {
             List<Column> schema = null;
             Set<String> bfColumns = null;
@@ -135,9 +152,13 @@ public class IndexInfoProcDir implements ProcDirInterface {
             } else {
                 schema = table.getBaseSchema();
             }
-            return new IndexSchemaProcNode(schema, bfColumns);
+            IndexSchemaProcNode node = new IndexSchemaProcNode(schema, bfColumns);
+            if (table.getType() == TableType.OLAP || table.getType() == TableType.OLAP_EXTERNAL) {
+                node.setHideAggregationType(true);
+            }
+            return node;
         } finally {
-            db.readUnlock();
+            locker.unLockDatabase(db, LockType.READ);
         }
     }
 

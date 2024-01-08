@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/http/action/snapshot_action.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_HTTP_SNAPSHOT_ACTION_H
-#define STARROCKS_BE_SRC_HTTP_SNAPSHOT_ACTION_H
+#pragma once
 
 #include <cstdint>
 #include <string>
@@ -37,16 +32,15 @@ class SnapshotAction : public HttpHandler {
 public:
     explicit SnapshotAction(ExecEnv* exec_env);
 
-    virtual ~SnapshotAction() {}
+    ~SnapshotAction() override = default;
 
     void handle(HttpRequest* req) override;
 
 private:
-    std::int64_t make_snapshot(std::int64_t tablet_id, int schema_hash, std::string* snapshot_path);
+    int64_t make_snapshot(int64_t tablet_id, int schema_hash, std::string* snapshot_path);
 
-    ExecEnv* _exec_env;
+    [[maybe_unused]] ExecEnv* _exec_env;
 
 }; // end class SnapshotAction
 
 } // end namespace starrocks
-#endif // STARROCKS_BE_SRC_HTTP_SNAPSHOT_ACTION_H

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/test/common/config_test.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -72,6 +68,7 @@ TEST_F(ConfigTest, UpdateConfigs) {
     CONF_mInt32(cfg_int32_t, "65536123");
     CONF_mInt64(cfg_int64_t, "4294967296123");
     CONF_String(cfg_std_string, "starrocks_config_test_string");
+    CONF_mString(cfg_std_string_mutable, "starrocks_config_test_string_mutable");
 
     config::init(nullptr, true);
 
@@ -99,6 +96,11 @@ TEST_F(ConfigTest, UpdateConfigs) {
     ASSERT_EQ(cfg_int64_t, 4294967296123);
     ASSERT_TRUE(config::set_config("cfg_int64_t", "4294967296124").ok());
     ASSERT_EQ(cfg_int64_t, 4294967296124);
+
+    // string
+    ASSERT_EQ(cfg_std_string_mutable, "starrocks_config_test_string_mutable");
+    ASSERT_TRUE(config::set_config("cfg_std_string_mutable", "hello SR").ok());
+    ASSERT_EQ(cfg_std_string_mutable, "hello SR");
 
     // not exist
     Status s = config::set_config("cfg_not_exist", "123");

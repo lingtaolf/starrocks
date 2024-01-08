@@ -1,4 +1,16 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #pragma once
 
@@ -8,28 +20,31 @@
 #include "column/vectorized_fwd.h"
 #include "exprs/agg/aggregate.h"
 #include "gutil/casts.h"
+#include "types/hll.h"
 
-namespace starrocks::vectorized {
+namespace starrocks {
 
 /**
  * RETURN_TYPE: TYPE_BIGINT
  * ARGS_TYPE: ALL TYPE
  * SERIALIZED_TYPE: TYPE_VARCHAR
  */
-template <PrimitiveType PT, typename T = RunTimeCppType<PT>>
-class HllNdvAggregateFunction final : public AggregateFunctionBatchHelper<HyperLogLog, HllNdvAggregateFunction<PT, T>> {
+template <LogicalType LT, bool IsOutputHLL, typename T = RunTimeCppType<LT>>
+class HllNdvAggregateFunction final
+        : public AggregateFunctionBatchHelper<HyperLogLog, HllNdvAggregateFunction<LT, IsOutputHLL, T>> {
 public:
-    using ColumnType = RunTimeColumnType<PT>;
+    using ColumnType = RunTimeColumnType<LT>;
 
     void reset(FunctionContext* ctx, const Columns& args, AggDataPtr state) const override {
         this->data(state).clear();
     }
 
-    void update(FunctionContext* ctx, const Column** columns, AggDataPtr state, size_t row_num) const override {
+    void update(FunctionContext* ctx, const Column** columns, AggDataPtr __restrict state,
+                size_t row_num) const override {
         uint64_t value = 0;
-        const ColumnType* column = down_cast<const ColumnType*>(columns[0]);
+        const auto* column = down_cast<const ColumnType*>(columns[0]);
 
-        if constexpr (pt_is_binary<PT>) {
+        if constexpr (lt_is_string<LT>) {
             Slice s = column->get_slice(row_num);
             value = HashUtil::murmur_hash64A(s.data, s.size, HashUtil::MURMUR_SEED);
         } else {
@@ -42,12 +57,12 @@ public:
         }
     }
 
-    void update_batch_single_state(FunctionContext* ctx, AggDataPtr state, const Column** columns,
-                                   int64_t peer_group_start, int64_t peer_group_end, int64_t frame_start,
-                                   int64_t frame_end) const override {
-        const ColumnType* column = down_cast<const ColumnType*>(columns[0]);
+    void update_batch_single_state_with_frame(FunctionContext* ctx, AggDataPtr __restrict state, const Column** columns,
+                                              int64_t peer_group_start, int64_t peer_group_end, int64_t frame_start,
+                                              int64_t frame_end) const override {
+        const auto* column = down_cast<const ColumnType*>(columns[0]);
 
-        if constexpr (pt_is_binary<PT>) {
+        if constexpr (lt_is_string<LT>) {
             uint64_t value = 0;
             for (size_t i = frame_start; i < frame_end; ++i) {
                 Slice s = column->get_slice(i);
@@ -70,17 +85,18 @@ public:
         }
     }
 
-    void merge(FunctionContext* ctx, const Column* column, AggDataPtr state, size_t row_num) const override {
+    void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
         DCHECK(column->is_binary());
 
-        const BinaryColumn* hll_column = down_cast<const BinaryColumn*>(column);
+        const auto* hll_column = down_cast<const BinaryColumn*>(column);
         HyperLogLog hll(hll_column->get(row_num).get_slice());
         this->data(state).merge(hll);
     }
 
-    void get_values(FunctionContext* ctx, ConstAggDataPtr state, Column* dst, size_t start, size_t end) const {
+    void get_values(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* dst, size_t start,
+                    size_t end) const override {
         DCHECK_GT(end, start);
-        Int64Column* column = down_cast<Int64Column*>(dst);
+        auto* column = down_cast<Int64Column*>(dst);
         int64_t result = this->data(state).estimate_cardinality();
 
         for (size_t i = start; i < end; ++i) {
@@ -88,7 +104,7 @@ public:
         }
     }
 
-    void serialize_to_column(FunctionContext* ctx __attribute__((unused)), ConstAggDataPtr state,
+    void serialize_to_column([[maybe_unused]] FunctionContext* ctx, ConstAggDataPtr __restrict state,
                              Column* to) const override {
         DCHECK(to->is_binary());
 
@@ -100,8 +116,9 @@ public:
         column->append(Slice(result, size));
     }
 
-    void convert_to_serialize_format(const Columns& src, size_t chunk_size, ColumnPtr* dst) const override {
-        const ColumnType* column = down_cast<const ColumnType*>(src[0].get());
+    void convert_to_serialize_format([[maybe_unused]] FunctionContext* ctx, const Columns& src, size_t chunk_size,
+                                     ColumnPtr* dst) const override {
+        const auto* column = down_cast<const ColumnType*>(src[0].get());
         auto* result = down_cast<BinaryColumn*>((*dst).get());
 
         Bytes& bytes = result->get_bytes();
@@ -112,7 +129,7 @@ public:
         uint64_t value = 0;
         for (size_t i = 0; i < chunk_size; ++i) {
             HyperLogLog hll;
-            if constexpr (pt_is_binary<PT>) {
+            if constexpr (lt_is_string<LT>) {
                 Slice s = column->get_slice(i);
                 value = HashUtil::murmur_hash64A(s.data, s.size, HashUtil::MURMUR_SEED);
             } else {
@@ -132,15 +149,28 @@ public:
         }
     }
 
-    void finalize_to_column(FunctionContext* ctx __attribute__((unused)), ConstAggDataPtr state,
+    void finalize_to_column(FunctionContext* ctx __attribute__((unused)), ConstAggDataPtr __restrict state,
                             Column* to) const override {
-        DCHECK(to->is_numeric());
+        if constexpr (IsOutputHLL) {
+            DCHECK(to->is_object());
+            auto* column = down_cast<HyperLogLogColumn*>(to);
+            auto& hll_value = const_cast<HyperLogLog&>(this->data(state));
+            column->append(std::move(hll_value));
+        } else {
+            DCHECK(to->is_numeric());
 
-        auto* column = down_cast<Int64Column*>(to);
-        column->append(this->data(state).estimate_cardinality());
+            auto* column = down_cast<Int64Column*>(to);
+            column->append(this->data(state).estimate_cardinality());
+        }
     }
 
-    std::string get_name() const override { return "ndv"; }
+    std::string get_name() const override {
+        if constexpr (IsOutputHLL) {
+            return "hll_raw";
+        } else {
+            return "ndv";
+        }
+    }
 };
 
-} // namespace starrocks::vectorized
+} // namespace starrocks

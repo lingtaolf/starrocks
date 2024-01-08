@@ -1,26 +1,21 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/ArrayType.java
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
 
 package com.starrocks.catalog;
 
+import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.gson.annotations.SerializedName;
@@ -37,13 +32,6 @@ public class ArrayType extends Type {
     private Type itemType;
 
     public ArrayType(Type itemType) {
-        if (itemType != null && itemType.isDecimalV3()) {
-            throw new InternalError("Decimal32/64/128 is not supported in current version");
-        }
-        this.itemType = itemType;
-    }
-
-    public ArrayType(Type itemType, boolean fromSubQuery) {
         this.itemType = itemType;
     }
 
@@ -68,9 +56,9 @@ public class ArrayType extends Type {
     @Override
     public String toSql(int depth) {
         if (depth >= MAX_NESTING_DEPTH) {
-            return "ARRAY<...>";
+            return "array<...>";
         }
-        return String.format("ARRAY<%s>", itemType.toSql(depth + 1));
+        return String.format("array<%s>", itemType.toSql(depth + 1));
     }
 
     @Override
@@ -83,12 +71,31 @@ public class ArrayType extends Type {
     }
 
     @Override
+    public int hashCode() {
+        return Objects.hashCode(itemType);
+    }
+
+    @Override
     public void toThrift(TTypeDesc container) {
         TTypeNode node = new TTypeNode();
         container.types.add(node);
         Preconditions.checkNotNull(itemType);
         node.setType(TTypeNodeType.ARRAY);
         itemType.toThrift(container);
+    }
+
+    @Override
+    public boolean isFullyCompatible(Type other) {
+        if (!other.isArrayType()) {
+            return false;
+        }
+
+        if (equals(other)) {
+            return true;
+        }
+
+        ArrayType t = (ArrayType) other;
+        return itemType.isFullyCompatible(t.getItemType());
     }
 
     @Override
@@ -116,8 +123,48 @@ public class ArrayType extends Type {
         return clone;
     }
 
-    public int getDimensions() {
-        return itemType.isArrayType() ? 1 + ((ArrayType) itemType).getDimensions() : 1;
+    @Override
+    public void selectAllFields() {
+        if (itemType.isComplexType()) {
+            itemType.selectAllFields();
+        }
+    }
+
+    public void pruneUnusedSubfields() {
+        if (itemType.isComplexType()) {
+            itemType.pruneUnusedSubfields();
+        }
+    }
+
+    /**
+     * @return 33 (utf8_general_ci) if type is array
+     * https://dev.mysql.com/doc/internals/en/com-query-response.html#column-definition
+     * character_set (2) -- is the column character set and is defined in Protocol::CharacterSet.
+     */
+    @Override
+    public int getMysqlResultSetFieldCharsetIndex() {
+        return CHARSET_UTF8;
+    }
+
+    public boolean hasNumericItem() {
+        return itemType.isNumericType();
+    }
+
+    public boolean isBooleanType() {
+        return itemType.isBoolean();
+    }
+
+    public boolean isNullTypeItem() {
+        return itemType.isNull();
+    }
+
+    public String toMysqlDataTypeString() {
+        return "array";
+    }
+
+    // This implementation is the same as BE schema_columns_scanner.cpp type_to_string
+    public String toMysqlColumnTypeString() {
+        return toSql();
     }
 }
 

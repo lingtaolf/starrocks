@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/test/runtime/decimalv2_value_test.cpp
 
@@ -553,7 +566,7 @@ TEST_F(DecimalV2ValueTest, round_to_int) {
 // NOLINTNEXTLINE
 TEST_F(DecimalV2ValueTest, double_to_decimal) {
     double i = 1.2;
-    DecimalV2Value* value = new DecimalV2Value(100, 9876);
+    auto* value = new DecimalV2Value(100, 9876);
     value->assign_from_double(i);
     ASSERT_STREQ("1.2", value->to_string().c_str());
     delete value;
@@ -562,7 +575,7 @@ TEST_F(DecimalV2ValueTest, double_to_decimal) {
 // NOLINTNEXTLINE
 TEST_F(DecimalV2ValueTest, float_to_decimal) {
     float i = 1.2;
-    DecimalV2Value* value = new DecimalV2Value(100, 9876);
+    auto* value = new DecimalV2Value(100, 9876);
     value->assign_from_float(i);
     ASSERT_STREQ("1.2", value->to_string().c_str());
     delete value;
@@ -570,9 +583,9 @@ TEST_F(DecimalV2ValueTest, float_to_decimal) {
 TEST_F(DecimalV2ValueTest, parse_high_scale_decimal_string) {
     std::vector<std::tuple<std::string, std::string>> test_cases = {
             {"0.0000000000000000000000000", "0"},
-            {"1455434.99999999999999999999", "1455434.999999999"},
+            {"1455434.99999999999999999999", "1455435"},
             //{"1000.11233454589877", "1000.112334545"},
-            {"1000.11233454589877", "1000.112334545"},
+            {"1000.11233454589877", "1000.112334546"},
     };
     for (auto& tc : test_cases) {
         DecimalV2Value value;

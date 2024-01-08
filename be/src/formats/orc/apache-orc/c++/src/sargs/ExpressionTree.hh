@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/sargs/ExpressionTree.hh
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -20,8 +16,7 @@
  * limitations under the License.
  */
 
-#ifndef ORC_EXPRESSIONTREE_HH
-#define ORC_EXPRESSIONTREE_HH
+#pragma once
 
 #include <limits>
 #include <memory>
@@ -70,7 +65,7 @@ public:
 
     void setLeaf(size_t leaf);
 
-    void addChild(TreeNode child);
+    void addChild(const TreeNode& child);
 
     std::string toString() const;
 
@@ -84,5 +79,3 @@ private:
 };
 
 } // namespace orc
-
-#endif //ORC_EXPRESSIONTREE_HH

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/mysql/privilege/UserIdentityTest.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,8 +17,7 @@
 
 package com.starrocks.mysql.privilege;
 
-import com.starrocks.analysis.UserIdentity;
-import com.starrocks.system.SystemInfoService;
+import com.starrocks.sql.ast.UserIdentity;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -30,20 +25,18 @@ public class UserIdentityTest {
 
     @Test
     public void test() {
-        UserIdentity userIdent = new UserIdentity(SystemInfoService.DEFAULT_CLUSTER + ":cmy", "192.%");
-        userIdent.setIsAnalyzed();
+        UserIdentity userIdent = new UserIdentity("cmy", "192.%");
 
-        String str = "'" + SystemInfoService.DEFAULT_CLUSTER + ":cmy" + "'@'192.%'";
+        String str = "'" + "cmy" + "'@'192.%'";
         Assert.assertEquals(str, userIdent.toString());
 
         UserIdentity userIdent2 = UserIdentity.fromString(str);
         Assert.assertEquals(userIdent2.toString(), userIdent.toString());
 
-        String str2 = "'default_cluster:walletdc_write'@['cluster-leida.orp.all']";
+        String str2 = "'walletdc_write'@['cluster-leida.orp.all']";
         userIdent = UserIdentity.fromString(str2);
         Assert.assertNotNull(userIdent);
         Assert.assertTrue(userIdent.isDomain());
-        userIdent.setIsAnalyzed();
         Assert.assertEquals(str2, userIdent.toString());
     }
 

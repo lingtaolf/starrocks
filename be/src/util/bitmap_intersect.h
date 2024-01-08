@@ -1,9 +1,23 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #pragma once
 
 #include "exprs/anyval_util.h"
-#include "util/bitmap_value.h"
+#include "runtime/datetime_value.h"
+#include "runtime/string_value.h"
+#include "types/bitmap_value.h"
 
 namespace starrocks {
 
@@ -13,30 +27,6 @@ const int DATETIME_PACKED_TIME_BYTE_SIZE = 8;
 const int DATETIME_TYPE_BYTE_SIZE = 4;
 
 const int DECIMAL_BYTE_SIZE = 16;
-
-// get_val start
-template <typename ValType, typename T>
-T get_val(const ValType& x) {
-    DCHECK(!x.is_null);
-    return x.val;
-}
-
-template <>
-inline StringValue get_val(const StringVal& x) {
-    DCHECK(!x.is_null);
-    return StringValue::from_string_val(x);
-}
-
-template <>
-inline DateTimeValue get_val(const DateTimeVal& x) {
-    return DateTimeValue::from_datetime_val(x);
-}
-
-template <>
-inline DecimalV2Value get_val(const DecimalV2Val& x) {
-    return DecimalV2Value::from_decimal_val(x);
-}
-// get_val end
 
 // serialize_size start
 template <typename T>
@@ -83,33 +73,6 @@ inline char* write_to(const std::string& v, char* dest) {
     return dest;
 }
 
-template <>
-inline char* write_to(const DateTimeValue& v, char* dest) {
-    DateTimeVal value;
-    v.to_datetime_val(&value);
-    *(int64_t*)dest = value.packed_time;
-    dest += DATETIME_PACKED_TIME_BYTE_SIZE;
-    *(int*)dest = value.type;
-    dest += DATETIME_TYPE_BYTE_SIZE;
-    return dest;
-}
-
-template <>
-inline char* write_to(const DecimalV2Value& v, char* dest) {
-    __int128 value = v.value();
-    memcpy(dest, &value, DECIMAL_BYTE_SIZE);
-    dest += DECIMAL_BYTE_SIZE;
-    return dest;
-}
-
-template <>
-inline char* write_to(const StringValue& v, char* dest) {
-    *(int32_t*)dest = v.len;
-    dest += 4;
-    memcpy(dest, v.ptr, v.len);
-    dest += v.len;
-    return dest;
-}
 // write_to end
 
 // read_from start
@@ -127,43 +90,9 @@ inline void read_from(const char** src, std::string* result) {
     *result = std::string((char*)*src, length);
     *src += length;
 }
-
-template <>
-inline void read_from(const char** src, DateTimeValue* result) {
-    DateTimeVal value;
-    value.is_null = false;
-    value.packed_time = *(int64_t*)(*src);
-    *src += DATETIME_PACKED_TIME_BYTE_SIZE;
-    value.type = *(int*)(*src);
-    *src += DATETIME_TYPE_BYTE_SIZE;
-    *result = DateTimeValue::from_datetime_val(value);
-    ;
-}
-
-template <>
-inline void read_from(const char** src, DecimalV2Value* result) {
-    __int128 v = 0;
-    memcpy(&v, *src, DECIMAL_BYTE_SIZE);
-    *src += DECIMAL_BYTE_SIZE;
-    *result = DecimalV2Value(v);
-}
-
-template <>
-inline void read_from(const char** src, StringValue* result) {
-    int32_t length = *(int32_t*)(*src);
-    *src += 4;
-    *result = StringValue((char*)*src, length);
-    *src += length;
-}
 // read_from end
 
 } // namespace detail
-
-[[maybe_unused]] static StringVal serialize(FunctionContext* ctx, BitmapValue* value) {
-    StringVal result(ctx, value->getSizeInBytes());
-    value->write((char*)result.ptr);
-    return result;
-}
 
 // Calculate the intersection of two or more bitmaps
 // Usage: intersect_count(bitmap_column_to_count, filter_column, filter_values ...)
@@ -172,7 +101,7 @@ inline void read_from(const char** src, StringValue* result) {
 template <typename T>
 struct BitmapIntersect {
 public:
-    BitmapIntersect() {}
+    BitmapIntersect() = default;
 
     explicit BitmapIntersect(const char* src) { deserialize(src); }
 
@@ -219,7 +148,6 @@ public:
         size_t size = 4;
         for (auto& kv : _bitmaps) {
             size += detail::serialize_size(kv.first);
-            ;
             size += kv.second.getSizeInBytes();
         }
         return size;

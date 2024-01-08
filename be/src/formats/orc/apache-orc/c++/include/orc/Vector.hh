@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/orc/tree/main/c++/include/orc/Vector.hh
 
@@ -20,8 +33,7 @@
  * limitations under the License.
  */
 
-#ifndef ORC_VECTOR_HH
-#define ORC_VECTOR_HH
+#pragma once
 
 #include <cstdlib>
 #include <cstring>
@@ -29,6 +41,7 @@
 #include <list>
 #include <memory>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 #include "Int128.hh"
@@ -92,43 +105,45 @@ struct ColumnVectorBatch {
     // f_size: filter size
     // true_size: number of ones in filter data.
     virtual void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size);
+    virtual void filterOnFields(uint8_t* f_data, uint32_t f_size, uint32_t true_size, const std::vector<int>& fields,
+                                bool onLazyLoad);
 
 private:
-    ColumnVectorBatch(const ColumnVectorBatch&);
-    ColumnVectorBatch& operator=(const ColumnVectorBatch&);
+    ColumnVectorBatch(const ColumnVectorBatch&) = delete;
+    ColumnVectorBatch& operator=(const ColumnVectorBatch&) = delete;
 };
 
 struct LongVectorBatch : public ColumnVectorBatch {
     LongVectorBatch(uint64_t capacity, MemoryPool& pool);
-    virtual ~LongVectorBatch();
+    ~LongVectorBatch() override;
 
     DataBuffer<int64_t> data;
-    std::string toString() const;
-    void resize(uint64_t capacity);
-    void clear();
-    uint64_t getMemoryUsage();
-    virtual void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
+    std::string toString() const override;
+    void resize(uint64_t capacity) override;
+    void clear() override;
+    uint64_t getMemoryUsage() override;
+    void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
 };
 
 struct DoubleVectorBatch : public ColumnVectorBatch {
     DoubleVectorBatch(uint64_t capacity, MemoryPool& pool);
-    virtual ~DoubleVectorBatch();
-    std::string toString() const;
-    void resize(uint64_t capacity);
-    void clear();
-    uint64_t getMemoryUsage();
+    ~DoubleVectorBatch() override;
+    std::string toString() const override;
+    void resize(uint64_t capacity) override;
+    void clear() override;
+    uint64_t getMemoryUsage() override;
 
     DataBuffer<double> data;
-    virtual void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
+    void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
 };
 
 struct StringVectorBatch : public ColumnVectorBatch {
     StringVectorBatch(uint64_t capacity, MemoryPool& pool);
-    virtual ~StringVectorBatch();
-    std::string toString() const;
-    void resize(uint64_t capacity);
-    void clear();
-    uint64_t getMemoryUsage();
+    ~StringVectorBatch() override;
+    std::string toString() const override;
+    void resize(uint64_t capacity) override;
+    void clear() override;
+    uint64_t getMemoryUsage() override;
 
     // pointers to the start of each string
     DataBuffer<char*> data;
@@ -139,7 +154,7 @@ struct StringVectorBatch : public ColumnVectorBatch {
     // dict codes, iff. there is dictionary.
     DataBuffer<int64_t> codes;
     bool use_codes;
-    virtual void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
+    void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
 };
 
 struct StringDictionary {
@@ -168,37 +183,44 @@ struct StringDictionary {
    */
 struct EncodedStringVectorBatch : public StringVectorBatch {
     EncodedStringVectorBatch(uint64_t capacity, MemoryPool& pool);
-    virtual ~EncodedStringVectorBatch();
-    std::string toString() const;
-    void resize(uint64_t capacity);
+    ~EncodedStringVectorBatch() override;
+    std::string toString() const override;
+    void resize(uint64_t capacity) override;
     std::shared_ptr<StringDictionary> dictionary;
 
     // index for dictionary entry
     DataBuffer<int64_t> index;
-    virtual void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
+    void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
 };
 
 struct StructVectorBatch : public ColumnVectorBatch {
     StructVectorBatch(uint64_t capacity, MemoryPool& pool);
-    virtual ~StructVectorBatch();
-    std::string toString() const;
-    void resize(uint64_t capacity);
-    void clear();
-    uint64_t getMemoryUsage();
-    bool hasVariableLength();
+    ~StructVectorBatch() override;
+    std::string toString() const override;
+    void resize(uint64_t capacity) override;
+    void clear() override;
+    uint64_t getMemoryUsage() override;
+    bool hasVariableLength() override;
 
     std::vector<ColumnVectorBatch*> fields;
-    virtual void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
+    std::unordered_map<uint64_t, ColumnVectorBatch*> fieldsColumnIdMap;
+    void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
+    void filterOnFields(uint8_t* f_data, uint32_t f_size, uint32_t true_size, const std::vector<int>& fields,
+                        bool onLazyLoad) override;
+
+private:
+    // Mark that this StructVectorBatch is already called ColumnVectorBatch::filter(f_data, f_size, true_size);
+    bool alreadyFiltered = false;
 };
 
 struct ListVectorBatch : public ColumnVectorBatch {
     ListVectorBatch(uint64_t capacity, MemoryPool& pool);
-    virtual ~ListVectorBatch();
-    std::string toString() const;
-    void resize(uint64_t capacity);
-    void clear();
-    uint64_t getMemoryUsage();
-    bool hasVariableLength();
+    ~ListVectorBatch() override;
+    std::string toString() const override;
+    void resize(uint64_t capacity) override;
+    void clear() override;
+    uint64_t getMemoryUsage() override;
+    bool hasVariableLength() override;
 
     /**
      * The offset of the first element of each list.
@@ -208,17 +230,17 @@ struct ListVectorBatch : public ColumnVectorBatch {
 
     // the concatenated elements
     ORC_UNIQUE_PTR<ColumnVectorBatch> elements;
-    virtual void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
+    void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
 };
 
 struct MapVectorBatch : public ColumnVectorBatch {
     MapVectorBatch(uint64_t capacity, MemoryPool& pool);
-    virtual ~MapVectorBatch();
-    std::string toString() const;
-    void resize(uint64_t capacity);
-    void clear();
-    uint64_t getMemoryUsage();
-    bool hasVariableLength();
+    ~MapVectorBatch() override;
+    std::string toString() const override;
+    void resize(uint64_t capacity) override;
+    void clear() override;
+    uint64_t getMemoryUsage() override;
+    bool hasVariableLength() override;
 
     /**
      * The offset of the first element of each map.
@@ -230,17 +252,17 @@ struct MapVectorBatch : public ColumnVectorBatch {
     ORC_UNIQUE_PTR<ColumnVectorBatch> keys;
     // the concatenated elements
     ORC_UNIQUE_PTR<ColumnVectorBatch> elements;
-    virtual void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
+    void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
 };
 
 struct UnionVectorBatch : public ColumnVectorBatch {
     UnionVectorBatch(uint64_t capacity, MemoryPool& pool);
-    virtual ~UnionVectorBatch();
-    std::string toString() const;
-    void resize(uint64_t capacity);
-    void clear();
-    uint64_t getMemoryUsage();
-    bool hasVariableLength();
+    ~UnionVectorBatch() override;
+    std::string toString() const override;
+    void resize(uint64_t capacity) override;
+    void clear() override;
+    uint64_t getMemoryUsage() override;
+    bool hasVariableLength() override;
 
     /**
      * For each value, which element of children has the value.
@@ -254,7 +276,7 @@ struct UnionVectorBatch : public ColumnVectorBatch {
 
     // the sub-columns
     std::vector<ColumnVectorBatch*> children;
-    virtual void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
+    void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
 };
 
 struct Decimal {
@@ -264,16 +286,16 @@ struct Decimal {
 
     std::string toString(bool trimTrailingZeros = false) const;
     Int128 value;
-    int32_t scale;
+    int32_t scale{0};
 };
 
 struct Decimal64VectorBatch : public ColumnVectorBatch {
     Decimal64VectorBatch(uint64_t capacity, MemoryPool& pool);
-    virtual ~Decimal64VectorBatch();
-    std::string toString() const;
-    void resize(uint64_t capacity);
-    void clear();
-    uint64_t getMemoryUsage();
+    ~Decimal64VectorBatch() override;
+    std::string toString() const override;
+    void resize(uint64_t capacity) override;
+    void clear() override;
+    uint64_t getMemoryUsage() override;
 
     // total number of digits
     int32_t precision;
@@ -282,7 +304,7 @@ struct Decimal64VectorBatch : public ColumnVectorBatch {
 
     // the numeric values
     DataBuffer<int64_t> values;
-    virtual void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
+    void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
 
 protected:
     /**
@@ -296,11 +318,11 @@ protected:
 
 struct Decimal128VectorBatch : public ColumnVectorBatch {
     Decimal128VectorBatch(uint64_t capacity, MemoryPool& pool);
-    virtual ~Decimal128VectorBatch();
-    std::string toString() const;
-    void resize(uint64_t capacity);
-    void clear();
-    uint64_t getMemoryUsage();
+    ~Decimal128VectorBatch() override;
+    std::string toString() const override;
+    void resize(uint64_t capacity) override;
+    void clear() override;
+    uint64_t getMemoryUsage() override;
 
     // total number of digits
     int32_t precision;
@@ -309,7 +331,7 @@ struct Decimal128VectorBatch : public ColumnVectorBatch {
 
     // the numeric values
     DataBuffer<Int128> values;
-    virtual void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
+    void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
 
 protected:
     /**
@@ -329,11 +351,11 @@ protected:
    */
 struct TimestampVectorBatch : public ColumnVectorBatch {
     TimestampVectorBatch(uint64_t capacity, MemoryPool& pool);
-    virtual ~TimestampVectorBatch();
-    std::string toString() const;
-    void resize(uint64_t capacity);
-    void clear();
-    uint64_t getMemoryUsage();
+    ~TimestampVectorBatch() override;
+    std::string toString() const override;
+    void resize(uint64_t capacity) override;
+    void clear() override;
+    uint64_t getMemoryUsage() override;
 
     // the number of seconds past 1 Jan 1970 00:00 UTC (aka time_t)
     // Note that we always assume data is in GMT timezone; therefore it is
@@ -344,9 +366,7 @@ struct TimestampVectorBatch : public ColumnVectorBatch {
     // the nanoseconds of each value
     DataBuffer<int64_t> nanoseconds;
 
-    virtual void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
+    void filter(uint8_t* f_data, uint32_t f_size, uint32_t true_size) override;
 };
 
 } // namespace orc
-
-#endif

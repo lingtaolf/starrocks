@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/util/cpu_info.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -38,23 +34,36 @@
 #include <spe.h>
 #endif
 
+// CGROUP2_SUPER_MAGIC is the indication for cgroup v2
+// It is defined in kernel 4.5+
+// I copy the defintion from linux/magic.h in higher kernel
+#ifndef CGROUP2_SUPER_MAGIC
+#define CGROUP2_SUPER_MAGIC 0x63677270
+#endif
+
+#include <linux/magic.h>
 #include <sched.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/sysinfo.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
+#include <cctype>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <sstream>
 
 #include "common/config.h"
 #include "common/env_config.h"
+#include "common/logging.h"
+#include "fs/fs_util.h"
 #include "gflags/gflags.h"
+#include "gutil/strings/split.h"
 #include "gutil/strings/substitute.h"
+#include "util/errno.h"
+#include "util/file_util.h"
 #include "util/pretty_printer.h"
 #include "util/string_parser.hpp"
 
@@ -70,24 +79,9 @@ DEFINE_int32(num_cores, 0,
              " according to /proc/cpuinfo.");
 
 namespace starrocks {
-// Helper function to warn if a given file does not contain an expected string as its
-// first line. If the file cannot be opened, no error is reported.
-void WarnIfFileNotEqual(const string& filename, const string& expected, const string& warning_text) {
-    std::ifstream file(filename);
-    if (!file) return;
-    string line;
-    getline(file, line);
-    if (line != expected) {
-        LOG(ERROR) << "Expected " << expected << ", actual " << line << std::endl << warning_text;
-    }
-}
-} // namespace starrocks
-
-namespace starrocks {
 
 bool CpuInfo::initialized_ = false;
 int64_t CpuInfo::hardware_flags_ = 0;
-int64_t CpuInfo::original_hardware_flags_;
 int64_t CpuInfo::cycles_per_ms_;
 int CpuInfo::num_cores_ = 1;
 int CpuInfo::max_num_cores_ = 1;
@@ -104,7 +98,6 @@ static struct {
         {"ssse3", CpuInfo::SSSE3},   {"sse4_1", CpuInfo::SSE4_1}, {"sse4_2", CpuInfo::SSE4_2},
         {"popcnt", CpuInfo::POPCNT}, {"avx", CpuInfo::AVX},       {"avx2", CpuInfo::AVX2},
 };
-static const long num_flags = sizeof(flag_mappings) / sizeof(flag_mappings[0]);
 
 // Helper function to parse for hardware flags.
 // values contains a list of space-seperated flags.  check to see if the flags we
@@ -112,9 +105,9 @@ static const long num_flags = sizeof(flag_mappings) / sizeof(flag_mappings[0]);
 // Returns a bitmap of flags.
 int64_t ParseCPUFlags(const string& values) {
     int64_t flags = 0;
-    for (int i = 0; i < num_flags; ++i) {
-        if (contains(values, flag_mappings[i].name)) {
-            flags |= flag_mappings[i].flag;
+    for (auto& flag_mapping : flag_mappings) {
+        if (contains(values, flag_mapping.name)) {
+            flags |= flag_mapping.flag;
         }
     }
     return flags;
@@ -161,11 +154,12 @@ void CpuInfo::init() {
     } else {
         cycles_per_ms_ = 1000000;
     }
-    original_hardware_flags_ = hardware_flags_;
 
     if (num_cores > 0) {
         num_cores_ = num_cores;
-    } else {
+    }
+    _init_num_cores_with_cgroup();
+    if (num_cores_ <= 0) {
         num_cores_ = 1;
     }
     if (config::num_cores > 0) num_cores_ = config::num_cores;
@@ -232,14 +226,102 @@ void CpuInfo::_init_numa() {
     _init_numa_node_to_cores();
 }
 
-void CpuInfo::_init_fake_numa_for_test(int max_num_numa_nodes, const std::vector<int>& core_to_numa_node) {
-    DCHECK_EQ(max_num_cores_, core_to_numa_node.size());
-    max_num_numa_nodes_ = max_num_numa_nodes;
-    for (int i = 0; i < max_num_cores_; ++i) {
-        core_to_numa_node_[i] = core_to_numa_node[i];
+void CpuInfo::_init_num_cores_with_cgroup() {
+    bool running_in_docker = fs::path_exist("/.dockerenv");
+    if (!running_in_docker) {
+        return;
     }
-    numa_node_to_cores_.clear();
-    _init_numa_node_to_cores();
+    struct statfs fs;
+    if (statfs("/sys/fs/cgroup", &fs) < 0) {
+        LOG(WARNING) << "Fail to get file system statistics. err: " << errno_to_string(errno);
+        return;
+    }
+
+    auto sizeof_cpusets = [](const std::string& cpuset_str) {
+        int32_t count = 0;
+        std::vector<std::string> fields = strings::Split(cpuset_str, ",", strings::SkipWhitespace());
+        for (const auto& field : fields) {
+            if (field.find('-') == std::string::npos) {
+                count++;
+                continue;
+            }
+            std::vector<std::string> pair = strings::Split(field, "-", strings::SkipWhitespace());
+            if (pair.size() != 2) {
+                continue;
+            }
+            std::string& start_str = pair[0];
+            std::string& end_str = pair[1];
+            StringParser::ParseResult result;
+            auto start = StringParser::string_to_int<int32_t>(start_str.data(), start_str.size(), &result);
+            if (result != StringParser::PARSE_SUCCESS) {
+                continue;
+            }
+            auto end = StringParser::string_to_int<int32_t>(end_str.data(), end_str.size(), &result);
+            if (result != StringParser::PARSE_SUCCESS) {
+                continue;
+            }
+
+            count += (end - start + 1);
+        }
+        return count;
+    };
+
+    std::string cfs_period_us_str;
+    std::string cfs_quota_us_str;
+    std::string cpuset_str;
+    if (fs.f_type == TMPFS_MAGIC) {
+        // cgroup v1
+        if (!FileUtil::read_whole_content("/sys/fs/cgroup/cpu/cpu.cfs_period_us", cfs_period_us_str)) {
+            return;
+        }
+
+        if (!FileUtil::read_whole_content("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", cfs_quota_us_str)) {
+            return;
+        }
+
+        if (!FileUtil::read_whole_content("/sys/fs/cgroup/cpuset/cpuset.cpus", cpuset_str)) {
+            return;
+        }
+    } else if (fs.f_type == CGROUP2_SUPER_MAGIC) {
+        // cgroup v2
+        if (!FileUtil::read_contents("/sys/fs/cgroup/cpu.max", cfs_quota_us_str, cfs_period_us_str)) {
+            return;
+        }
+
+        if (!FileUtil::read_whole_content("/sys/fs/cgroup/cpuset.cpus", cpuset_str)) {
+            return;
+        }
+    }
+
+    int32_t cfs_num_cores = num_cores_;
+    {
+        StringParser::ParseResult result;
+        auto cfs_period_us =
+                StringParser::string_to_int<int64_t>(cfs_period_us_str.data(), cfs_period_us_str.size(), &result);
+        if (result != StringParser::PARSE_SUCCESS) {
+            cfs_period_us = -1;
+        }
+        auto cfs_quota_us =
+                StringParser::string_to_int<int64_t>(cfs_quota_us_str.data(), cfs_quota_us_str.size(), &result);
+        if (result != StringParser::PARSE_SUCCESS) {
+            cfs_quota_us = -1;
+        }
+        if (cfs_quota_us > 0 && cfs_period_us > 0) {
+            cfs_num_cores = cfs_quota_us / cfs_period_us;
+        }
+    }
+
+    int32_t cpuset_num_cores = num_cores_;
+    if (!cpuset_str.empty() &&
+        std::any_of(cpuset_str.begin(), cpuset_str.end(), [](char c) { return !std::isspace(c); })) {
+        cpuset_num_cores = sizeof_cpusets(cpuset_str);
+    }
+
+    if (cfs_num_cores < num_cores_ || cpuset_num_cores < num_cores_) {
+        num_cores_ = std::max(1, std::min(cfs_num_cores, cpuset_num_cores));
+        LOG(INFO) << "Init docker hardware cores by cgroup's config, cfs_num_cores=" << cfs_num_cores
+                  << ", cpuset_num_cores=" << cpuset_num_cores << ", final num_cores=" << num_cores_;
+    }
 }
 
 void CpuInfo::_init_numa_node_to_cores() {
@@ -250,45 +332,6 @@ void CpuInfo::_init_numa_node_to_cores() {
         std::vector<int>* cores_of_node = &numa_node_to_cores_[core_to_numa_node_[core]];
         numa_node_core_idx_[core] = cores_of_node->size();
         cores_of_node->push_back(core);
-    }
-}
-
-void CpuInfo::verify_cpu_requirements() {
-    if (!CpuInfo::is_supported(CpuInfo::SSSE3)) {
-        LOG(ERROR) << "CPU does not support the Supplemental SSE3 (SSSE3) instruction set. "
-                   << "This setup is generally unsupported and Impala might be unstable.";
-    }
-}
-
-void CpuInfo::verify_performance_governor() {
-    for (int cpu_id = 0; cpu_id < CpuInfo::num_cores(); ++cpu_id) {
-        const string governor_file =
-                strings::Substitute("/sys/devices/system/cpu/cpu$0/cpufreq/scaling_governor", cpu_id);
-        const string warning_text = strings::Substitute(
-                "WARNING: CPU $0 is not using 'performance' governor. Note that changing the "
-                "governor to 'performance' will reset the no_turbo setting to 0.",
-                cpu_id);
-        WarnIfFileNotEqual(governor_file, "performance", warning_text);
-    }
-}
-
-void CpuInfo::verify_turbo_disabled() {
-    WarnIfFileNotEqual("/sys/devices/system/cpu/intel_pstate/no_turbo", "1",
-                       "WARNING: CPU turbo is enabled. This setting can change the clock frequency of CPU "
-                       "cores during the benchmark run, which can lead to inaccurate results. You can "
-                       "disable CPU turbo by writing a 1 to "
-                       "/sys/devices/system/cpu/intel_pstate/no_turbo. Note that changing the governor to "
-                       "'performance' will reset this to 0.");
-}
-
-void CpuInfo::enable_feature(long flag, bool enable) {
-    DCHECK(initialized_);
-    if (!enable) {
-        hardware_flags_ &= ~flag;
-    } else {
-        // Can't turn something on that can't be supported
-        DCHECK((original_hardware_flags_ & flag) != 0);
-        hardware_flags_ |= flag;
     }
 }
 
@@ -364,9 +407,9 @@ std::string CpuInfo::debug_string() {
            << "  " << L2 << std::endl
            << "  " << L3 << std::endl
            << "  Hardware Supports:" << std::endl;
-    for (int i = 0; i < num_flags; ++i) {
-        if (is_supported(flag_mappings[i].flag)) {
-            stream << "    " << flag_mappings[i].name << std::endl;
+    for (auto& flag_mapping : flag_mappings) {
+        if (is_supported(flag_mapping.flag)) {
+            stream << "    " << flag_mapping.name << std::endl;
         }
     }
     stream << "  Numa Nodes: " << max_num_numa_nodes_ << std::endl;

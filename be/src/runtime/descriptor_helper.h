@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/runtime/descriptor_helper.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -51,8 +47,13 @@ private:
 class TTupleDescriptorBuilder;
 class TSlotDescriptorBuilder {
 public:
-    TSlotDescriptorBuilder() { _slot_desc.isMaterialized = true; }
-    TSlotDescriptorBuilder& type(PrimitiveType type) { return this->type(TypeDescriptor(type)); }
+    TSlotDescriptorBuilder() {
+        _slot_desc.isMaterialized = true;
+        _slot_desc.isOutputColumn = true;
+        _slot_desc.__isset.isOutputColumn = true;
+        _slot_desc.id = -1;
+    }
+    TSlotDescriptorBuilder& type(LogicalType type) { return this->type(TypeDescriptor(type)); }
     TSlotDescriptorBuilder& type(const TypeDescriptor& type) {
         _slot_desc.slotType = type.to_thrift();
         return *this;
@@ -85,6 +86,11 @@ public:
         _slot_desc.isMaterialized = is_materialized;
         return *this;
     }
+    TSlotDescriptorBuilder& is_output_column(bool is_output_column) {
+        _slot_desc.isOutputColumn = is_output_column;
+        _slot_desc.__isset.isOutputColumn = true;
+        return *this;
+    }
     TSlotDescriptorBuilder& column_name(const std::string& name) {
         _slot_desc.colName = name;
         return *this;
@@ -114,8 +120,7 @@ public:
         // build slot desc
         _tuple_id = tb->next_tuple_id();
         int num_nullables = 0;
-        for (int i = 0; i < _slot_descs.size(); ++i) {
-            auto& slot_desc = _slot_descs[i];
+        for (auto& slot_desc : _slot_descs) {
             if (slot_desc.nullIndicatorByte >= 0) {
                 num_nullables++;
             }
@@ -129,7 +134,7 @@ public:
             int size = td.get_slot_size();
             int align = (size > 16) ? 16 : size;
             offset = ((offset + align - 1) / align) * align;
-            slot_desc.id = tb->next_slot_id();
+            slot_desc.id = slot_desc.id == -1 ? tb->next_slot_id() : slot_desc.id;
             slot_desc.parent = _tuple_id;
             slot_desc.byteOffset = offset;
             offset += size;

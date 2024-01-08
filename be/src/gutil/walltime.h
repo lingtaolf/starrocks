@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/gutil/walltime.h
-
 // Copyright 2012 Google Inc. All Rights Reserved.
 //
 // Licensed to the Apache Software Foundation (ASF) under one
@@ -20,8 +16,7 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-#ifndef GUTIL_WALLTIME_H_
-#define GUTIL_WALLTIME_H_
+#pragma once
 
 #include <sys/time.h>
 
@@ -202,9 +197,8 @@ public:
     static inline int64 Now();
 
 private:
-    CycleClock();
+    CycleClock() = delete;
 };
 
 // inline method bodies
 #include "gutil/cycleclock-inl.h" // IWYU pragma: export
-#endif                            // GUTIL_WALLTIME_H_

@@ -1,65 +1,59 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exprs/info_func.cpp
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "exprs/info_func.h"
 
-#include <sstream>
-
-#include "util/debug_util.h"
+#include "column/chunk.h"
+#include "column/column_helper.h"
+#include "column/const_column.h"
 
 namespace starrocks {
 
-InfoFunc::InfoFunc(const TExprNode& node)
-        : Expr(node), _int_value(node.info_func.int_value), _str_value(node.info_func.str_value) {}
-
-StringVal InfoFunc::get_string_val(ExprContext* context, TupleRow*) {
-    StringVal val;
-    StringValue value(_str_value);
-    value.to_string_val(&val);
-
-    return val;
+VectorizedInfoFunc::VectorizedInfoFunc(const TExprNode& node) : Expr(node) {
+    switch (_type.type) {
+    case TYPE_BIGINT: {
+        _value = ColumnHelper::create_const_column<TYPE_BIGINT>(node.info_func.int_value, 1);
+        break;
+    }
+    case TYPE_CHAR:
+    case TYPE_VARCHAR: {
+        // @IMPORTANT: build slice though get_data, else maybe will case multi-thread crash in scanner
+        _value = ColumnHelper::create_const_column<TYPE_VARCHAR>(node.info_func.str_value, 1);
+        break;
+    }
+    default:
+        DCHECK(false) << "Vectorized engine not implement type: " << _type.type;
+        break;
+    }
 }
 
-BigIntVal InfoFunc::get_big_int_val(ExprContext* context, TupleRow*) {
-    return BigIntVal(_int_value);
+StatusOr<ColumnPtr> VectorizedInfoFunc::evaluate_checked(ExprContext* context, Chunk* ptr) {
+    ColumnPtr column = _value->clone_empty();
+    column->append(*_value, 0, 1);
+    if (ptr != nullptr) {
+        column->resize(ptr->num_rows());
+    }
+    return column;
 }
 
-std::string InfoFunc::debug_string() const {
+std::string VectorizedInfoFunc::debug_string() const {
     std::stringstream out;
-    out << "InfoFunc(" << Expr::debug_string() << " int_value: " << _int_value << "; str_value: " << _str_value << ")";
+    out << "VectorizedInfoFunc("
+        << "type=" << this->type().debug_string() << " )";
     return out.str();
 }
 
-void* InfoFunc::compute_fn(Expr* e, TupleRow* row) {
-#if 0
-    if (e->type() == TYPE_CHAR || e->type() == TYPE_VARCHAR) {
-        e->_result.set_string_val(((InfoFunc*)e)->_str_value);
-        return &e->_result.string_val;
-    } else {
-        e->_result.int_val = ((InfoFunc*)e)->_int_value;
-        return &e->_result.int_val;
-    }
-#endif
-
-    return NULL;
-}
+VectorizedInfoFunc::~VectorizedInfoFunc() = default;
 
 } // namespace starrocks

@@ -1,28 +1,22 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/schema_scanner/schema_charsets_scanner.cpp
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "exec/schema_scanner/schema_charsets_scanner.h"
 
-#include "runtime/primitive_type.h"
+#include "exec/schema_scanner/schema_helper.h"
 #include "runtime/string_value.h"
+#include "types/logical_type.h"
 
 namespace starrocks {
 
@@ -36,73 +30,74 @@ SchemaScanner::ColumnDesc SchemaCharsetsScanner::_s_css_columns[] = {
 
 SchemaCharsetsScanner::CharsetStruct SchemaCharsetsScanner::_s_charsets[] = {
         {"utf8", "utf8_general_ci", "UTF-8 Unicode", 3},
-        {NULL, NULL, 0},
+        {nullptr, nullptr, nullptr},
 };
 
 SchemaCharsetsScanner::SchemaCharsetsScanner()
-        : SchemaScanner(_s_css_columns, sizeof(_s_css_columns) / sizeof(SchemaScanner::ColumnDesc)), _index(0) {}
+        : SchemaScanner(_s_css_columns, sizeof(_s_css_columns) / sizeof(SchemaScanner::ColumnDesc)) {}
 
-SchemaCharsetsScanner::~SchemaCharsetsScanner() {}
+SchemaCharsetsScanner::~SchemaCharsetsScanner() = default;
 
-Status SchemaCharsetsScanner::fill_one_row(Tuple* tuple, MemPool* pool) {
-    // variables names
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[0]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        int len = strlen(_s_charsets[_index].charset);
-        str_slot->ptr = (char*)pool->allocate(len + 1);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("No Memory.");
+Status SchemaCharsetsScanner::fill_chunk(ChunkPtr* chunk) {
+    const auto& slot_id_to_index_map = (*chunk)->get_slot_id_to_index_map();
+    for (const auto& [slot_id, index] : slot_id_to_index_map) {
+        switch (slot_id) {
+        case 1: {
+            // variables names
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(1);
+                Slice value(_s_charsets[_index].charset, strlen(_s_charsets[_index].charset));
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
         }
-        memcpy(str_slot->ptr, _s_charsets[_index].charset, len + 1);
-        str_slot->len = len;
-    }
-    // DEFAULT_COLLATE_NAME
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[1]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        int len = strlen(_s_charsets[_index].default_collation);
-        str_slot->ptr = (char*)pool->allocate(len + 1);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("No Memory.");
+        case 2: {
+            // DEFAULT_COLLATE_NAME
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(2);
+                Slice value(_s_charsets[_index].default_collation, strlen(_s_charsets[_index].default_collation));
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
         }
-        memcpy(str_slot->ptr, _s_charsets[_index].default_collation, len + 1);
-        str_slot->len = len;
-    }
-    // DESCRIPTION
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[2]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        int len = strlen(_s_charsets[_index].description);
-        str_slot->ptr = (char*)pool->allocate(len + 1);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("No Memory.");
+        case 3: {
+            // DESCRIPTION
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(3);
+                Slice value(_s_charsets[_index].description, strlen(_s_charsets[_index].description));
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
         }
-        memcpy(str_slot->ptr, _s_charsets[_index].description, len + 1);
-        str_slot->len = len;
-    }
-    // maxlen
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[3]->tuple_offset());
-        *(int64_t*)slot = _s_charsets[_index].maxlen;
+        case 4: {
+            // maxlen
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(4);
+                fill_column_with_slot<TYPE_BIGINT>(column.get(), (void*)&_s_charsets[_index].maxlen);
+            }
+            break;
+        }
+        default:
+            break;
+        }
     }
     _index++;
     return Status::OK();
 }
 
-Status SchemaCharsetsScanner::get_next_row(Tuple* tuple, MemPool* pool, bool* eos) {
+Status SchemaCharsetsScanner::get_next(ChunkPtr* chunk, bool* eos) {
     if (!_is_init) {
         return Status::InternalError("call this before initial.");
     }
-    if (NULL == _s_charsets[_index].charset) {
+    if (nullptr == _s_charsets[_index].charset) {
         *eos = true;
         return Status::OK();
     }
-    if (NULL == tuple || NULL == pool || NULL == eos) {
+    if (nullptr == chunk || nullptr == eos) {
         return Status::InternalError("invalid parameter.");
     }
     *eos = false;
-    return fill_one_row(tuple, pool);
+    return fill_chunk(chunk);
 }
 
 } // namespace starrocks

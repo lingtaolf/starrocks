@@ -1,43 +1,310 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exprs/math_functions.cpp
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-#include "exprs/math_functions.h"
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
 
-#include <stdlib.h>
+#include <runtime/decimalv3.h>
+#include <types/logical_type.h>
+#include <util/decimal_types.h>
 
 #include <cmath>
-#include <iomanip>
-#include <sstream>
+#include <random>
 
-#include "common/compiler_util.h"
-#include "exprs/anyval_util.h"
+#include "column/array_column.h"
+#include "column/column_helper.h"
 #include "exprs/expr.h"
-#include "runtime/decimal_value.h"
-#include "runtime/decimalv2_value.h"
-#include "runtime/tuple_row.h"
-#include "util/string_parser.hpp"
+#include "exprs/math_functions.h"
+#include "util/time.h"
 
 namespace starrocks {
 
-const char* MathFunctions::_s_alphanumeric_chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+static const double MAX_EXP_PARAMETER = std::log(std::numeric_limits<double>::max());
+
+static std::uniform_real_distribution<double> distribution(0.0, 1.0);
+static thread_local std::mt19937_64 generator{std::random_device{}()};
+
+// ==== basic check rules =========
+DEFINE_UNARY_FN_WITH_IMPL(NegativeCheck, value) {
+    return value < 0;
+}
+
+DEFINE_UNARY_FN_WITH_IMPL(NonPositiveCheck, value) {
+    return value <= 0;
+}
+
+DEFINE_UNARY_FN_WITH_IMPL(NanCheck, value) {
+    return std::isnan(value);
+}
+
+DEFINE_UNARY_FN_WITH_IMPL(ExpCheck, value) {
+    return std::isnan(value) || value > MAX_EXP_PARAMETER;
+}
+
+DEFINE_UNARY_FN_WITH_IMPL(ZeroCheck, value) {
+    return value == 0;
+}
+
+// ====== evaluation + check rules ========
+
+#define DEFINE_MATH_UNARY_FN(NAME, TYPE, RESULT_TYPE)                                                          \
+    StatusOr<ColumnPtr> MathFunctions::NAME(FunctionContext* context, const Columns& columns) {                \
+        using VectorizedUnaryFunction = VectorizedStrictUnaryFunction<NAME##Impl>;                             \
+        if constexpr (lt_is_decimal<TYPE>) {                                                                   \
+            const auto& type = context->get_return_type();                                                     \
+            return VectorizedUnaryFunction::evaluate<TYPE, RESULT_TYPE>(VECTORIZED_FN_ARGS(0), type.precision, \
+                                                                        type.scale);                           \
+        } else {                                                                                               \
+            return VectorizedUnaryFunction::evaluate<TYPE, RESULT_TYPE>(VECTORIZED_FN_ARGS(0));                \
+        }                                                                                                      \
+    }
+
+#define DEFINE_MATH_UNARY_WITH_ZERO_CHECK_FN(NAME, TYPE, RESULT_TYPE)                             \
+    StatusOr<ColumnPtr> MathFunctions::NAME(FunctionContext* context, const Columns& columns) {   \
+        using VectorizedUnaryFunction = VectorizedInputCheckUnaryFunction<NAME##Impl, ZeroCheck>; \
+        return VectorizedUnaryFunction::evaluate<TYPE, RESULT_TYPE>(VECTORIZED_FN_ARGS(0));       \
+    }
+
+#define DEFINE_MATH_UNARY_WITH_NEGATIVE_CHECK_FN(NAME, TYPE, RESULT_TYPE)                             \
+    StatusOr<ColumnPtr> MathFunctions::NAME(FunctionContext* context, const Columns& columns) {       \
+        using VectorizedUnaryFunction = VectorizedInputCheckUnaryFunction<NAME##Impl, NegativeCheck>; \
+        return VectorizedUnaryFunction::evaluate<TYPE, RESULT_TYPE>(VECTORIZED_FN_ARGS(0));           \
+    }
+
+#define DEFINE_MATH_UNARY_WITH_NON_POSITIVE_CHECK_FN(NAME, TYPE, RESULT_TYPE)                            \
+    StatusOr<ColumnPtr> MathFunctions::NAME(FunctionContext* context, const Columns& columns) {          \
+        using VectorizedUnaryFunction = VectorizedInputCheckUnaryFunction<NAME##Impl, NonPositiveCheck>; \
+        return VectorizedUnaryFunction::evaluate<TYPE, RESULT_TYPE>(VECTORIZED_FN_ARGS(0));              \
+    }
+
+#define DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN(NAME, TYPE, RESULT_TYPE)                       \
+    StatusOr<ColumnPtr> MathFunctions::NAME(FunctionContext* context, const Columns& columns) {   \
+        using VectorizedUnaryFunction = VectorizedOutputCheckUnaryFunction<NAME##Impl, NanCheck>; \
+        return VectorizedUnaryFunction::evaluate<TYPE, RESULT_TYPE>(VECTORIZED_FN_ARGS(0));       \
+    }
+
+#define DEFINE_MATH_UNARY_WITH_OUTPUT_CHECK_FN(NAME, TYPE, RESULT_TYPE, NULL_FN)                 \
+    StatusOr<ColumnPtr> MathFunctions::NAME(FunctionContext* context, const Columns& columns) {  \
+        using VectorizedUnaryFunction = VectorizedOutputCheckUnaryFunction<NAME##Impl, NULL_FN>; \
+        return VectorizedUnaryFunction::evaluate<TYPE, RESULT_TYPE>(VECTORIZED_FN_ARGS(0));      \
+    }
+
+#define DEFINE_MATH_BINARY_WITH_OUTPUT_NAN_CHECK_FN(NAME, LTYPE, RTYPE, RESULT_TYPE)                 \
+    StatusOr<ColumnPtr> MathFunctions::NAME(FunctionContext* context, const Columns& columns) {      \
+        using VectorizedBinaryFunction = VectorizedOuputCheckBinaryFunction<NAME##Impl, NanCheck>;   \
+        return VectorizedBinaryFunction::evaluate<LTYPE, RTYPE, RESULT_TYPE>(VECTORIZED_FN_ARGS(0),  \
+                                                                             VECTORIZED_FN_ARGS(1)); \
+    }
+
+// ============ math function macro ==========
+
+#define DEFINE_MATH_UNARY_FN_WITH_IMPL(NAME, TYPE, RESULT_TYPE, FN) \
+    DEFINE_UNARY_FN(NAME##Impl, FN);                                \
+    DEFINE_MATH_UNARY_FN(NAME, TYPE, RESULT_TYPE);
+
+#define DEFINE_MATH_UNARY_FN_CAST_WITH_IMPL(NAME, TYPE, RESULT_TYPE, FN) \
+    DEFINE_UNARY_FN_CAST(NAME##Impl, FN);                                \
+    DEFINE_MATH_UNARY_FN(NAME, TYPE, RESULT_TYPE);
+
+#define DEFINE_MATH_BINARY_FN(NAME, LTYPE, RTYPE, RESULT_TYPE)                                                         \
+    StatusOr<ColumnPtr> MathFunctions::NAME(FunctionContext* context, const Columns& columns) {                        \
+        return VectorizedStrictBinaryFunction<NAME##Impl>::evaluate<LTYPE, RTYPE, RESULT_TYPE>(VECTORIZED_FN_ARGS(0),  \
+                                                                                               VECTORIZED_FN_ARGS(1)); \
+    }
+
+#define DEFINE_MATH_BINARY_FN_WITH_NAN_CHECK(NAME, LTYPE, RTYPE, RESULT_TYPE)                                 \
+    StatusOr<ColumnPtr> MathFunctions::NAME(FunctionContext* context, const Columns& columns) {               \
+        return VectorizedOuputCheckBinaryFunction<NAME##Impl, NanCheck>::evaluate<LTYPE, RTYPE, RESULT_TYPE>( \
+                VECTORIZED_FN_ARGS(0), VECTORIZED_FN_ARGS(1));                                                \
+    }
+
+#define DEFINE_MATH_BINARY_FN_WITH_IMPL(NAME, LTYPE, RTYPE, RESULT_TYPE, FN) \
+    DEFINE_BINARY_FUNCTION(NAME##Impl, FN);                                  \
+    DEFINE_MATH_BINARY_FN(NAME, LTYPE, RTYPE, RESULT_TYPE);
+
+#define DEFINE_MATH_UNARY_WITH_NEGATIVE_CHECK_FN_WITH_IMPL(NAME, TYPE, RESULT_TYPE, FN) \
+    DEFINE_UNARY_FN(NAME##Impl, FN);                                                    \
+    DEFINE_MATH_UNARY_WITH_NEGATIVE_CHECK_FN(NAME, TYPE, RESULT_TYPE);
+
+#define DEFINE_MATH_UNARY_WITH_NON_POSITIVE_CHECK_FN_WITH_IMPL(NAME, TYPE, RESULT_TYPE, FN) \
+    DEFINE_UNARY_FN(NAME##Impl, FN);                                                        \
+    DEFINE_MATH_UNARY_WITH_NON_POSITIVE_CHECK_FN(NAME, TYPE, RESULT_TYPE);
+
+#define DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN_WITH_IMPL(NAME, TYPE, RESULT_TYPE, FN) \
+    DEFINE_UNARY_FN(NAME##Impl, FN);                                                      \
+    DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN(NAME, TYPE, RESULT_TYPE);
+
+#define DEFINE_MATH_UNARY_WITH_OUTPUT_CHECK_FN_WITH_IMPL(NAME, TYPE, RESULT_TYPE, FN, NULL_FN) \
+    DEFINE_UNARY_FN(NAME##Impl, FN);                                                           \
+    DEFINE_MATH_UNARY_WITH_OUTPUT_CHECK_FN(NAME, TYPE, RESULT_TYPE, NULL_FN);
+
+#define DEFINE_MATH_BINARY_WITH_OUTPUT_NAN_CHECK_FN_WITH_IMPL(NAME, LTYPE, RTYPE, RESULT_TYPE, FN) \
+    DEFINE_BINARY_FUNCTION(NAME##Impl, FN);                                                        \
+    DEFINE_MATH_BINARY_WITH_OUTPUT_NAN_CHECK_FN(NAME, LTYPE, RTYPE, RESULT_TYPE);
+
+// ============ math function impl ==========
+StatusOr<ColumnPtr> MathFunctions::pi(FunctionContext* context, const Columns& columns) {
+    return ColumnHelper::create_const_column<TYPE_DOUBLE>(M_PI, 1);
+}
+
+StatusOr<ColumnPtr> MathFunctions::e(FunctionContext* context, const Columns& columns) {
+    return ColumnHelper::create_const_column<TYPE_DOUBLE>(M_E, 1);
+}
+
+// sign
+DEFINE_UNARY_FN_WITH_IMPL(signImpl, v) {
+    return v > 0 ? 1.0f : (v < 0 ? -1.0f : 0.0f);
+}
+
+DEFINE_MATH_UNARY_FN(sign, TYPE_DOUBLE, TYPE_FLOAT);
+
+// round
+DEFINE_UNARY_FN_WITH_IMPL(roundImpl, v) {
+    return static_cast<int64_t>(v + ((v < 0) ? -0.5 : 0.5));
+}
+
+DEFINE_MATH_UNARY_FN(round, TYPE_DOUBLE, TYPE_BIGINT);
+
+// log
+DEFINE_BINARY_FUNCTION_WITH_IMPL(logProduceNullImpl, base, v) {
+    return std::isnan(v) || base <= 0 || std::fabs(base - 1.0) < MathFunctions::EPSILON || v <= 0.0;
+}
+
+DEFINE_BINARY_FUNCTION_WITH_IMPL(logImpl, base, v) {
+    return (double)(std::log(v) / std::log(base));
+}
+
+StatusOr<ColumnPtr> MathFunctions::log(FunctionContext* context, const Columns& columns) {
+    const auto& l = VECTORIZED_FN_ARGS(0);
+    const auto& r = VECTORIZED_FN_ARGS(1);
+    return VectorizedUnstrictBinaryFunction<logProduceNullImpl, logImpl>::evaluate<TYPE_DOUBLE>(l, r);
+}
+
+// log2
+DEFINE_UNARY_FN_WITH_IMPL(log2Impl, v) {
+    return (double)(std::log(v) / std::log(2.0));
+}
+
+DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN(log2, TYPE_DOUBLE, TYPE_DOUBLE);
+
+// square
+DEFINE_UNARY_FN_WITH_IMPL(squareImpl, v) {
+    return v * v;
+}
+
+DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN(square, TYPE_DOUBLE, TYPE_DOUBLE);
+
+// radians
+DEFINE_UNARY_FN_WITH_IMPL(radiansImpl, v) {
+    return (double)(v * M_PI / 180.0);
+}
+
+DEFINE_MATH_UNARY_FN(radians, TYPE_DOUBLE, TYPE_DOUBLE);
+
+// degrees
+DEFINE_UNARY_FN_WITH_IMPL(degreesImpl, v) {
+    return (double)(v * 180.0 / M_PI);
+}
+
+DEFINE_MATH_UNARY_FN(degrees, TYPE_DOUBLE, TYPE_DOUBLE);
+
+// bin
+DEFINE_STRING_UNARY_FN_WITH_IMPL(binImpl, v) {
+    auto n = static_cast<uint64_t>(v);
+    const size_t max_bits = sizeof(uint64_t) * 8;
+    char result[max_bits];
+    uint32_t index = max_bits;
+    do {
+        result[--index] = '0' + (n & 1);
+    } while (n >>= 1);
+    return {result + index, max_bits - index};
+}
+
+StatusOr<ColumnPtr> MathFunctions::bin(FunctionContext* context, const Columns& columns) {
+    return VectorizedStringStrictUnaryFunction<binImpl>::evaluate<TYPE_BIGINT, TYPE_VARCHAR>(columns[0]);
+}
+
+// unary math
+// float double abs
+DEFINE_MATH_UNARY_FN_WITH_IMPL(abs_double, TYPE_DOUBLE, TYPE_DOUBLE, std::fabs);
+DEFINE_MATH_UNARY_FN_WITH_IMPL(abs_float, TYPE_FLOAT, TYPE_FLOAT, std::fabs);
+
+// integer abs
+// std::abs(TYPE_MIN) is still TYPE_MIN, so integers except largeint need to cast to ResultType
+// before std::abs.
+DEFINE_MATH_UNARY_FN_WITH_IMPL(abs_largeint, TYPE_LARGEINT, TYPE_LARGEINT, std::abs);
+DEFINE_MATH_UNARY_FN_CAST_WITH_IMPL(abs_bigint, TYPE_BIGINT, TYPE_LARGEINT, std::abs);
+DEFINE_MATH_UNARY_FN_CAST_WITH_IMPL(abs_int, TYPE_INT, TYPE_BIGINT, std::abs);
+DEFINE_MATH_UNARY_FN_CAST_WITH_IMPL(abs_smallint, TYPE_SMALLINT, TYPE_INT, std::abs);
+DEFINE_MATH_UNARY_FN_CAST_WITH_IMPL(abs_tinyint, TYPE_TINYINT, TYPE_SMALLINT, std::abs);
+
+// decimal abs
+DEFINE_MATH_UNARY_FN_WITH_IMPL(abs_decimal32, TYPE_DECIMAL32, TYPE_DECIMAL32, std::abs);
+DEFINE_MATH_UNARY_FN_WITH_IMPL(abs_decimal64, TYPE_DECIMAL64, TYPE_DECIMAL64, std::abs);
+DEFINE_MATH_UNARY_FN_WITH_IMPL(abs_decimal128, TYPE_DECIMAL128, TYPE_DECIMAL128, std::abs);
+
+// degrees
+DEFINE_UNARY_FN_WITH_IMPL(abs_decimalv2valImpl, v) {
+    DecimalV2Value value = v;
+    value.to_abs_value();
+    return value;
+}
+
+DEFINE_MATH_UNARY_FN(abs_decimalv2val, TYPE_DECIMALV2, TYPE_DECIMALV2);
+
+DEFINE_UNARY_FN_WITH_IMPL(cotImpl, v) {
+    return 1.0 / std::tan(v);
+}
+
+DEFINE_MATH_UNARY_WITH_ZERO_CHECK_FN(cot, TYPE_DOUBLE, TYPE_DOUBLE);
+
+DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN_WITH_IMPL(sin, TYPE_DOUBLE, TYPE_DOUBLE, std::sin);
+DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN_WITH_IMPL(asin, TYPE_DOUBLE, TYPE_DOUBLE, std::asin);
+DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN_WITH_IMPL(sinh, TYPE_DOUBLE, TYPE_DOUBLE, std::sinh);
+DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN_WITH_IMPL(cos, TYPE_DOUBLE, TYPE_DOUBLE, std::cos);
+DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN_WITH_IMPL(acos, TYPE_DOUBLE, TYPE_DOUBLE, std::acos);
+DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN_WITH_IMPL(cosh, TYPE_DOUBLE, TYPE_DOUBLE, std::cosh);
+DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN_WITH_IMPL(tan, TYPE_DOUBLE, TYPE_DOUBLE, std::tan);
+DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN_WITH_IMPL(atan, TYPE_DOUBLE, TYPE_DOUBLE, std::atan);
+DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN_WITH_IMPL(tanh, TYPE_DOUBLE, TYPE_DOUBLE, std::tanh);
+DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN_WITH_IMPL(ceil, TYPE_DOUBLE, TYPE_BIGINT, std::ceil);
+DEFINE_MATH_UNARY_WITH_OUTPUT_NAN_CHECK_FN_WITH_IMPL(floor, TYPE_DOUBLE, TYPE_BIGINT, std::floor);
+DEFINE_MATH_UNARY_WITH_OUTPUT_CHECK_FN_WITH_IMPL(exp, TYPE_DOUBLE, TYPE_DOUBLE, std::exp, ExpCheck);
+
+DEFINE_MATH_UNARY_WITH_NON_POSITIVE_CHECK_FN_WITH_IMPL(ln, TYPE_DOUBLE, TYPE_DOUBLE, std::log);
+DEFINE_MATH_UNARY_WITH_NON_POSITIVE_CHECK_FN_WITH_IMPL(log10, TYPE_DOUBLE, TYPE_DOUBLE, std::log10);
+DEFINE_MATH_UNARY_WITH_NEGATIVE_CHECK_FN_WITH_IMPL(sqrt, TYPE_DOUBLE, TYPE_DOUBLE, std::sqrt);
+
+DEFINE_BINARY_FUNCTION_WITH_IMPL(truncateImpl, l, r) {
+    return MathFunctions::double_round(l, r, false, true);
+}
+
+DEFINE_BINARY_FUNCTION_WITH_IMPL(round_up_toImpl, l, r) {
+    return MathFunctions::double_round(l, r, false, false);
+}
+
+// binary math
+DEFINE_MATH_BINARY_FN_WITH_NAN_CHECK(truncate, TYPE_DOUBLE, TYPE_INT, TYPE_DOUBLE);
+DEFINE_MATH_BINARY_FN(round_up_to, TYPE_DOUBLE, TYPE_INT, TYPE_DOUBLE);
+DEFINE_MATH_BINARY_WITH_OUTPUT_NAN_CHECK_FN_WITH_IMPL(pow, TYPE_DOUBLE, TYPE_DOUBLE, TYPE_DOUBLE, std::pow);
+DEFINE_MATH_BINARY_WITH_OUTPUT_NAN_CHECK_FN_WITH_IMPL(atan2, TYPE_DOUBLE, TYPE_DOUBLE, TYPE_DOUBLE, std::atan2);
+
+#undef DEFINE_MATH_UNARY_FN
+#undef DEFINE_MATH_UNARY_FN_WITH_IMPL
+#undef DEFINE_MATH_BINARY_FN
+#undef DEFINE_MATH_BINARY_FN_WITH_IMPL
 
 const double log_10[] = {
         1e000, 1e001, 1e002, 1e003, 1e004, 1e005, 1e006, 1e007, 1e008, 1e009, 1e010, 1e011, 1e012, 1e013, 1e014, 1e015,
@@ -61,9 +328,9 @@ const double log_10[] = {
         1e288, 1e289, 1e290, 1e291, 1e292, 1e293, 1e294, 1e295, 1e296, 1e297, 1e298, 1e299, 1e300, 1e301, 1e302, 1e303,
         1e304, 1e305, 1e306, 1e307, 1e308};
 
-#define ARRAY_ELEMENTS(A) ((uint64_t)(sizeof(A) / sizeof(A[0])))
+#define ARRAY_ELEMENTS_NUM(A) ((uint64_t)(sizeof(A) / sizeof(A[0])))
 
-double MathFunctions::my_double_round(double value, int64_t dec, bool dec_unsigned, bool truncate) {
+double MathFunctions::double_round(double value, int64_t dec, bool dec_unsigned, bool truncate) {
     bool dec_negative = (dec < 0) && !dec_unsigned;
     uint64_t abs_dec = dec_negative ? -dec : dec;
     /*
@@ -73,7 +340,7 @@ double MathFunctions::my_double_round(double value, int64_t dec, bool dec_unsign
        */
     volatile double tmp2 = 0.0;
 
-    double tmp = (abs_dec < ARRAY_ELEMENTS(log_10) ? log_10[abs_dec] : std::pow(10.0, (double)abs_dec));
+    double tmp = (abs_dec < ARRAY_ELEMENTS_NUM(log_10) ? log_10[abs_dec] : std::pow(10.0, (double)abs_dec));
 
     // Pre-compute these, to avoid optimizing away e.g. 'floor(v/tmp) * tmp'.
     volatile double value_div_tmp = value / tmp;
@@ -90,403 +357,20 @@ double MathFunctions::my_double_round(double value, int64_t dec, bool dec_unsign
             tmp2 = dec < 0 ? std::ceil(value_div_tmp) * tmp : std::ceil(value_mul_tmp) / tmp;
         }
     } else {
-        tmp2 = dec < 0 ? std::rint(value_div_tmp) * tmp : std::rint(value_mul_tmp) / tmp;
+        // Because std::rint(+2.5) = 2, std::rint(+3.5) = 4,
+        // so It's not expected result, we should use std::round instead of std::rint.
+        tmp2 = dec < 0 ? std::round(value_div_tmp) * tmp : std::round(value_mul_tmp) / tmp;
     }
 
     return tmp2;
 }
 
-void MathFunctions::init() {}
-
-DoubleVal MathFunctions::pi(FunctionContext* ctx) {
-    return DoubleVal(M_PI);
-}
-
-DoubleVal MathFunctions::e(FunctionContext* ctx) {
-    return DoubleVal(M_E);
-}
-
-DecimalVal MathFunctions::abs(FunctionContext* ctx, const starrocks_udf::DecimalVal& val) {
-    if (val.is_null) {
-        return DecimalVal::null();
-    } else if (val.sign) {
-        return negative_decimal(ctx, val);
-    } else {
-        return positive_decimal(ctx, val);
-    }
-}
-
-DecimalV2Val MathFunctions::abs(FunctionContext* ctx, const starrocks_udf::DecimalV2Val& val) {
-    if (val.is_null) {
-        return DecimalV2Val::null();
-    }
-    if (UNLIKELY(val.val == MIN_INT128)) {
-        return DecimalV2Val::null();
-    } else {
-        return DecimalV2Val(::abs(val.val));
-    }
-}
-
-LargeIntVal MathFunctions::abs(FunctionContext* ctx, const starrocks_udf::LargeIntVal& val) {
-    if (val.is_null) {
-        return LargeIntVal::null();
-    }
-    if (UNLIKELY(val.val == MIN_INT128)) {
-        return LargeIntVal::null();
-    } else {
-        return LargeIntVal(::abs(val.val));
-    }
-}
-
-LargeIntVal MathFunctions::abs(FunctionContext* ctx, const starrocks_udf::BigIntVal& val) {
-    if (val.is_null) {
-        return LargeIntVal::null();
-    }
-    return LargeIntVal(::abs(__int128(val.val)));
-}
-
-BigIntVal MathFunctions::abs(FunctionContext* ctx, const starrocks_udf::IntVal& val) {
-    if (val.is_null) {
-        return BigIntVal::null();
-    }
-    return BigIntVal(::abs(int64_t(val.val)));
-}
-
-IntVal MathFunctions::abs(FunctionContext* ctx, const starrocks_udf::SmallIntVal& val) {
-    if (val.is_null) {
-        return IntVal::null();
-    }
-    return IntVal(::abs(int32_t(val.val)));
-}
-
-SmallIntVal MathFunctions::abs(FunctionContext* ctx, const starrocks_udf::TinyIntVal& val) {
-    if (val.is_null) {
-        return SmallIntVal::null();
-    }
-    return SmallIntVal(::abs(int16_t(val.val)));
-}
-
-// Generates a UDF that always calls FN() on the input val and returns it.
-#define ONE_ARG_MATH_FN(NAME, RET_TYPE, INPUT_TYPE, FN)                       \
-    RET_TYPE MathFunctions::NAME(FunctionContext* ctx, const INPUT_TYPE& v) { \
-        if (v.is_null) return RET_TYPE::null();                               \
-        return RET_TYPE(FN(v.val));                                           \
-    }
-
-ONE_ARG_MATH_FN(abs, DoubleVal, DoubleVal, std::fabs);
-ONE_ARG_MATH_FN(abs, FloatVal, FloatVal, std::fabs);
-ONE_ARG_MATH_FN(sin, DoubleVal, DoubleVal, std::sin);
-ONE_ARG_MATH_FN(asin, DoubleVal, DoubleVal, std::asin);
-ONE_ARG_MATH_FN(cos, DoubleVal, DoubleVal, std::cos);
-ONE_ARG_MATH_FN(acos, DoubleVal, DoubleVal, std::acos);
-ONE_ARG_MATH_FN(tan, DoubleVal, DoubleVal, std::tan);
-ONE_ARG_MATH_FN(atan, DoubleVal, DoubleVal, std::atan);
-ONE_ARG_MATH_FN(sqrt, DoubleVal, DoubleVal, std::sqrt);
-ONE_ARG_MATH_FN(ceil, BigIntVal, DoubleVal, std::ceil);
-ONE_ARG_MATH_FN(floor, BigIntVal, DoubleVal, std::floor);
-ONE_ARG_MATH_FN(ln, DoubleVal, DoubleVal, std::log);
-ONE_ARG_MATH_FN(log10, DoubleVal, DoubleVal, std::log10);
-ONE_ARG_MATH_FN(exp, DoubleVal, DoubleVal, std::exp);
-
-FloatVal MathFunctions::sign(FunctionContext* ctx, const DoubleVal& v) {
-    if (v.is_null) {
-        return FloatVal::null();
-    }
-    return FloatVal((v.val > 0) ? 1.0f : ((v.val < 0) ? -1.0f : 0.0f));
-}
-
-DoubleVal MathFunctions::radians(FunctionContext* ctx, const DoubleVal& v) {
-    if (v.is_null) {
-        return v;
-    }
-    return DoubleVal(v.val * M_PI / 180.0);
-}
-
-DoubleVal MathFunctions::degrees(FunctionContext* ctx, const DoubleVal& v) {
-    if (v.is_null) {
-        return v;
-    }
-    return DoubleVal(v.val * 180.0 / M_PI);
-}
-
-BigIntVal MathFunctions::round(FunctionContext* ctx, const DoubleVal& v) {
-    if (v.is_null) {
-        return BigIntVal::null();
-    }
-    return BigIntVal(static_cast<int64_t>(v.val + ((v.val < 0) ? -0.5 : 0.5)));
-}
-
-DoubleVal MathFunctions::round_up_to(FunctionContext* ctx, const DoubleVal& v, const IntVal& scale) {
-    if (v.is_null || scale.is_null) {
-        return DoubleVal::null();
-    }
-    return DoubleVal(my_double_round(v.val, scale.val, false, false));
-}
-
-DoubleVal MathFunctions::truncate(FunctionContext* ctx, const DoubleVal& v, const IntVal& scale) {
-    if (v.is_null || scale.is_null) {
-        return DoubleVal::null();
-    }
-    return DoubleVal(my_double_round(v.val, scale.val, false, true));
-}
-
-DoubleVal MathFunctions::log2(FunctionContext* ctx, const DoubleVal& v) {
-    if (v.is_null) {
-        return DoubleVal::null();
-    }
-    return DoubleVal(std::log(v.val) / std::log(2.0));
-}
-
-const double EPSILON = 1e-9;
-DoubleVal MathFunctions::log(FunctionContext* ctx, const DoubleVal& base, const DoubleVal& v) {
-    if (base.is_null || v.is_null) {
-        return DoubleVal::null();
-    }
-    if (base.val <= 0 || std::fabs(base.val - 1.0) < EPSILON || v.val <= 0.0) {
-        return DoubleVal::null();
-    }
-
-    return DoubleVal(std::log(v.val) / std::log(base.val));
-}
-
-DoubleVal MathFunctions::pow(FunctionContext* ctx, const DoubleVal& base, const DoubleVal& exp) {
-    if (base.is_null || exp.is_null) {
-        return DoubleVal::null();
-    }
-    return DoubleVal(std::pow(base.val, exp.val));
-}
-
-void MathFunctions::rand_prepare(FunctionContext* ctx, FunctionContext::FunctionStateScope scope) {
-    if (scope == FunctionContext::THREAD_LOCAL) {
-        uint32_t* seed = reinterpret_cast<uint32_t*>(ctx->allocate(sizeof(uint32_t)));
-        ctx->set_function_state(scope, seed);
-        if (ctx->get_num_args() == 1) {
-            // This is a call to RandSeed, initialize the seed
-            // TODO: should we support non-constant seed?
-            if (!ctx->is_arg_constant(0)) {
-                ctx->set_error("Seed argument to rand() must be constant");
-                return;
-            }
-            BigIntVal* seed_arg = static_cast<BigIntVal*>(ctx->get_constant_arg(0));
-            if (seed_arg->is_null) {
-                seed = NULL;
-            } else {
-                *seed = seed_arg->val;
-            }
-        } else {
-            // This is a call to Rand, initialize seed to 0
-            // TODO: can we change this behavior? This is stupid.
-            *seed = 0;
-        }
-    }
-}
-
-DoubleVal MathFunctions::rand(FunctionContext* ctx) {
-    uint32_t* seed = reinterpret_cast<uint32_t*>(ctx->get_function_state(FunctionContext::THREAD_LOCAL));
-    *seed = ::rand_r(seed);
-    // Normalize to [0,1].
-    return DoubleVal(static_cast<double>(*seed) / RAND_MAX);
-}
-
-DoubleVal MathFunctions::rand_seed(FunctionContext* ctx, const BigIntVal& seed) {
-    if (seed.is_null) {
-        return DoubleVal::null();
-    }
-    return rand(ctx);
-}
-
-StringVal MathFunctions::bin(FunctionContext* ctx, const BigIntVal& v) {
-    if (v.is_null) {
-        return StringVal::null();
-    }
-    // Cast to an unsigned integer because it is compiler dependent
-    // whether the sign bit will be shifted like a regular bit.
-    // (logical vs. arithmetic shift for signed numbers)
-    uint64_t n = static_cast<uint64_t>(v.val);
-    const size_t max_bits = sizeof(uint64_t) * 8;
-    char result[max_bits];
-    uint32_t index = max_bits;
-    do {
-        result[--index] = '0' + (n & 1);
-    } while (n >>= 1);
-    return AnyValUtil::from_buffer_temp(ctx, result + index, max_bits - index);
-}
-
-StringVal MathFunctions::hex_int(FunctionContext* ctx, const BigIntVal& v) {
-    if (v.is_null) {
-        return StringVal::null();
-    }
-    // TODO: this is probably unreasonably slow
-    std::stringstream ss;
-    ss << std::hex << std::uppercase << v.val;
-    return AnyValUtil::from_string_temp(ctx, ss.str());
-}
-
-StringVal MathFunctions::hex_string(FunctionContext* ctx, const StringVal& s) {
-    if (s.is_null) {
-        return StringVal::null();
-    }
-    std::stringstream ss;
-    ss << std::hex << std::uppercase << std::setfill('0');
-    for (int i = 0; i < s.len; ++i) {
-        // setw is not sticky. std::stringstream only converts integral values,
-        // so a cast to int is required, but only convert the least significant byte to hex.
-        ss << std::setw(2) << (static_cast<int32_t>(s.ptr[i]) & 0xFF);
-    }
-    return AnyValUtil::from_string_temp(ctx, ss.str());
-}
-
-StringVal MathFunctions::unhex(FunctionContext* ctx, const StringVal& s) {
-    if (s.is_null) {
-        return StringVal::null();
-    }
-    // For uneven number of chars return empty string like Hive does.
-    if (s.len % 2 != 0) {
-        return StringVal();
-    }
-
-    int result_len = s.len / 2;
-    char result[result_len];
-    int res_index = 0;
-    int s_index = 0;
-    while (s_index < s.len) {
-        char c = 0;
-        for (int j = 0; j < 2; ++j, ++s_index) {
-            switch (s.ptr[s_index]) {
-            case '0':
-            case '1':
-            case '2':
-            case '3':
-            case '4':
-            case '5':
-            case '6':
-            case '7':
-            case '8':
-            case '9':
-                c += (s.ptr[s_index] - '0') * ((j == 0) ? 16 : 1);
-                break;
-            case 'A':
-            case 'B':
-            case 'C':
-            case 'D':
-            case 'E':
-            case 'F':
-                // Map to decimal values [10, 15]
-                c += (s.ptr[s_index] - 'A' + 10) * ((j == 0) ? 16 : 1);
-                break;
-            case 'a':
-            case 'b':
-            case 'c':
-            case 'd':
-            case 'e':
-            case 'f':
-                // Map to decimal [10, 15]
-                c += (s.ptr[s_index] - 'a' + 10) * ((j == 0) ? 16 : 1);
-                break;
-            default:
-                // Character not in hex alphabet, return empty string.
-                return StringVal();
-            }
-        }
-        result[res_index] = c;
-        ++res_index;
-    }
-    return AnyValUtil::from_buffer_temp(ctx, result, result_len);
-}
-
-StringVal MathFunctions::conv_int(FunctionContext* ctx, const BigIntVal& num, const TinyIntVal& src_base,
-                                  const TinyIntVal& dest_base) {
-    if (num.is_null || src_base.is_null || dest_base.is_null) {
-        return StringVal::null();
-    }
-    // As in MySQL and Hive, min base is 2 and max base is 36.
-    // (36 is max base representable by alphanumeric chars)
-    // If a negative target base is given, num should be interpreted in 2's complement.
-    if (std::abs(src_base.val) < MIN_BASE || std::abs(src_base.val) > MAX_BASE || std::abs(dest_base.val) < MIN_BASE ||
-        std::abs(dest_base.val) > MAX_BASE) {
-        // Return NULL like Hive does.
-        return StringVal::null();
-    }
-    // Invalid input.
-    if (src_base.val < 0 && num.val >= 0) {
-        return StringVal::null();
-    }
-    int64_t decimal_num = num.val;
-    if (src_base.val != 10) {
-        // Convert src_num representing a number in src_base but encoded in decimal
-        // into its actual decimal number.
-        if (!decimal_in_base_to_decimal(num.val, src_base.val, &decimal_num)) {
-            // Handle overflow, setting decimal_num appropriately.
-            handle_parse_result(dest_base.val, &decimal_num, StringParser::PARSE_OVERFLOW);
-        }
-    }
-    return decimal_to_base(ctx, decimal_num, dest_base.val);
-}
-
-StringVal MathFunctions::conv_string(FunctionContext* ctx, const StringVal& num_str, const TinyIntVal& src_base,
-                                     const TinyIntVal& dest_base) {
-    if (num_str.is_null || src_base.is_null || dest_base.is_null) {
-        return StringVal::null();
-    }
-    // As in MySQL and Hive, min base is 2 and max base is 36.
-    // (36 is max base representable by alphanumeric chars)
-    // If a negative target base is given, num should be interpreted in 2's complement.
-    if (std::abs(src_base.val) < MIN_BASE || std::abs(src_base.val) > MAX_BASE || std::abs(dest_base.val) < MIN_BASE ||
-        std::abs(dest_base.val) > MAX_BASE) {
-        // Return NULL like Hive does.
-        return StringVal::null();
-    }
-    // Convert digits in num_str in src_base to decimal.
-    StringParser::ParseResult parse_res;
-    int64_t decimal_num = StringParser::string_to_int<int64_t>(reinterpret_cast<char*>(num_str.ptr), num_str.len,
-                                                               src_base.val, &parse_res);
-    if (src_base.val < 0 && decimal_num >= 0) {
-        // Invalid input.
-        return StringVal::null();
-    }
-    if (!handle_parse_result(dest_base.val, &decimal_num, parse_res)) {
-        // Return 0 for invalid input strings like Hive does.
-        return StringVal(reinterpret_cast<uint8_t*>(const_cast<char*>("0")), 1);
-    }
-    return decimal_to_base(ctx, decimal_num, dest_base.val);
-}
-
-StringVal MathFunctions::decimal_to_base(FunctionContext* ctx, int64_t src_num, int8_t dest_base) {
-    // Max number of digits of any base (base 2 gives max digits), plus sign.
-    const size_t max_digits = sizeof(uint64_t) * 8 + 1;
-    char buf[max_digits];
-    int32_t result_len = 0;
-    int32_t buf_index = max_digits - 1;
-    uint64_t temp_num;
-    if (dest_base < 0) {
-        // Dest base is negative, treat src_num as signed.
-        temp_num = std::abs(src_num);
-    } else {
-        // Dest base is positive. We must interpret src_num in 2's complement.
-        // Convert to an unsigned int to properly deal with 2's complement conversion.
-        temp_num = static_cast<uint64_t>(src_num);
-    }
-    int abs_base = std::abs(dest_base);
-    do {
-        buf[buf_index] = _s_alphanumeric_chars[temp_num % abs_base];
-        temp_num /= abs_base;
-        --buf_index;
-        ++result_len;
-    } while (temp_num > 0);
-    // Add optional sign.
-    if (src_num < 0 && dest_base < 0) {
-        buf[buf_index] = '-';
-        ++result_len;
-    }
-    return AnyValUtil::from_buffer_temp(ctx, buf + max_digits - result_len, result_len);
-}
-
 bool MathFunctions::decimal_in_base_to_decimal(int64_t src_num, int8_t src_base, int64_t* result) {
     uint64_t temp_num = std::abs(src_num);
-    int32_t place = 1;
+    int64_t place = 1;
     *result = 0;
     do {
-        int32_t digit = temp_num % 10;
+        int64_t digit = temp_num % 10;
         // Reset result if digit is not representable in src_base.
         if (digit >= src_base) {
             *result = 0;
@@ -521,368 +405,481 @@ bool MathFunctions::handle_parse_result(int8_t dest_base, int64_t* num, StringPa
     return true;
 }
 
-BigIntVal MathFunctions::pmod_bigint(FunctionContext* ctx, const BigIntVal& a, const BigIntVal& b) {
-    if (a.is_null || b.is_null) {
-        return BigIntVal::null();
+const char* MathFunctions::_s_alphanumeric_chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+std::string MathFunctions::decimal_to_base(int64_t src_num, int8_t dest_base) {
+    // Max number of digits of any base (base 2 gives max digits), plus sign.
+    const size_t max_digits = sizeof(uint64_t) * 8 + 1;
+    char buf[max_digits];
+    size_t result_len = 0;
+    int32_t buf_index = max_digits - 1;
+    uint64_t temp_num;
+    if (dest_base < 0) {
+        // Dest base is negative, treat src_num as signed.
+        temp_num = std::abs(src_num);
+    } else {
+        // Dest base is positive. We must interpret src_num in 2's complement.
+        // Convert to an unsigned int to properly deal with 2's complement conversion.
+        temp_num = static_cast<uint64_t>(src_num);
     }
-    return BigIntVal(((a.val % b.val) + b.val) % b.val);
+    int abs_base = std::abs(dest_base);
+    do {
+        buf[buf_index] = _s_alphanumeric_chars[temp_num % abs_base];
+        temp_num /= abs_base;
+        --buf_index;
+        ++result_len;
+    } while (temp_num > 0);
+    // Add optional sign.
+    if (src_num < 0 && dest_base < 0) {
+        buf[buf_index] = '-';
+        ++result_len;
+    }
+    return {buf + max_digits - result_len, result_len};
 }
 
-DoubleVal MathFunctions::pmod_double(FunctionContext* ctx, const DoubleVal& a, const DoubleVal& b) {
-    if (a.is_null || b.is_null) {
-        return DoubleVal::null();
+template <DecimalRoundRule rule, bool keep_scale>
+void MathFunctions::decimal_round(const int128_t& lv, const int32_t& original_scale, const int32_t& rv, int128_t* res,
+                                  bool* is_over_flow) {
+    *is_over_flow = false;
+    int32_t target_scale = rv;
+    int32_t max_precision = decimal_precision_limit<int128_t>;
+    if (target_scale > max_precision) {
+        target_scale = max_precision;
+    } else if (target_scale < -max_precision) {
+        target_scale = -max_precision;
     }
-    return DoubleVal(fmod(fmod(a.val, b.val) + b.val, b.val));
-}
-
-FloatVal MathFunctions::fmod_float(FunctionContext* ctx, const FloatVal& a, const FloatVal& b) {
-    if (a.is_null || b.is_null || b.val == 0) {
-        return FloatVal::null();
+    int32_t scale_diff = target_scale - original_scale;
+    if (std::abs(scale_diff) > max_precision) {
+        (*is_over_flow) = true;
+        return;
     }
-    return FloatVal(fmodf(a.val, b.val));
-}
-
-DoubleVal MathFunctions::fmod_double(FunctionContext* ctx, const DoubleVal& a, const DoubleVal& b) {
-    if (a.is_null || b.is_null || b.val == 0) {
-        return DoubleVal::null();
-    }
-    return DoubleVal(fmod(a.val, b.val));
-}
-
-BigIntVal MathFunctions::positive_bigint(FunctionContext* ctx, const BigIntVal& val) {
-    return val;
-}
-
-DoubleVal MathFunctions::positive_double(FunctionContext* ctx, const DoubleVal& val) {
-    return val;
-}
-
-DecimalVal MathFunctions::positive_decimal(FunctionContext* ctx, const DecimalVal& val) {
-    return val;
-}
-
-DecimalV2Val MathFunctions::positive_decimal(FunctionContext* ctx, const DecimalV2Val& val) {
-    return val;
-}
-
-BigIntVal MathFunctions::negative_bigint(FunctionContext* ctx, const BigIntVal& val) {
-    if (val.is_null) {
-        return val;
-    }
-    return BigIntVal(-val.val);
-}
-
-DoubleVal MathFunctions::negative_double(FunctionContext* ctx, const DoubleVal& val) {
-    if (val.is_null) {
-        return val;
-    }
-    return DoubleVal(-val.val);
-}
-
-DecimalVal MathFunctions::negative_decimal(FunctionContext* ctx, const DecimalVal& val) {
-    if (val.is_null) {
-        return val;
-    }
-    const DecimalValue& dv1 = DecimalValue::from_decimal_val(val);
-    LOG(INFO) << dv1.to_string();
-    DecimalVal result;
-    LOG(INFO) << (-dv1).to_string();
-    (-dv1).to_decimal_val(&result);
-    return result;
-}
-
-DecimalV2Val MathFunctions::negative_decimal(FunctionContext* ctx, const DecimalV2Val& val) {
-    if (val.is_null) {
-        return val;
-    }
-    const DecimalV2Value& dv1 = DecimalV2Value::from_decimal_val(val);
-    DecimalV2Val result;
-    (-dv1).to_decimal_val(&result);
-    return result;
-}
-
-#define LEAST_FN(TYPE)                                                                \
-    TYPE MathFunctions::least(FunctionContext* ctx, int num_args, const TYPE* args) { \
-        if (args[0].is_null) return TYPE::null();                                     \
-        int result_idx = 0;                                                           \
-        for (int i = 1; i < num_args; ++i) {                                          \
-            if (args[i].is_null) return TYPE::null();                                 \
-            if (args[i].val < args[result_idx].val) result_idx = i;                   \
-        }                                                                             \
-        return TYPE(args[result_idx].val);                                            \
-    }
-
-#define LEAST_FNS()        \
-    LEAST_FN(TinyIntVal);  \
-    LEAST_FN(SmallIntVal); \
-    LEAST_FN(IntVal);      \
-    LEAST_FN(BigIntVal);   \
-    LEAST_FN(LargeIntVal); \
-    LEAST_FN(FloatVal);    \
-    LEAST_FN(DoubleVal);
-
-LEAST_FNS();
-
-#define LEAST_NONNUMERIC_FN(TYPE_NAME, TYPE, STARROCKS_TYPE)                          \
-    TYPE MathFunctions::least(FunctionContext* ctx, int num_args, const TYPE* args) { \
-        if (args[0].is_null) return TYPE::null();                                     \
-        STARROCKS_TYPE result_val = STARROCKS_TYPE::from_##TYPE_NAME(args[0]);        \
-        for (int i = 1; i < num_args; ++i) {                                          \
-            if (args[i].is_null) return TYPE::null();                                 \
-            STARROCKS_TYPE val = STARROCKS_TYPE::from_##TYPE_NAME(args[i]);           \
-            if (val < result_val) result_val = val;                                   \
-        }                                                                             \
-        TYPE result;                                                                  \
-        result_val.to_##TYPE_NAME(&result);                                           \
-        return result;                                                                \
-    }
-
-#define LEAST_NONNUMERIC_FNS()                                     \
-    LEAST_NONNUMERIC_FN(string_val, StringVal, StringValue);       \
-    LEAST_NONNUMERIC_FN(datetime_val, DateTimeVal, DateTimeValue); \
-    LEAST_NONNUMERIC_FN(decimal_val, DecimalVal, DecimalValue);    \
-    LEAST_NONNUMERIC_FN(decimal_val, DecimalV2Val, DecimalV2Value);
-
-LEAST_NONNUMERIC_FNS();
-
-#define GREATEST_FN(TYPE)                                                                \
-    TYPE MathFunctions::greatest(FunctionContext* ctx, int num_args, const TYPE* args) { \
-        if (args[0].is_null) return TYPE::null();                                        \
-        int result_idx = 0;                                                              \
-        for (int i = 1; i < num_args; ++i) {                                             \
-            if (args[i].is_null) return TYPE::null();                                    \
-            if (args[i].val > args[result_idx].val) result_idx = i;                      \
-        }                                                                                \
-        return TYPE(args[result_idx].val);                                               \
-    }
-
-#define GREATEST_FNS()        \
-    GREATEST_FN(TinyIntVal);  \
-    GREATEST_FN(SmallIntVal); \
-    GREATEST_FN(IntVal);      \
-    GREATEST_FN(BigIntVal);   \
-    GREATEST_FN(LargeIntVal); \
-    GREATEST_FN(FloatVal);    \
-    GREATEST_FN(DoubleVal);
-
-GREATEST_FNS();
-
-#define GREATEST_NONNUMERIC_FN(TYPE_NAME, TYPE, STARROCKS_TYPE)                          \
-    TYPE MathFunctions::greatest(FunctionContext* ctx, int num_args, const TYPE* args) { \
-        if (args[0].is_null) return TYPE::null();                                        \
-        STARROCKS_TYPE result_val = STARROCKS_TYPE::from_##TYPE_NAME(args[0]);           \
-        for (int i = 1; i < num_args; ++i) {                                             \
-            if (args[i].is_null) return TYPE::null();                                    \
-            STARROCKS_TYPE val = STARROCKS_TYPE::from_##TYPE_NAME(args[i]);              \
-            if (val > result_val) result_val = val;                                      \
-        }                                                                                \
-        TYPE result;                                                                     \
-        result_val.to_##TYPE_NAME(&result);                                              \
-        return result;                                                                   \
-    }
-
-#define GREATEST_NONNUMERIC_FNS()                                     \
-    GREATEST_NONNUMERIC_FN(string_val, StringVal, StringValue);       \
-    GREATEST_NONNUMERIC_FN(datetime_val, DateTimeVal, DateTimeValue); \
-    GREATEST_NONNUMERIC_FN(decimal_val, DecimalVal, DecimalValue);    \
-    GREATEST_NONNUMERIC_FN(decimal_val, DecimalV2Val, DecimalV2Value);
-
-GREATEST_NONNUMERIC_FNS();
-
-#if 0
-void* MathFunctions::greatest_bigint(Expr* e, TupleRow* row) {
-    DCHECK_GE(e->get_num_children(), 1);
-    int32_t num_args = e->get_num_children();
-
-    int result_idx = 0;
-    // NOTE: loop index starts at 0, so If frist arg is NULL, we can return early..
-    for (int i = 0; i < num_args; ++i) {
-        int64_t* arg = reinterpret_cast<int64_t*>(e->children()[i]->get_value(row));
-        if (arg == NULL) {
-            return NULL;
+    if (scale_diff > 0) {
+        if (keep_scale) {
+            // Up scale and down scale can offset when keep scale is set
+            // E.g. 1.2345 --(scale up by 2)--> 1.234500 --(scale down by 2)--> 1.2345
+            *res = lv;
+        } else {
+            (*is_over_flow) |= DecimalV3Cast::round<int128_t, int128_t, int128_t, rule, true, true>(
+                    lv, get_scale_factor<int128_t>(scale_diff), res);
         }
+    } else if (scale_diff < 0) {
+        // Up scale and down scale cannot offset when keep scale is set
+        // E.g. 1.2345 --(scale down by 2)--> 1.23 --(scale up by 2)--> 1.2300
+        (*is_over_flow) |= DecimalV3Cast::round<int128_t, int128_t, int128_t, rule, false, true>(
+                lv, get_scale_factor<int128_t>(-scale_diff), res);
+        if (keep_scale) {
+            int128_t new_res;
+            (*is_over_flow) |= DecimalV3Cast::round<int128_t, int128_t, int128_t, rule, true, true>(
+                    *res, get_scale_factor<int128_t>(-scale_diff), &new_res);
+            *res = new_res;
+        } else if (target_scale < 0) {
+            // E.g. round(13.14, -1), 13.14 --(scale down by 3)--> 1e1 --(scale up by 1)--> 10
+            int128_t new_res;
+            (*is_over_flow) |= DecimalV3Cast::round<int128_t, int128_t, int128_t, rule, true, true>(
+                    *res, get_scale_factor<int128_t>(-target_scale), &new_res);
+            *res = new_res;
+        }
+    } else {
+        *res = lv;
+    }
+}
 
-        if (*arg > *reinterpret_cast<int64_t*>(e->children()[result_idx]->get_value(row))) {
-            result_idx = i;
+template <DecimalRoundRule rule>
+StatusOr<ColumnPtr> MathFunctions::decimal_round(FunctionContext* context, const Columns& columns) {
+    const auto& type = context->get_return_type();
+
+    ColumnPtr c0 = columns[0];
+    ColumnPtr c1 = columns[1];
+    if (c0->only_null() || c1->only_null()) {
+        return ColumnHelper::create_const_null_column(c0->size());
+    }
+
+    NullColumnPtr null_flags;
+    bool has_null = false;
+    if (c0->has_null() || c1->has_null()) {
+        has_null = true;
+        null_flags = FunctionHelper::union_nullable_column(c0, c1);
+    } else {
+        null_flags = NullColumn::create();
+        null_flags->reserve(c0->size());
+        null_flags->append_default(c0->size());
+    }
+
+    const bool c0_is_const = c0->is_constant();
+    const bool c1_is_const = c1->is_constant();
+
+    const int size = c0->size();
+    // Unpack const
+    c0 = FunctionHelper::get_data_column_of_const(c0);
+    c1 = FunctionHelper::get_data_column_of_const(c1);
+
+    // Unpack nullable
+    c0 = FunctionHelper::get_data_column_of_nullable(c0);
+    c1 = FunctionHelper::get_data_column_of_nullable(c1);
+
+    ColumnPtr res = RunTimeColumnType<TYPE_DECIMAL128>::create(type.precision, type.scale);
+    res->resize_uninitialized(size);
+
+    const int32_t original_scale = ColumnHelper::cast_to_raw<TYPE_DECIMAL128>(c0)->scale();
+
+    int128_t* raw_c0 = ColumnHelper::cast_to_raw<TYPE_DECIMAL128>(c0)->get_data().data();
+    int32_t* raw_c1 = ColumnHelper::cast_to_raw<TYPE_INT>(c1)->get_data().data();
+    int128_t* raw_res = ColumnHelper::cast_to_raw<TYPE_DECIMAL128>(res)->get_data().data();
+    uint8_t* raw_null_flags = null_flags->get_data().data();
+
+    // If c2 is not const, than we need to keep the originl scale
+    // TODO(hcf) For truncate(v, d), we also to keep the scale if d is constant
+    if (c0_is_const && c1_is_const) {
+        bool is_over_flow;
+        MathFunctions::decimal_round<rule, false>(raw_c0[0], original_scale, raw_c1[0], &raw_res[0], &is_over_flow);
+        if (is_over_flow) {
+            DCHECK(!has_null);
+            res = ColumnHelper::create_const_null_column(size);
+        } else {
+            res->resize(1);
+            res = ConstColumn::create(res, size);
+        }
+    } else if (c0_is_const) {
+        for (auto i = 0; i < size; i++) {
+            bool is_over_flow;
+            MathFunctions::decimal_round<rule, true>(raw_c0[0], original_scale, raw_c1[i], &raw_res[i], &is_over_flow);
+            if (is_over_flow) {
+                has_null = true;
+                raw_null_flags[i] = 1;
+            }
+        }
+    } else if (c1_is_const) {
+        for (auto i = 0; i < size; i++) {
+            bool is_over_flow;
+            MathFunctions::decimal_round<rule, false>(raw_c0[i], original_scale, raw_c1[0], &raw_res[i], &is_over_flow);
+            if (is_over_flow) {
+                has_null = true;
+                raw_null_flags[i] = 1;
+            }
+        }
+    } else {
+        for (auto i = 0; i < size; i++) {
+            bool is_over_flow;
+            MathFunctions::decimal_round<rule, true>(raw_c0[i], original_scale, raw_c1[i], &raw_res[i], &is_over_flow);
+            if (is_over_flow) {
+                has_null = true;
+                raw_null_flags[i] = 1;
+            }
         }
     }
-    return &e->children()[result_idx]->_result.bigint_val;
+
+    if (has_null) {
+        return NullableColumn::create(std::move(res), std::move(null_flags));
+    } else {
+        return res;
+    }
 }
 
-void* MathFunctions::greatest_double(Expr* e, TupleRow* row) {
-    DCHECK_GE(e->get_num_children(), 1);
-    int32_t num_args = e->get_num_children();
-    int result_idx = 0;
-    // NOTE: loop index starts at 0, so If frist arg is NULL, we can return early..
-    for (int i = 0; i < num_args; ++i) {
-        double* arg = reinterpret_cast<double*>(e->children()[i]->get_value(row));
-        if (arg == NULL) {
-            return NULL;
+StatusOr<ColumnPtr> MathFunctions::truncate_decimal128(FunctionContext* context, const Columns& columns) {
+    return decimal_round<DecimalRoundRule::ROUND_TRUNCATE>(context, columns);
+}
+
+StatusOr<ColumnPtr> MathFunctions::round_decimal128(FunctionContext* context, const Columns& columns) {
+    DCHECK_EQ(columns.size(), 1);
+    Columns new_columns;
+    new_columns.push_back(columns[0]);
+    new_columns.push_back(ColumnHelper::create_const_column<LogicalType::TYPE_INT>(0, columns[0]->size()));
+    return decimal_round<DecimalRoundRule::ROUND_HALF_UP>(context, new_columns);
+}
+
+StatusOr<ColumnPtr> MathFunctions::round_up_to_decimal128(FunctionContext* context, const Columns& columns) {
+    return decimal_round<DecimalRoundRule::ROUND_HALF_UP>(context, columns);
+}
+
+StatusOr<ColumnPtr> MathFunctions::conv_int(FunctionContext* context, const Columns& columns) {
+    auto bigint = ColumnViewer<TYPE_BIGINT>(columns[0]);
+    auto src_base = ColumnViewer<TYPE_TINYINT>(columns[1]);
+    auto dest_base = ColumnViewer<TYPE_TINYINT>(columns[2]);
+
+    auto size = columns[0]->size();
+    ColumnBuilder<TYPE_VARCHAR> result(size);
+    for (int row = 0; row < size; ++row) {
+        if (bigint.is_null(row) || src_base.is_null(row) || dest_base.is_null(row)) {
+            result.append_null();
+            continue;
         }
 
-        if (*arg > *reinterpret_cast<double*>(e->children()[result_idx]->get_value(row))) {
-            result_idx = i;
+        int64_t binint_value = bigint.value(row);
+        int8_t src_base_value = src_base.value(row);
+        int8_t dest_base_value = dest_base.value(row);
+        if (std::abs(src_base_value) < MIN_BASE || std::abs(src_base_value) > MAX_BASE ||
+            std::abs(dest_base_value) < MIN_BASE || std::abs(dest_base_value) > MAX_BASE) {
+            result.append_null();
+            continue;
+        }
+
+        int64_t decimal_num = binint_value;
+        if (src_base_value != 10) {
+            if (!decimal_in_base_to_decimal(binint_value, std::abs(src_base_value), &decimal_num)) {
+                handle_parse_result(dest_base_value, &decimal_num, StringParser::PARSE_OVERFLOW);
+            }
+        }
+
+        result.append(Slice(decimal_to_base(decimal_num, dest_base_value)));
+    }
+
+    return result.build(ColumnHelper::is_all_const(columns));
+}
+
+StatusOr<ColumnPtr> MathFunctions::conv_string(FunctionContext* context, const Columns& columns) {
+    auto string_viewer = ColumnViewer<TYPE_VARCHAR>(columns[0]);
+    auto src_base = ColumnViewer<TYPE_TINYINT>(columns[1]);
+    auto dest_base = ColumnViewer<TYPE_TINYINT>(columns[2]);
+
+    auto size = columns[0]->size();
+    ColumnBuilder<TYPE_VARCHAR> result(size);
+    for (int row = 0; row < size; ++row) {
+        if (string_viewer.is_null(row) || src_base.is_null(row) || dest_base.is_null(row)) {
+            result.append_null();
+            continue;
+        }
+
+        auto string_value = string_viewer.value(row);
+        int8_t src_base_value = src_base.value(row);
+        int8_t dest_base_value = dest_base.value(row);
+        if (std::abs(src_base_value) < MIN_BASE || std::abs(src_base_value) > MAX_BASE ||
+            std::abs(dest_base_value) < MIN_BASE || std::abs(dest_base_value) > MAX_BASE) {
+            result.append_null();
+            continue;
+        }
+        bool is_signed = src_base_value < 0;
+        char* data_ptr = reinterpret_cast<char*>(string_value.data);
+        int digit_start_offset = StringParser::skip_leading_whitespace(data_ptr, string_value.size);
+        if (digit_start_offset == string_value.size) {
+            result.append(Slice("0", 1));
+            continue;
+        }
+        bool negative = data_ptr[digit_start_offset] == '-';
+        digit_start_offset += negative;
+        StringParser::ParseResult parse_res;
+        auto decimal64_num = StringParser::string_to_int<uint64_t>(data_ptr + digit_start_offset,
+                                                                   string_value.size - digit_start_offset,
+                                                                   std::abs(src_base_value), &parse_res);
+        if (parse_res == StringParser::PARSE_SUCCESS) {
+            if (is_signed) {
+                if (negative && decimal64_num > 0ull - std::numeric_limits<int64_t>::min()) {
+                    decimal64_num = 0ull - std::numeric_limits<int64_t>::min();
+                }
+                if (!negative && decimal64_num > std::numeric_limits<int64_t>::max()) {
+                    decimal64_num = std::numeric_limits<int64_t>::max();
+                }
+            }
+        } else if (parse_res == StringParser::PARSE_FAILURE) {
+            result.append(Slice("0", 1));
+            continue;
+        } else if (parse_res == StringParser::PARSE_OVERFLOW) {
+            if (is_signed) {
+                decimal64_num =
+                        negative ? (0ull - std::numeric_limits<int64_t>::min()) : std::numeric_limits<int64_t>::max();
+            } else {
+                decimal64_num = negative ? 0 : std::numeric_limits<uint64_t>::max();
+            }
+        } else {
+            CHECK(false) << "unreachable path, parse_res: " << parse_res;
+        }
+        if (negative) {
+            decimal64_num = (~decimal64_num + 1);
+        }
+
+        result.append(Slice(decimal_to_base(decimal64_num, dest_base_value)));
+    }
+
+    return result.build(ColumnHelper::is_all_const(columns));
+}
+
+Status MathFunctions::rand_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+    if (scope == FunctionContext::THREAD_LOCAL) {
+        if (context->get_num_args() == 1) {
+            // This is a call to RandSeed, initialize the seed
+            // TODO: should we support non-constant seed?
+            if (!context->is_constant_column(0)) {
+                std::stringstream error;
+                error << "Seed argument to rand() must be constant";
+                context->set_error(error.str().c_str());
+                return Status::InvalidArgument(error.str());
+            }
+
+            auto seed_column = context->get_constant_column(0);
+            if (seed_column->only_null()) {
+                return Status::OK();
+            }
+
+            int64_t seed_value = ColumnHelper::get_const_value<TYPE_BIGINT>(seed_column);
+            generator.seed(seed_value);
         }
     }
-    return &e->children()[result_idx]->_result.double_val;
+    return Status::OK();
 }
 
-void* MathFunctions::greatest_decimal(Expr* e, TupleRow* row) {
-    DCHECK_GE(e->get_num_children(), 1);
-    int32_t num_args = e->get_num_children();
-    int result_idx = 0;
-    // NOTE: loop index starts at 0, so If frist arg is NULL, we can return early..
-    for (int i = 0; i < num_args; ++i) {
-        DecimalValue* arg = reinterpret_cast<DecimalValue*>(e->children()[i]->get_value(row));
-        if (arg == NULL) {
-            return NULL;
-        }
-        if (*arg > *reinterpret_cast<DecimalValue*>(e->children()[result_idx]->get_value(row))) {
-            result_idx = i;
-        }
+Status MathFunctions::rand_close(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+    return Status::OK();
+}
+
+StatusOr<ColumnPtr> MathFunctions::rand(FunctionContext* context, const Columns& columns) {
+    int32_t num_rows = ColumnHelper::get_const_value<TYPE_INT>(columns[columns.size() - 1]);
+    ColumnBuilder<TYPE_DOUBLE> result(num_rows);
+    for (int i = 0; i < num_rows; ++i) {
+        result.append(distribution(generator));
     }
-    return &e->children()[result_idx]->_result.decimal_val;
+
+    return result.build(false);
 }
 
-void* MathFunctions::greatest_string(Expr* e, TupleRow* row) {
-    DCHECK_GE(e->get_num_children(), 1);
-    int32_t num_args = e->get_num_children();
-    int result_idx = 0;
-    // NOTE: loop index starts at 0, so If frist arg is NULL, we can return early..
-    for (int i = 0; i < num_args; ++i) {
-        StringValue* arg = reinterpret_cast<StringValue*>(e->children()[i]->get_value(row));
-        if (arg == NULL) {
-            return NULL;
-        }
-        if (*arg > *reinterpret_cast<StringValue*>(e->children()[result_idx]->get_value(row))) {
-            result_idx = i;
-        }
+StatusOr<ColumnPtr> MathFunctions::rand_seed(FunctionContext* context, const Columns& columns) {
+    DCHECK_EQ(columns.size(), 2);
+
+    if (columns[0]->only_null()) {
+        return ColumnHelper::create_const_null_column(columns[0]->size());
     }
-    return &e->children()[result_idx]->_result.string_val;
+
+    return rand(context, columns);
 }
 
-void* MathFunctions::greatest_timestamp(Expr* e, TupleRow* row) {
-    DCHECK_GE(e->get_num_children(), 1);
-    int32_t num_args = e->get_num_children();
-    int result_idx = 0;
-    // NOTE: loop index starts at 0, so If frist arg is NULL, we can return early..
-    for (int i = 0; i < num_args; ++i) {
-        DateTimeValue* arg = reinterpret_cast<DateTimeValue*>(e->children()[i]->get_value(row));
-        if (arg == NULL) {
-            return NULL;
-        }
-        if (*arg > *reinterpret_cast<DateTimeValue*>(e->children()[result_idx]->get_value(row))) {
-            result_idx = i;
-        }
-    }
-    return &e->children()[result_idx]->_result.datetime_val;
+#ifdef __AVX2__
+static float sum_m256(__m256 v) {
+    __m256 hadd = _mm256_hadd_ps(v, v);
+    __m256 hadd2 = _mm256_hadd_ps(hadd, hadd);
+    __m128 vlow = _mm256_castps256_ps128(hadd2);
+    __m128 vhigh = _mm256_extractf128_ps(hadd2, 1);
+    __m128 result = _mm_add_ss(vlow, vhigh);
+    return _mm_cvtss_f32(result);
 }
-void* MathFunctions::least_bigint(Expr* e, TupleRow* row) {
-    DCHECK_GE(e->get_num_children(), 1);
-    int32_t num_args = e->get_num_children();
-
-    int result_idx = 0;
-    // NOTE: loop index starts at 0, so If frist arg is NULL, we can return early..
-    for (int i = 0; i < num_args; ++i) {
-        int64_t* arg = reinterpret_cast<int64_t*>(e->children()[i]->get_value(row));
-        if (arg == NULL) {
-            return NULL;
-        }
-
-        if (*arg < *reinterpret_cast<int64_t*>(e->children()[result_idx]->get_value(row))) {
-            result_idx = i;
-        }
-    }
-    return &e->children()[result_idx]->_result.bigint_val;
-
-}
-
-void* MathFunctions::least_double(Expr* e, TupleRow* row) {
-    DCHECK_GE(e->get_num_children(), 1);
-    int32_t num_args = e->get_num_children();
-    int result_idx = 0;
-    // NOTE: loop index starts at 0, so If frist arg is NULL, we can return early..
-    for (int i = 0; i < num_args; ++i) {
-        double* arg = reinterpret_cast<double*>(e->children()[i]->get_value(row));
-        if (arg == NULL) {
-            return NULL;
-        }
-
-        if (*arg < *reinterpret_cast<double*>(e->children()[result_idx]->get_value(row))) {
-            result_idx = i;
-        }
-    }
-    return &e->children()[result_idx]->_result.double_val;
-}
-
-void* MathFunctions::least_decimal(Expr* e, TupleRow* row) {
-    DCHECK_GE(e->get_num_children(), 1);
-    int32_t num_args = e->get_num_children();
-    int result_idx = 0;
-    // NOTE: loop index starts at 0, so If frist arg is NULL, we can return early..
-    for (int i = 0; i < num_args; ++i) {
-        DecimalValue* arg = reinterpret_cast<DecimalValue*>(e->children()[i]->get_value(row));
-        if (arg == NULL) {
-            return NULL;
-        }
-        if (*arg < *reinterpret_cast<DecimalValue*>(e->children()[result_idx]->get_value(row))) {
-            result_idx = i;
-        }
-    }
-    return &e->children()[result_idx]->_result.decimal_val;
-}
-
-void* MathFunctions::least_decimalv2(Expr* e, TupleRow* row) {
-    DCHECK_GE(e->get_num_children(), 1);
-    int32_t num_args = e->get_num_children();
-    int result_idx = 0;
-    // NOTE: loop index starts at 0, so If frist arg is NULL, we can return early..
-    for (int i = 0; i < num_args; ++i) {
-        DecimalV2Value* arg = reinterpret_cast<DecimalV2Value*>(e->children()[i]->get_value(row));
-        if (arg == NULL) {
-            return NULL;
-        }
-        if (*arg < *reinterpret_cast<DecimalV2Value*>(e->children()[result_idx]->get_value(row))) {
-            result_idx = i;
-        }
-    }
-    return &e->children()[result_idx]->_result.decimalv2_val;
-}
-
-
-void* MathFunctions::least_string(Expr* e, TupleRow* row) {
-    DCHECK_GE(e->get_num_children(), 1);
-    int32_t num_args = e->get_num_children();
-    int result_idx = 0;
-    // NOTE: loop index starts at 0, so If frist arg is NULL, we can return early..
-    for (int i = 0; i < num_args; ++i) {
-        StringValue* arg = reinterpret_cast<StringValue*>(e->children()[i]->get_value(row));
-        if (arg == NULL) {
-            return NULL;
-        }
-        if (*arg < *reinterpret_cast<StringValue*>(e->children()[result_idx]->get_value(row))) {
-            result_idx = i;
-        }
-    }
-    return &e->children()[result_idx]->_result.string_val;
-}
-
-void* MathFunctions::least_timestamp(Expr* e, TupleRow* row) {
-    DCHECK_GE(e->get_num_children(), 1);
-    int32_t num_args = e->get_num_children();
-    int result_idx = 0;
-    // NOTE: loop index starts at 0, so If frist arg is NULL, we can return early..
-    for (int i = 0; i < num_args; ++i) {
-        DateTimeValue* arg = reinterpret_cast<DateTimeValue*>(e->children()[i]->get_value(row));
-        if (arg == NULL) {
-            return NULL;
-        }
-        if (*arg < *reinterpret_cast<DateTimeValue*>(e->children()[result_idx]->get_value(row))) {
-            result_idx = i;
-        }
-    }
-    return &e->children()[result_idx]->_result.datetime_val;
-}
-
 #endif
+
+template <LogicalType TYPE, bool isNorm>
+StatusOr<ColumnPtr> MathFunctions::cosine_similarity(FunctionContext* context, const Columns& columns) {
+    DCHECK_EQ(columns.size(), 2);
+
+    const Column* base = columns[0].get();
+    const Column* target = columns[1].get();
+    size_t target_size = target->size();
+    if (base->size() != target_size) {
+        return Status::InvalidArgument(fmt::format(
+                "cosine_similarity requires equal length arrays. base array size is {} and target array size is {}.",
+                base->size(), target->size()));
+    }
+    if (base->has_null() || target->has_null()) {
+        return Status::InvalidArgument(
+                fmt::format("cosine_similarity does not support null values. {} array has null value.",
+                            base->has_null() ? "base" : "target"));
+    }
+    if (base->is_nullable()) {
+        base = down_cast<const NullableColumn*>(base)->data_column().get();
+    }
+    if (target->is_nullable()) {
+        target = down_cast<const NullableColumn*>(target)->data_column().get();
+    }
+
+    // check dimension equality.
+    const Column* base_flat = down_cast<const ArrayColumn*>(base)->elements_column().get();
+    const uint32_t* base_offset = down_cast<const ArrayColumn*>(base)->offsets().get_data().data();
+    size_t base_flat_size = base_flat->size();
+
+    const Column* target_flat = down_cast<const ArrayColumn*>(target)->elements_column().get();
+    size_t target_flat_size = target_flat->size();
+    const uint32_t* target_offset = down_cast<const ArrayColumn*>(target)->offsets().get_data().data();
+
+    if (base_flat_size != target_flat_size) {
+        return Status::InvalidArgument("cosine_similarity requires equal length arrays");
+    }
+
+    if (base_flat->has_null() || target_flat->has_null()) {
+        return Status::InvalidArgument("cosine_similarity does not support null values");
+    }
+    if (base_flat->is_nullable()) {
+        base_flat = down_cast<const NullableColumn*>(base_flat)->data_column().get();
+    }
+    if (target_flat->is_nullable()) {
+        target_flat = down_cast<const NullableColumn*>(target_flat)->data_column().get();
+    }
+
+    using CppType = RunTimeCppType<TYPE>;
+    using ColumnType = RunTimeColumnType<TYPE>;
+
+    const CppType* base_data_head = down_cast<const ColumnType*>(base_flat)->get_data().data();
+    const CppType* target_data_head = down_cast<const ColumnType*>(target_flat)->get_data().data();
+
+    // prepare result with nullable value.
+    ColumnPtr result = ColumnHelper::create_column(TypeDescriptor{TYPE}, false, false, target_size);
+    ColumnType* data_result = down_cast<ColumnType*>(result.get());
+    CppType* result_data = data_result->get_data().data();
+
+    for (size_t i = 0; i < target_size; i++) {
+        size_t t_dim_size = target_offset[i + 1] - target_offset[i];
+        size_t b_dim_size = base_offset[i + 1] - base_offset[i];
+        if (t_dim_size != b_dim_size) {
+            return Status::InvalidArgument(
+                    fmt::format("cosine_similarity requires equal length arrays in each row. base array dimension size "
+                                "is {}, target array dimension size is {}.",
+                                b_dim_size, t_dim_size));
+        }
+        if (t_dim_size == 0) {
+            return Status::InvalidArgument("cosine_similarity requires non-empty arrays in each row");
+        }
+    }
+
+    const CppType* target_data = target_data_head;
+    const CppType* base_data = base_data_head;
+    for (size_t i = 0; i < target_size; i++) {
+        CppType sum = 0;
+        CppType base_sum = 0;
+        CppType target_sum = 0;
+        size_t dim_size = target_offset[i + 1] - target_offset[i];
+        CppType result_value = 0;
+        size_t j = 0;
+#ifdef __AVX2__
+        if (std::is_same_v<CppType, float>) {
+            __m256 sum_vec = _mm256_setzero_ps();
+            __m256 base_sum_vec = _mm256_setzero_ps();
+            __m256 target_sum_vec = _mm256_setzero_ps();
+            for (; j + 7 < dim_size; j += 8) {
+                __m256 base_data_vec = _mm256_loadu_ps(base_data + j);
+                __m256 target_data_vec = _mm256_loadu_ps(target_data + j);
+
+                __m256 mul_vec = _mm256_mul_ps(base_data_vec, target_data_vec);
+                sum_vec = _mm256_add_ps(sum_vec, mul_vec);
+
+                if constexpr (!isNorm) {
+                    __m256 base_mul_vec = _mm256_mul_ps(base_data_vec, base_data_vec);
+                    base_sum_vec = _mm256_add_ps(base_sum_vec, base_mul_vec);
+                    __m256 target_mul_vec = _mm256_mul_ps(target_data_vec, target_data_vec);
+                    target_sum_vec = _mm256_add_ps(target_sum_vec, target_mul_vec);
+                }
+            }
+            sum += sum_m256(sum_vec);
+            if constexpr (!isNorm) {
+                base_sum += sum_m256(base_sum_vec);
+                target_sum += sum_m256(target_sum_vec);
+            }
+        }
+#endif
+        for (; j < dim_size; j++) {
+            sum += base_data[j] * target_data[j];
+            if constexpr (!isNorm) {
+                base_sum += base_data[j] * base_data[j];
+                target_sum += target_data[j] * target_data[j];
+            }
+        }
+
+        if constexpr (!isNorm) {
+            result_value = sum / (std::sqrt(base_sum) * std::sqrt(target_sum));
+        } else {
+            result_value = sum;
+        }
+        result_data[i] = result_value;
+        target_data += dim_size;
+    }
+    return result;
+}
+
+// explicitly instaniate template function.
+template StatusOr<ColumnPtr> MathFunctions::cosine_similarity<TYPE_FLOAT, true>(FunctionContext* context,
+                                                                                const Columns& columns);
+template StatusOr<ColumnPtr> MathFunctions::cosine_similarity<TYPE_FLOAT, false>(FunctionContext* context,
+                                                                                 const Columns& columns);
+
 } // namespace starrocks

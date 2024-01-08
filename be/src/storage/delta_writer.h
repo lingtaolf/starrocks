@@ -1,114 +1,219 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/olap/delta_writer.h
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-#ifndef STARROCKS_BE_SRC_DELTA_WRITER_H
-#define STARROCKS_BE_SRC_DELTA_WRITER_H
+#pragma once
 
+#include "column/chunk.h"
+#include "column/vectorized_fwd.h"
+#include "common/tracer.h"
 #include "gen_cpp/internal_service.pb.h"
+#include "gen_cpp/olap_common.pb.h"
+#include "gutil/macros.h"
+#include "storage/memtable_flush_executor.h"
 #include "storage/rowset/rowset_writer.h"
+#include "storage/segment_flush_executor.h"
 #include "storage/tablet.h"
 
 namespace starrocks {
 
 class FlushToken;
-class MemTable;
+class ReplicateToken;
 class MemTracker;
 class Schema;
 class StorageEngine;
-class Tuple;
 class TupleDescriptor;
 class SlotDescriptor;
 
-enum WriteType { LOAD = 1, LOAD_DELETE = 2, DELETE = 3 };
+class MemTable;
+class MemTableSink;
 
-struct WriteRequest {
+enum ReplicaState {
+    // peer storage engine
+    Peer,
+    // replicated storage engine
+    Primary,
+    Secondary,
+};
+
+struct DeltaWriterOptions {
     int64_t tablet_id;
     int32_t schema_hash;
-    WriteType write_type;
     int64_t txn_id;
     int64_t partition_id;
     PUniqueId load_id;
-    TupleDescriptor* tuple_desc;
     // slots are in order of tablet's schema
     const std::vector<SlotDescriptor*>* slots;
+    GlobalDictByNameMaps* global_dicts = nullptr;
+    Span parent_span;
+    int64_t index_id;
+    int64_t node_id;
+    std::vector<PNetworkAddress> replicas;
+    int64_t timeout_ms;
+    WriteQuorumTypePB write_quorum;
+    std::string merge_condition;
+    ReplicaState replica_state;
+    bool miss_auto_increment_column = false;
+    PartialUpdateMode partial_update_mode = PartialUpdateMode::UNKNOWN_MODE;
+    POlapTableSchemaParam ptable_schema_param;
+    int64_t immutable_tablet_size = 0;
+};
+
+enum State {
+    kUninitialized,
+    kWriting,
+    kClosed,
+    kAborted,
+    kCommitted, // committed state can transfer to kAborted state
 };
 
 // Writer for a particular (load, index, tablet).
-// This class is NOT thread-safe, external synchronization is required.
 class DeltaWriter {
 public:
-    static OLAPStatus open(WriteRequest* req, MemTracker* mem_tracker, DeltaWriter** writer);
-
+    // Create a new DeltaWriter and call `TxnManager::prepare_txn` to register a new trasaction associated with
+    // this DeltaWriter.
+    static StatusOr<std::unique_ptr<DeltaWriter>> open(const DeltaWriterOptions& opt, MemTracker* mem_tracker);
     ~DeltaWriter();
 
-    OLAPStatus init();
+    DISALLOW_COPY(DeltaWriter);
 
-    OLAPStatus write(Tuple* tuple);
-    // flush the last memtable to flush queue, must call it before close_wait()
-    OLAPStatus close();
-    // wait for all memtables to be flushed.
-    // mem_consumption() should be 0 after this function returns.
-    OLAPStatus close_wait(google::protobuf::RepeatedPtrField<PTabletInfo>* tablet_vec);
+    // [NOT thread-safe]
+    [[nodiscard]] Status write(const Chunk& chunk, const uint32_t* indexes, uint32_t from, uint32_t size);
 
-    // abandon current memtable and wait for all pending-flushing memtables to be destructed.
-    // mem_consumption() should be 0 after this function returns.
-    OLAPStatus cancel();
+    // [thread-safe]
+    [[nodiscard]] Status write_segment(const SegmentPB& segment_pb, butil::IOBuf& data);
 
-    // submit current memtable to flush queue.
-    // this is currently for reducing mem consumption of this delta writer.
-    Status flush_memtable_async();
-    // wait all memtables in flush queue to be flushed.
-    Status wait_memtable_flushed();
+    // Flush all in-memory data to disk, without waiting.
+    // Subsequent `write()`s to this DeltaWriter will fail after this method returned.
+    // [NOT thread-safe]
+    [[nodiscard]] Status close();
+
+    void cancel(const Status& st);
+
+    // Wait until all data have been flushed to disk, then create a new Rowset.
+    // Prerequite: the DeltaWriter has been successfully `close()`d.
+    // [NOT thread-safe]
+    [[nodiscard]] Status commit();
+
+    [[nodiscard]] Status flush_memtable_async(bool eos = false);
+
+    // Rollback all writes and delete the Rowset created by 'commit()', if any.
+    // [thread-safe]
+    //
+    // with_log is used to control whether to print the log when rollback txn.
+    // with_log is false when there is no data load into one partition and abort
+    // the related txn.
+    void abort(bool with_log = true);
+
+    int64_t txn_id() const { return _opt.txn_id; }
+
+    const PUniqueId& load_id() const { return _opt.load_id; }
+
+    int64_t index_id() const { return _opt.index_id; }
 
     int64_t partition_id() const;
 
-    int64_t mem_consumption() const;
+    int64_t node_id() const { return _opt.node_id; }
+
+    const std::vector<PNetworkAddress>& replicas() const { return _opt.replicas; }
+
+    const Tablet* tablet() const { return _tablet.get(); }
+
+    MemTracker* mem_tracker() { return _mem_tracker; };
+
+    // Return the rowset created by `commit()`, or nullptr if `commit()` not been called or failed.
+    const Rowset* committed_rowset() const { return _cur_rowset.get(); }
+
+    // REQUIRE: has successfully `commit()`ed
+    const RowsetWriter* committed_rowset_writer() const { return _rowset_writer.get(); }
+
+    const ReplicateToken* replicate_token() const { return _replicate_token.get(); }
+
+    SegmentFlushToken* segment_flush_token() const { return _segment_flush_token.get(); }
+
+    // REQUIRE: has successfully `commit()`ed
+    const DictColumnsValidMap& global_dict_columns_valid_info() const {
+        CHECK_EQ(kCommitted, _state);
+        CHECK(_rowset_writer != nullptr);
+        return _rowset_writer->global_dict_columns_valid_info();
+    }
+
+    ReplicaState replica_state() const { return _replica_state; }
+
+    State get_state() const;
+
+    Status get_err_status() const;
+
+    const FlushStatistic& get_flush_stats() const { return _flush_token->get_stats(); }
+
+    bool is_immutable() const { return _is_immutable.load(std::memory_order_relaxed); }
+
+    int64_t last_write_ts() const { return _last_write_ts; }
+
+    int64_t write_buffer_size() const { return _write_buffer_size; }
 
 private:
-    DeltaWriter(WriteRequest* req, MemTracker* parent, StorageEngine* storage_engine);
+    DeltaWriter(DeltaWriterOptions opt, MemTracker* parent, StorageEngine* storage_engine);
 
-    // push a full memtable to flush executor
-    OLAPStatus _flush_memtable_async();
+    Status _init();
+    Status _flush_memtable();
+    Status _build_current_tablet_schema(int64_t index_id, const POlapTableSchemaParam& table_schema_param,
+                                        const TabletSchemaCSPtr& ori_tablet_schema);
+
+    const char* _state_name(State state) const;
+    const char* _replica_state_name(ReplicaState state) const;
+    Status _fill_auto_increment_id(const Chunk& chunk);
+    Status _check_partial_update_with_sort_key(const Chunk& chunk);
 
     void _garbage_collection();
 
     void _reset_mem_table();
 
-private:
-    bool _is_init = false;
-    WriteRequest _req;
+    void _set_state(State state, const Status& st);
+
+    State _state;
+    Status _err_status;
+    mutable std::mutex _state_lock;
+
+    ReplicaState _replica_state;
+    DeltaWriterOptions _opt;
+    MemTracker* _mem_tracker;
+    StorageEngine* _storage_engine;
+
     TabletSharedPtr _tablet;
     RowsetSharedPtr _cur_rowset;
-    RowsetSharedPtr _new_rowset;
     std::unique_ptr<RowsetWriter> _rowset_writer;
-    std::shared_ptr<MemTable> _mem_table;
-    std::unique_ptr<Schema> _schema;
-    const TabletSchema* _tablet_schema;
-    bool _delta_written_success;
+    bool _schema_initialized;
+    Schema _vectorized_schema;
+    std::unique_ptr<MemTable> _mem_table;
+    std::unique_ptr<MemTableSink> _mem_table_sink;
+    // tablet schema owned by delta writer, all write will use this tablet schema
+    // it's build from unsafe_tablet_schema_ref（stored when create tablet） and OlapTableSchema
+    // every request will have it's own tablet schema so simple schema change can work
+    TabletSchemaCSPtr _tablet_schema;
 
-    StorageEngine* _storage_engine;
     std::unique_ptr<FlushToken> _flush_token;
-    std::unique_ptr<MemTracker> _mem_tracker;
+    std::unique_ptr<ReplicateToken> _replicate_token;
+    std::unique_ptr<SegmentFlushToken> _segment_flush_token;
+    bool _with_rollback_log;
+    // initial value is max value
+    size_t _memtable_buffer_row = std::numeric_limits<size_t>::max();
+    bool _partial_schema_with_sort_key = false;
+    std::atomic<bool> _is_immutable = false;
+
+    int64_t _last_write_ts = 0;
+    // for concurrency issue, we can't get write_buffer_size from memtable directly
+    int64_t _write_buffer_size = 0;
 };
 
 } // namespace starrocks
-
-#endif // STARROCKS_BE_SRC_OLAP_DELTA_WRITER_H

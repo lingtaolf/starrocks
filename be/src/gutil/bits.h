@@ -8,8 +8,7 @@
 #include "gutil/integral_types.h"
 #include "gutil/macros.h"
 
-#ifndef _BITS_H_
-#define _BITS_H_
+#pragma once
 
 class Bits {
 public:
@@ -117,7 +116,8 @@ public:
 private:
     static const char num_bits[];
     static const unsigned char bit_reverse_table[];
-    DISALLOW_COPY_AND_ASSIGN(Bits);
+    Bits(const Bits&) = delete;
+    const Bits& operator=(const Bits&) = delete;
 };
 
 // A utility class for some handy bit patterns.  The names l and h
@@ -280,5 +280,3 @@ inline int Bits::CountTrailingZerosNonZero64(uint64_t n) {
 inline int Bits::CountTrailingZeros64(uint64_t n) {
     return n == 0 ? 64 : Bits::CountTrailingZerosNonZero64(n);
 }
-
-#endif // _BITS_H_

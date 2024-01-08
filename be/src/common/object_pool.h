@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/common/object_pool.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_COMMON_COMMON_OBJECT_POOL_H
-#define STARROCKS_BE_SRC_COMMON_COMMON_OBJECT_POOL_H
+#pragma once
 
 #include <mutex>
 #include <vector>
@@ -65,10 +60,10 @@ public:
     }
 
 private:
-    /// A generic deletion function pointer. Deletes its first argument.
+    // A generic deletion function pointer. Deletes its first argument.
     using DeleteFn = void (*)(void*);
 
-    /// For each object, a pointer to the object and a function that deletes it.
+    // For each object, a pointer to the object and a function that deletes it.
     struct Element {
         void* obj;
         DeleteFn delete_fn;
@@ -79,5 +74,3 @@ private:
 };
 
 } // namespace starrocks
-
-#endif

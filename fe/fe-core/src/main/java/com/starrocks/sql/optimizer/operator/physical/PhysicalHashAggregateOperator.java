@@ -1,28 +1,59 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.sql.optimizer.operator.physical;
 
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
+import com.starrocks.catalog.FunctionSet;
+import com.starrocks.qe.ConnectContext;
+import com.starrocks.qe.SessionVariableConstants;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
+import com.starrocks.sql.optimizer.RowOutputInfo;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.AggType;
+import com.starrocks.sql.optimizer.operator.ColumnOutputInfo;
+import com.starrocks.sql.optimizer.operator.DataSkewInfo;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.OperatorVisitor;
+import com.starrocks.sql.optimizer.operator.Projection;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import org.apache.commons.collections4.CollectionUtils;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 public class PhysicalHashAggregateOperator extends PhysicalOperator {
+    public static final Set<String> COULD_APPLY_LOW_CARD_AGGREGATE_FUNCTION = Sets.newHashSet(
+            FunctionSet.COUNT, FunctionSet.MULTI_DISTINCT_COUNT, FunctionSet.MAX, FunctionSet.MIN
+    );
+
     private final AggType type;
     private final List<ColumnRefOperator> groupBys;
     // For normal aggregate function, partitionByColumns are same with groupingKeys
     // but for single distinct function, partitionByColumns are not same with groupingKeys
     private final List<ColumnRefOperator> partitionByColumns;
-    private Map<ColumnRefOperator, CallOperator> aggregations;
+    private final Map<ColumnRefOperator, CallOperator> aggregations;
 
+    // @todo: refactor it, SingleDistinctFunctionPos depend on the map's order, but the order is not fixed
     // When generate plan fragment, we need this info.
     // For select count(distinct id_bigint), sum(id_int) from test_basic;
     // In the distinct local (update serialize) agg stage:
@@ -35,14 +66,26 @@ public class PhysicalHashAggregateOperator extends PhysicalOperator {
 
     // The flag for this aggregate operator has split to
     // two stage aggregate or three stage aggregate
-    private boolean isSplit;
+    private final boolean isSplit;
 
+    // TODO introduce builder mode to change these fields to final fields
+    // flg for this aggregate operator's parent had been pruned
+    private boolean mergedLocalAgg;
+
+    private boolean useSortAgg = false;
+
+    private boolean usePerBucketOptmize = false;
+
+    private DataSkewInfo distinctColumnDataSkew = null;
     public PhysicalHashAggregateOperator(AggType type,
                                          List<ColumnRefOperator> groupBys,
                                          List<ColumnRefOperator> partitionByColumns,
                                          Map<ColumnRefOperator, CallOperator> aggregations,
                                          int singleDistinctFunctionPos,
-                                         boolean isSplit) {
+                                         boolean isSplit,
+                                         long limit,
+                                         ScalarOperator predicate,
+                                         Projection projection) {
         super(OperatorType.PHYSICAL_HASH_AGG);
         this.type = type;
         this.groupBys = groupBys;
@@ -50,6 +93,9 @@ public class PhysicalHashAggregateOperator extends PhysicalOperator {
         this.aggregations = aggregations;
         this.singleDistinctFunctionPos = singleDistinctFunctionPos;
         this.isSplit = isSplit;
+        this.limit = limit;
+        this.predicate = predicate;
+        this.projection = projection;
     }
 
     public List<ColumnRefOperator> getGroupBys() {
@@ -62,6 +108,24 @@ public class PhysicalHashAggregateOperator extends PhysicalOperator {
 
     public AggType getType() {
         return type;
+    }
+
+    public boolean isOnePhaseAgg() {
+        return type.isGlobal() && !isSplit;
+    }
+
+    /**
+     * Whether it is the first phase in three/four-phase agg whose second phase is pruned.
+     * Hence, the input data distribution has satisfied with the agg requirement. The local
+     * agg can directly do a global blocking agg job. Only local agg cannot use streaming agg
+     * means it's the result from PruneAggregateNodeRule.
+     */
+    public boolean isMergedLocalAgg() {
+        return mergedLocalAgg;
+    }
+
+    public void setMergedLocalAgg(boolean mergedLocalAgg) {
+        this.mergedLocalAgg = mergedLocalAgg;
     }
 
     public List<ColumnRefOperator> getPartitionByColumns() {
@@ -80,25 +144,76 @@ public class PhysicalHashAggregateOperator extends PhysicalOperator {
         return isSplit;
     }
 
-    @Override
-    public int hashCode() {
-        return Objects.hash(type, groupBys, aggregations.keySet());
+    public boolean canUseStreamingPreAgg() {
+        if (type.isGlobal() || type.isDistinctGlobal()) {
+            return false;
+        } else if (type.isDistinctLocal()) {
+            return CollectionUtils.isNotEmpty(groupBys);
+        } else {
+            return isSplit && CollectionUtils.isNotEmpty(groupBys) && !mergedLocalAgg;
+        }
+    }
+
+
+    public String getNeededPreaggregationMode() {
+        String mode = ConnectContext.get().getSessionVariable().getStreamingPreaggregationMode();
+        if (canUseStreamingPreAgg() && (type.isDistinctLocal() || hasSingleDistinct())) {
+            mode = SessionVariableConstants.FORCE_PREAGGREGATION;
+        }
+        return mode;
+    }
+
+    public boolean isUseSortAgg() {
+        return useSortAgg;
+    }
+
+    public void setUseSortAgg(boolean useSortAgg) {
+        this.useSortAgg = useSortAgg;
+    }
+
+    public boolean isUsePerBucketOptmize() {
+        return usePerBucketOptmize;
+    }
+
+    public void setUsePerBucketOptmize(boolean usePerBucketOptmize) {
+        this.usePerBucketOptmize = usePerBucketOptmize;
+    }
+
+    public void setDistinctColumnDataSkew(DataSkewInfo distinctColumnDataSkew) {
+        this.distinctColumnDataSkew = distinctColumnDataSkew;
+    }
+
+    public DataSkewInfo getDistinctColumnDataSkew() {
+        return distinctColumnDataSkew;
     }
 
     @Override
-    public boolean equals(Object obj) {
-        if (!(obj instanceof PhysicalHashAggregateOperator)) {
-            return false;
-        }
+    public RowOutputInfo deriveRowOutputInfo(List<OptExpression> inputs) {
+        List<ColumnOutputInfo> columnOutputInfoList = Lists.newArrayList();
+        groupBys.stream().forEach(e -> columnOutputInfoList.add(new ColumnOutputInfo(e, e)));
+        aggregations.entrySet().forEach(entry -> columnOutputInfoList.add(new ColumnOutputInfo(entry.getKey(),
+                entry.getValue())));
+        return new RowOutputInfo(columnOutputInfoList);
+    }
 
-        PhysicalHashAggregateOperator rhs = (PhysicalHashAggregateOperator) obj;
-        if (this == rhs) {
+    @Override
+    public int hashCode() {
+        return Objects.hash(super.hashCode(), type, groupBys, aggregations.keySet());
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
             return true;
         }
 
-        return type.equals(rhs.type) &&
-                groupBys.equals(rhs.groupBys) &&
-                aggregations.keySet().equals(rhs.aggregations.keySet());
+        if (!super.equals(o)) {
+            return false;
+        }
+
+        PhysicalHashAggregateOperator that = (PhysicalHashAggregateOperator) o;
+        return type == that.type && Objects.equals(aggregations, that.aggregations) &&
+                Objects.equals(groupBys, that.groupBys);
     }
 
     @Override
@@ -124,4 +239,67 @@ public class PhysicalHashAggregateOperator extends PhysicalOperator {
         aggregations.values().forEach(d -> set.union(d.getUsedColumns()));
         return set;
     }
+
+    @Override
+    public boolean couldApplyStringDict(Set<Integer> childDictColumns) {
+        Preconditions.checkState(!childDictColumns.isEmpty());
+        ColumnRefSet dictSet = ColumnRefSet.createByIds(childDictColumns);
+
+        for (CallOperator operator : aggregations.values()) {
+            if (couldApplyStringDict(operator, dictSet)) {
+                return true;
+            }
+        }
+
+        for (ColumnRefOperator groupBy : groupBys) {
+            if (childDictColumns.contains(groupBy.getId())) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean couldApplyStringDict(CallOperator operator, ColumnRefSet dictSet) {
+        for (ScalarOperator child : operator.getChildren()) {
+            if (!(child instanceof ColumnRefOperator)) {
+                return false;
+            }
+        }
+        ColumnRefSet usedColumns = operator.getUsedColumns();
+        if (usedColumns.isIntersect(dictSet)) {
+            return COULD_APPLY_LOW_CARD_AGGREGATE_FUNCTION.contains(operator.getFnName());
+        }
+        return true;
+    }
+
+    public void fillDisableDictOptimizeColumns(ColumnRefSet resultSet, Set<Integer> dictColIds) {
+        ColumnRefSet dictSet = new ColumnRefSet();
+        dictColIds.forEach(dictSet::union);
+        final ScalarOperator predicate = getPredicate();
+        getAggregations().forEach((k, v) -> {
+            if (resultSet.contains(k.getId())) {
+                resultSet.union(v.getUsedColumns());
+            } else {
+                if (!couldApplyStringDict(v, dictSet)) {
+                    resultSet.union(v.getUsedColumns());
+                }
+
+                // disable DictOptimize when having predicate couldn't push down
+                if (predicate != null && predicate.getUsedColumns().isIntersect(k.getUsedColumns())) {
+                    resultSet.union(v.getUsedColumns());
+                }
+            }
+        });
+        // Now we disable DictOptimize when group by predicate couldn't push down
+        if (predicate != null) {
+            final ColumnRefSet predicateUsedColumns = predicate.getUsedColumns();
+            for (Integer dictColId : dictColIds) {
+                if (predicateUsedColumns.contains(dictColId)) {
+                    resultSet.union(dictColId);
+                }
+            }
+        }
+    }
+
 }

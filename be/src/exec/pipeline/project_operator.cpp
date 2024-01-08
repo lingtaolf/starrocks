@@ -1,4 +1,16 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "exec/pipeline/project_operator.h"
 
@@ -6,43 +18,46 @@
 #include "column/column_helper.h"
 #include "column/nullable_column.h"
 #include "exprs/expr.h"
-#include "exprs/vectorized/column_ref.h"
+#include "runtime/current_thread.h"
 #include "runtime/runtime_state.h"
 
 namespace starrocks::pipeline {
 Status ProjectOperator::prepare(RuntimeState* state) {
-    Operator::prepare(state);
-    RowDescriptor row_desc;
-    RETURN_IF_ERROR(Expr::prepare(_expr_ctxs, state, row_desc, get_memtracker()));
-    RETURN_IF_ERROR(Expr::prepare(_common_sub_expr_ctxs, state, row_desc, get_memtracker()));
-
-    RETURN_IF_ERROR(Expr::open(_expr_ctxs, state));
-    RETURN_IF_ERROR(Expr::open(_common_sub_expr_ctxs, state));
-
-    return Status::OK();
+    _expr_compute_timer = ADD_TIMER(_unique_metrics, "ExprComputeTime");
+    _common_sub_expr_compute_timer = ADD_TIMER(_unique_metrics, "CommonSubExprComputeTime");
+    return Operator::prepare(state);
 }
 
-Status ProjectOperator::close(RuntimeState* state) {
-    Expr::close(_expr_ctxs, state);
-    Expr::close(_common_sub_expr_ctxs, state);
+void ProjectOperator::close(RuntimeState* state) {
+    _cur_chunk.reset();
     Operator::close(state);
-    return Status::OK();
 }
 
-StatusOr<vectorized::ChunkPtr> ProjectOperator::pull_chunk(RuntimeState* state) {
+StatusOr<ChunkPtr> ProjectOperator::pull_chunk(RuntimeState* state) {
     return std::move(_cur_chunk);
 }
 
-Status ProjectOperator::push_chunk(RuntimeState* state, const vectorized::ChunkPtr& chunk) {
-    for (size_t i = 0; i < _common_sub_column_ids.size(); ++i) {
-        chunk->append_column(_common_sub_expr_ctxs[i]->evaluate(chunk.get()), _common_sub_column_ids[i]);
+Status ProjectOperator::push_chunk(RuntimeState* state, const ChunkPtr& chunk) {
+    if (chunk->is_empty()) {
+        DCHECK(chunk->owner_info().is_last_chunk());
+        _cur_chunk = chunk;
+        return Status::OK();
+    }
+    TRY_CATCH_ALLOC_SCOPE_START();
+    {
+        SCOPED_TIMER(_common_sub_expr_compute_timer);
+        for (size_t i = 0; i < _common_sub_column_ids.size(); ++i) {
+            ASSIGN_OR_RETURN(auto col, _common_sub_expr_ctxs[i]->evaluate(chunk.get()));
+            chunk->append_column(std::move(col), _common_sub_column_ids[i]);
+            RETURN_IF_HAS_ERROR(_common_sub_expr_ctxs);
+        }
     }
 
-    using namespace vectorized;
-    vectorized::Columns result_columns(_column_ids.size());
+    Columns result_columns(_column_ids.size());
     {
+        SCOPED_TIMER(_expr_compute_timer);
         for (size_t i = 0; i < _column_ids.size(); ++i) {
-            result_columns[i] = _expr_ctxs[i]->evaluate(chunk.get());
+            ASSIGN_OR_RETURN(result_columns[i], _expr_ctxs[i]->evaluate(chunk.get()));
 
             if (result_columns[i]->only_null()) {
                 result_columns[i] = ColumnHelper::create_column(_expr_ctxs[i]->root()->type(), true);
@@ -51,7 +66,7 @@ Status ProjectOperator::push_chunk(RuntimeState* state, const vectorized::ChunkP
                 // Note: we must create a new column every time here,
                 // because result_columns[i] is shared_ptr
                 ColumnPtr new_column = ColumnHelper::create_column(_expr_ctxs[i]->root()->type(), false);
-                ConstColumn* const_column = down_cast<ConstColumn*>(result_columns[i].get());
+                auto* const_column = down_cast<ConstColumn*>(result_columns[i].get());
                 new_column->append(*const_column->data_column(), 0, 1);
                 new_column->assign(chunk->num_rows(), 0);
                 result_columns[i] = std::move(new_column);
@@ -63,13 +78,42 @@ Status ProjectOperator::push_chunk(RuntimeState* state, const vectorized::ChunkP
                         NullableColumn::create(result_columns[i], NullColumn::create(result_columns[i]->size(), 0));
             }
         }
+        RETURN_IF_HAS_ERROR(_expr_ctxs);
     }
 
-    _cur_chunk = std::make_shared<vectorized::Chunk>();
+    _cur_chunk = std::make_shared<Chunk>();
     for (size_t i = 0; i < result_columns.size(); ++i) {
         _cur_chunk->append_column(result_columns[i], _column_ids[i]);
     }
-    DCHECK_CHUNK(_cur_chunk);
+    _cur_chunk->owner_info() = chunk->owner_info();
+    TRY_CATCH_ALLOC_SCOPE_END()
     return Status::OK();
+}
+
+Status ProjectOperator::reset_state(RuntimeState* state, const std::vector<ChunkPtr>& refill_chunks) {
+    _is_finished = false;
+    _cur_chunk = nullptr;
+
+    return Status::OK();
+}
+
+Status ProjectOperatorFactory::prepare(RuntimeState* state) {
+    RETURN_IF_ERROR(OperatorFactory::prepare(state));
+    RETURN_IF_ERROR(Expr::prepare(_expr_ctxs, state));
+    RETURN_IF_ERROR(Expr::prepare(_common_sub_expr_ctxs, state));
+
+    DictOptimizeParser::set_output_slot_id(&_common_sub_expr_ctxs, _common_sub_column_ids);
+    DictOptimizeParser::set_output_slot_id(&_expr_ctxs, _column_ids);
+
+    RETURN_IF_ERROR(Expr::open(_common_sub_expr_ctxs, state));
+    RETURN_IF_ERROR(Expr::open(_expr_ctxs, state));
+
+    return Status::OK();
+}
+
+void ProjectOperatorFactory::close(RuntimeState* state) {
+    Expr::close(_expr_ctxs, state);
+    Expr::close(_common_sub_expr_ctxs, state);
+    OperatorFactory::close(state);
 }
 } // namespace starrocks::pipeline

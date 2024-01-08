@@ -1,9 +1,23 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.sql.optimizer.rule.transformation;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.starrocks.analysis.BinaryType;
 import com.starrocks.analysis.JoinOperator;
 import com.starrocks.catalog.Type;
 import com.starrocks.sql.analyzer.SemanticException;
@@ -38,8 +52,8 @@ public class ExistentialApply2JoinRule extends TransformationRule {
     @Override
     public boolean check(OptExpression input, OptimizerContext context) {
         LogicalApplyOperator apply = (LogicalApplyOperator) input.getOp();
-        return apply.isFromAndScope() && apply.isExistential()
-                && !Utils.containsCorrelationSubquery(input.getGroupExpression());
+        return apply.isUseSemiAnti() && apply.isExistential()
+                && !SubqueryUtils.containsCorrelationSubquery(input);
     }
 
     @Override
@@ -93,7 +107,7 @@ public class ExistentialApply2JoinRule extends TransformationRule {
         joinExpression.getInputs().add(aggExpression);
 
         // Filter
-        BinaryPredicateOperator countCheck = new BinaryPredicateOperator(BinaryPredicateOperator.BinaryType.EQ,
+        BinaryPredicateOperator countCheck = new BinaryPredicateOperator(BinaryType.EQ,
                 countRef, ConstantOperator.createBigint(0));
         OptExpression filterExpression =
                 new OptExpression(new LogicalFilterOperator(Utils.compoundAnd(countCheck, apply.getPredicate())));
@@ -109,7 +123,7 @@ public class ExistentialApply2JoinRule extends TransformationRule {
     //                \
     //            Filter(UnCorrelation)
     private List<OptExpression> transformUnCorrelationExists(OptExpression input, LogicalApplyOperator apply) {
-        OptExpression limitExpression = new OptExpression(new LogicalLimitOperator(1));
+        OptExpression limitExpression = new OptExpression(LogicalLimitOperator.init(1));
         limitExpression.getInputs().add(input.getInputs().get(1));
 
         OptExpression joinExpression = new OptExpression(new LogicalJoinOperator(JoinOperator.CROSS_JOIN, null));
@@ -130,7 +144,7 @@ public class ExistentialApply2JoinRule extends TransformationRule {
     private List<OptExpression> transformCorrelation(OptExpression input, LogicalApplyOperator apply,
                                                      ExistsPredicateOperator epo) {
         boolean hasEqPredicate = Utils.extractConjuncts(apply.getCorrelationConjuncts()).stream()
-                .anyMatch(d -> OperatorType.BINARY.equals(d.getOpType()) && BinaryPredicateOperator.BinaryType.EQ
+                .anyMatch(d -> OperatorType.BINARY.equals(d.getOpType()) && BinaryType.EQ
                         .equals(((BinaryPredicateOperator) d).getBinaryType()));
 
         if (hasEqPredicate) {

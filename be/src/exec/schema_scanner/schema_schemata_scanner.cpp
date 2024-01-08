@@ -1,28 +1,21 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/schema_scanner/schema_schemata_scanner.cpp
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "exec/schema_scanner/schema_schemata_scanner.h"
 
 #include "exec/schema_scanner/schema_helper.h"
-#include "runtime/primitive_type.h"
+#include "runtime/runtime_state.h"
 #include "runtime/string_value.h"
 
 namespace starrocks {
@@ -37,97 +30,115 @@ SchemaScanner::ColumnDesc SchemaSchemataScanner::_s_columns[] = {
 };
 
 SchemaSchemataScanner::SchemaSchemataScanner()
-        : SchemaScanner(_s_columns, sizeof(_s_columns) / sizeof(SchemaScanner::ColumnDesc)), _db_index(0) {}
+        : SchemaScanner(_s_columns, sizeof(_s_columns) / sizeof(SchemaScanner::ColumnDesc)) {}
 
-SchemaSchemataScanner::~SchemaSchemataScanner() {}
+SchemaSchemataScanner::~SchemaSchemataScanner() = default;
 
 Status SchemaSchemataScanner::start(RuntimeState* state) {
     if (!_is_init) {
         return Status::InternalError("used before initial.");
     }
     TGetDbsParams db_params;
-    if (NULL != _param->wild) {
+    if (nullptr != _param->catalog) {
+        db_params.__set_catalog_name(*(_param->catalog));
+    }
+    if (nullptr != _param->wild) {
         db_params.__set_pattern(*(_param->wild));
     }
-    if (NULL != _param->current_user_ident) {
+    if (nullptr != _param->current_user_ident) {
         db_params.__set_current_user_ident(*(_param->current_user_ident));
     } else {
-        if (NULL != _param->user) {
+        if (nullptr != _param->user) {
             db_params.__set_user(*(_param->user));
         }
-        if (NULL != _param->user_ip) {
+        if (nullptr != _param->user_ip) {
             db_params.__set_user_ip(*(_param->user_ip));
         }
     }
 
-    if (NULL != _param->ip && 0 != _param->port) {
-        RETURN_IF_ERROR(SchemaHelper::get_db_names(*(_param->ip), _param->port, db_params, &_db_result));
+    if (nullptr != _param->ip && 0 != _param->port) {
+        int timeout_ms = state->query_options().query_timeout * 1000;
+        RETURN_IF_ERROR(SchemaHelper::get_db_names(*(_param->ip), _param->port, db_params, &_db_result, timeout_ms));
     } else {
-        return Status::InternalError("IP or port dosn't exists");
+        return Status::InternalError("IP or port doesn't exists");
     }
 
     return Status::OK();
 }
 
-Status SchemaSchemataScanner::fill_one_row(Tuple* tuple, MemPool* pool) {
-    // set all bit to not null
-    memset((void*)tuple, 0, _tuple_desc->num_null_bytes());
-
-    // catalog
-    { tuple->set_null(_tuple_desc->slots()[0]->null_indicator_offset()); }
-    // schema
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[1]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        std::string db_name = SchemaHelper::extract_db_name(_db_result.dbs[_db_index]);
-        str_slot->ptr = (char*)pool->allocate(db_name.size());
-        if (UNLIKELY(str_slot->ptr == nullptr)) {
-            return Status::InternalError("Mem usage has exceed the limit of BE");
+Status SchemaSchemataScanner::fill_chunk(ChunkPtr* chunk) {
+    const auto& slot_id_to_index_map = (*chunk)->get_slot_id_to_index_map();
+    for (const auto& [slot_id, index] : slot_id_to_index_map) {
+        switch (slot_id) {
+        case 1: {
+            // catalog
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(1);
+                const char* str = "def";
+                Slice value(str, strlen(str));
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
         }
-        str_slot->len = db_name.size();
-        memcpy(str_slot->ptr, db_name.c_str(), str_slot->len);
-    }
-    // DEFAULT_CHARACTER_SET_NAME
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[2]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        str_slot->len = strlen("utf8") + 1;
-        str_slot->ptr = (char*)pool->allocate(str_slot->len);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("Allocate memory failed.");
+        case 2: {
+            // schema
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(2);
+                std::string db_name = SchemaHelper::extract_db_name(_db_result.dbs[_db_index]);
+                Slice value(db_name.c_str(), db_name.length());
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
         }
-        memcpy(str_slot->ptr, "utf8", str_slot->len);
-    }
-    // DEFAULT_COLLATION_NAME
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[3]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        str_slot->len = strlen("utf8_general_ci") + 1;
-        str_slot->ptr = (char*)pool->allocate(str_slot->len);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("Allocate memory failed.");
+        case 3: {
+            // DEFAULT_CHARACTER_SET_NAME
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(3);
+                const char* str = "utf8";
+                Slice value(str, strlen(str));
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
         }
-        memcpy(str_slot->ptr, "utf8_general_ci", str_slot->len);
+        case 4: {
+            // DEFAULT_COLLATION_NAME
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(4);
+                const char* str = "utf8_general_ci";
+                Slice value(str, strlen(str));
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
+        }
+        case 5: {
+            // SQL_PATH
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(5);
+                fill_data_column_with_null(column.get());
+            }
+            break;
+        }
+        default:
+            break;
+        }
     }
-    // SQL_PATH
-    { tuple->set_null(_tuple_desc->slots()[4]->null_indicator_offset()); }
     _db_index++;
     return Status::OK();
 }
 
-Status SchemaSchemataScanner::get_next_row(Tuple* tuple, MemPool* pool, bool* eos) {
+Status SchemaSchemataScanner::get_next(ChunkPtr* chunk, bool* eos) {
     if (!_is_init) {
         return Status::InternalError("Used before Initialized.");
     }
-    if (NULL == tuple || NULL == pool || NULL == eos) {
-        return Status::InternalError("input pointer is NULL.");
+    if (nullptr == chunk || nullptr == eos) {
+        return Status::InternalError("input pointer is nullptr.");
     }
     if (_db_index >= _db_result.dbs.size()) {
         *eos = true;
         return Status::OK();
     }
     *eos = false;
-    return fill_one_row(tuple, pool);
+    return fill_chunk(chunk);
 }
 
 } // namespace starrocks

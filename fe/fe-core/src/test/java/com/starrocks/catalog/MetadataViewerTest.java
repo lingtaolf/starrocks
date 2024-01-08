@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/catalog/MetadataViewerTest.java
 
@@ -22,11 +35,12 @@
 package com.starrocks.catalog;
 
 import com.google.common.collect.Lists;
-import com.starrocks.analysis.BinaryPredicate.Operator;
-import com.starrocks.analysis.PartitionNames;
+import com.starrocks.analysis.BinaryType;
 import com.starrocks.backup.CatalogMocker;
 import com.starrocks.catalog.Replica.ReplicaStatus;
 import com.starrocks.common.AnalysisException;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.PartitionNames;
 import com.starrocks.system.SystemInfoService;
 import mockit.Expectations;
 import mockit.Mocked;
@@ -45,7 +59,7 @@ public class MetadataViewerTest {
     private static Method getTabletDistributionMethod;
 
     @Mocked
-    private Catalog catalog;
+    private GlobalStateMgr globalStateMgr;
 
     @Mocked
     private SystemInfoService infoService;
@@ -55,7 +69,7 @@ public class MetadataViewerTest {
     @BeforeClass
     public static void setUp() throws NoSuchMethodException, SecurityException, InstantiationException,
             IllegalAccessException, IllegalArgumentException, InvocationTargetException, AnalysisException {
-        Class[] argTypes = new Class[] {String.class, String.class, List.class, ReplicaStatus.class, Operator.class};
+        Class[] argTypes = new Class[] {String.class, String.class, List.class, ReplicaStatus.class, BinaryType.class};
         getTabletStatusMethod = MetadataViewer.class.getDeclaredMethod("getTabletStatus", argTypes);
         getTabletStatusMethod.setAccessible(true);
 
@@ -71,11 +85,11 @@ public class MetadataViewerTest {
 
         new Expectations() {
             {
-                Catalog.getCurrentCatalog();
+                GlobalStateMgr.getCurrentState();
                 minTimes = 0;
-                result = catalog;
+                result = globalStateMgr;
 
-                catalog.getDb(anyString);
+                globalStateMgr.getDb(anyString);
                 minTimes = 0;
                 result = db;
             }
@@ -83,7 +97,7 @@ public class MetadataViewerTest {
 
         new Expectations() {
             {
-                Catalog.getCurrentSystemInfo();
+                GlobalStateMgr.getCurrentSystemInfo();
                 minTimes = 0;
                 result = infoService;
 
@@ -105,12 +119,12 @@ public class MetadataViewerTest {
         System.out.println(result);
 
         args = new Object[] {CatalogMocker.TEST_DB_NAME, CatalogMocker.TEST_TBL_NAME, partitions, ReplicaStatus.DEAD,
-                Operator.EQ};
+                BinaryType.EQ};
         result = (List<List<String>>) getTabletStatusMethod.invoke(null, args);
         Assert.assertEquals(3, result.size());
 
         args = new Object[] {CatalogMocker.TEST_DB_NAME, CatalogMocker.TEST_TBL_NAME, partitions, ReplicaStatus.DEAD,
-                Operator.NE};
+                BinaryType.NE};
         result = (List<List<String>>) getTabletStatusMethod.invoke(null, args);
         Assert.assertEquals(0, result.size());
     }

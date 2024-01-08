@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/transaction/TransactionNotFoundException.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -23,15 +19,11 @@ package com.starrocks.transaction;
 
 public class TransactionNotFoundException extends TransactionException {
 
-    public TransactionNotFoundException(String msg) {
-        super(msg);
+    public TransactionNotFoundException(String label) {
+        super("transaction not found: " + label);
     }
 
-    public TransactionNotFoundException(String msg, Throwable e) {
-        super(msg, e);
-    }
-
-    public TransactionNotFoundException(String msg, long transactionId) {
-        super(msg, transactionId);
+    public TransactionNotFoundException(long transactionId) {
+        super("transaction not found: " + transactionId, transactionId);
     }
 }

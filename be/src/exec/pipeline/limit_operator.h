@@ -1,49 +1,66 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #pragma once
 
 #include "exec/pipeline/operator.h"
 
-namespace starrocks {
-namespace pipeline {
+namespace starrocks::pipeline {
 class LimitOperator final : public Operator {
 public:
-    LimitOperator(int32_t id, int32_t plan_node_id, int64_t limit)
-            : Operator(id, "limit", plan_node_id), _limit(limit) {}
+    LimitOperator(OperatorFactory* factory, int32_t id, int32_t plan_node_id, int32_t driver_sequence,
+                  std::atomic<int64_t>& limit)
+            : Operator(factory, id, "limit", plan_node_id, false, driver_sequence), _limit(limit) {}
 
     ~LimitOperator() override = default;
 
-    bool has_output() override { return _cur_chunk != nullptr; }
+    bool has_output() const override { return _cur_chunk != nullptr; }
 
-    bool need_input() override { return _limit != 0 && _cur_chunk == nullptr; }
+    bool need_input() const override { return !_is_finished && _limit != 0 && _cur_chunk == nullptr; }
 
-    bool is_finished() const override { return _limit == 0 && _cur_chunk == nullptr; }
+    bool is_finished() const override { return (_is_finished || _limit == 0) && _cur_chunk == nullptr; }
 
-    void finish(RuntimeState* state) override { _limit = 0; }
+    bool ignore_empty_eos() const override { return false; }
 
-    StatusOr<vectorized::ChunkPtr> pull_chunk(RuntimeState* state) override;
+    Status set_finishing(RuntimeState* state) override {
+        _is_finished = true;
+        return Status::OK();
+    }
 
-    Status push_chunk(RuntimeState* state, const vectorized::ChunkPtr& chunk) override;
+    StatusOr<ChunkPtr> pull_chunk(RuntimeState* state) override;
+
+    Status push_chunk(RuntimeState* state, const ChunkPtr& chunk) override;
 
 private:
-    int64_t _limit = 0;
-    vectorized::ChunkPtr _cur_chunk = nullptr;
+    bool _is_finished = false;
+    std::atomic<int64_t>& _limit;
+    ChunkPtr _cur_chunk = nullptr;
 };
 
 class LimitOperatorFactory final : public OperatorFactory {
 public:
     LimitOperatorFactory(int32_t id, int32_t plan_node_id, int64_t limit)
-            : OperatorFactory(id, plan_node_id), _limit(limit) {}
+            : OperatorFactory(id, "limit", plan_node_id), _limit(limit) {}
 
     ~LimitOperatorFactory() override = default;
 
-    OperatorPtr create(int32_t driver_instance_count, int32_t driver_sequence) override {
-        return std::make_shared<LimitOperator>(_id, _plan_node_id, _limit);
+    OperatorPtr create(int32_t degree_of_parallelism, int32_t driver_sequence) override {
+        return std::make_shared<LimitOperator>(this, _id, _plan_node_id, driver_sequence, _limit);
     }
 
 private:
-    int64_t _limit = 0;
+    std::atomic<int64_t> _limit;
 };
 
-} // namespace pipeline
-} // namespace starrocks
+} // namespace starrocks::pipeline

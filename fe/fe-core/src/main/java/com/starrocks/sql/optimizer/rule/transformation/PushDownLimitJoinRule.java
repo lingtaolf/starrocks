@@ -1,7 +1,21 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.sql.optimizer.rule.transformation;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.starrocks.analysis.JoinOperator;
 import com.starrocks.sql.optimizer.OptExpression;
@@ -23,23 +37,34 @@ public class PushDownLimitJoinRule extends TransformationRule {
     @Override
     public boolean check(OptExpression input, OptimizerContext context) {
         LogicalLimitOperator limit = (LogicalLimitOperator) input.getOp();
-
-        // 1. Has offset can't push down
-        return !limit.hasOffset();
+        return limit.isLocal();
     }
 
     @Override
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
         LogicalLimitOperator limit = (LogicalLimitOperator) input.getOp();
+        Preconditions.checkState(!limit.hasOffset());
+
         OptExpression child = input.inputAt(0);
-        LogicalJoinOperator join = (LogicalJoinOperator) child.getOp();
-        JoinOperator joinType = join.getJoinType();
+        LogicalJoinOperator newJoin = new LogicalJoinOperator.Builder()
+                .withOperator((LogicalJoinOperator) child.getOp())
+                .setLimit(limit.getLimit()).build();
 
-        // set limit
-        join.setLimit(limit.getLimit());
+        OptExpression result = OptExpression.create(newJoin, child.getInputs());
+        JoinOperator joinType = newJoin.getJoinType();
 
-        if (joinType.isInnerJoin() || joinType.isSemiAntiJoin()) {
-            return Lists.newArrayList(child);
+        if (newJoin.getPredicate() != null) {
+            return Lists.newArrayList(result);
+        }
+
+        // TODO: Push down the limit to the full outer join if BE can output
+        // the matched rows first.
+        if (joinType.isSemiAntiJoin() || joinType.isFullOuterJoin()) {
+            return Lists.newArrayList(result);
+        } else if (joinType.isInnerJoin() && newJoin.getOnPredicate() != null) {
+            return Lists.newArrayList(result);
+        } else if (joinType.isCrossJoin() && newJoin.getOnPredicate() != null) {
+            return Lists.newArrayList(result);
         }
 
         // Cross-Join || Full-Outer-Join
@@ -53,11 +78,11 @@ public class PushDownLimitJoinRule extends TransformationRule {
         }
 
         for (int index : pushDownChildIdx) {
-            OptExpression nl = new OptExpression(new LogicalLimitOperator(limit.getLimit()));
-            nl.getInputs().add(child.inputAt(index));
-            child.getInputs().set(index, nl);
+            OptExpression nl = new OptExpression(LogicalLimitOperator.local(limit.getLimit()));
+            nl.getInputs().add(result.inputAt(index));
+            result.getInputs().set(index, nl);
         }
 
-        return Lists.newArrayList(child);
+        return Lists.newArrayList(result);
     }
 }

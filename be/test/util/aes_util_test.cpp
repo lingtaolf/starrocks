@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/test/util/aes_util_test.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -42,12 +38,12 @@ void do_aes_test(const std::string& source, const std::string& key) {
     int cipher_len = source.length() + 16;
     std::unique_ptr<unsigned char[]> dest(new unsigned char[cipher_len]);
     int ret_code = AesUtil::encrypt(AES_128_ECB, (unsigned char*)source.c_str(), source.length(),
-                                    (unsigned char*)key.c_str(), key.length(), NULL, true, dest.get());
+                                    (unsigned char*)key.c_str(), key.length(), nullptr, true, dest.get());
     ASSERT_TRUE(ret_code > 0);
     int encrypted_length = ret_code;
     std::unique_ptr<char[]> decrypted(new char[cipher_len]);
     ret_code = AesUtil::decrypt(AES_128_ECB, dest.get(), encrypted_length, (unsigned char*)key.c_str(), key.length(),
-                                NULL, true, (unsigned char*)decrypted.get());
+                                nullptr, true, (unsigned char*)decrypted.get());
     ASSERT_TRUE(ret_code > 0);
     std::string decrypted_content(decrypted.get(), ret_code);
     ASSERT_EQ(source, decrypted_content);
@@ -71,7 +67,7 @@ TEST_F(AesUtilTest, aes_test_by_case) {
     std::unique_ptr<char[]> decrypted_1(new char[case_1.length()]);
     int ret_code =
             AesUtil::decrypt(AES_128_ECB, (unsigned char*)encrypt_1.get(), length_1, (unsigned char*)_aes_key.c_str(),
-                             _aes_key.length(), NULL, true, (unsigned char*)decrypted_1.get());
+                             _aes_key.length(), nullptr, true, (unsigned char*)decrypted_1.get());
     ASSERT_TRUE(ret_code > 0);
     std::string decrypted_content_1(decrypted_1.get(), ret_code);
     ASSERT_EQ(source_1, decrypted_content_1);
@@ -81,7 +77,7 @@ TEST_F(AesUtilTest, aes_test_by_case) {
     std::unique_ptr<char[]> decrypted_2(new char[case_2.length()]);
     ret_code =
             AesUtil::decrypt(AES_128_ECB, (unsigned char*)encrypt_2.get(), length_2, (unsigned char*)_aes_key.c_str(),
-                             _aes_key.length(), NULL, true, (unsigned char*)decrypted_2.get());
+                             _aes_key.length(), nullptr, true, (unsigned char*)decrypted_2.get());
     ASSERT_TRUE(ret_code > 0);
     std::string decrypted_content_2(decrypted_2.get(), ret_code);
     ASSERT_EQ(source_2, decrypted_content_2);

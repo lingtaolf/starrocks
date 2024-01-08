@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/http/BaseRequest.java
 
@@ -39,15 +52,17 @@ import java.util.Map;
 
 public class BaseRequest {
     protected ChannelHandlerContext context;
+    protected HttpConnectContext connectContext;
     protected HttpRequest request;
     protected Map<String, String> params = Maps.newHashMap();
 
     private boolean isAuthorized = false;
     private QueryStringDecoder decoder;
 
-    public BaseRequest(ChannelHandlerContext ctx, HttpRequest request) {
+    public BaseRequest(ChannelHandlerContext ctx, HttpRequest request, HttpConnectContext connectContext) {
         this.context = ctx;
         this.request = request;
+        this.connectContext = connectContext;
     }
 
     public ChannelHandlerContext getContext() {
@@ -156,5 +171,9 @@ public class BaseRequest {
         InetSocketAddress clientSocket = (InetSocketAddress) context.channel().remoteAddress();
         String clientIp = clientSocket.getHostString();
         return clientIp;
+    }
+
+    public HttpConnectContext getConnectContext() {
+        return connectContext;
     }
 }

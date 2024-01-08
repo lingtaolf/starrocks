@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/runtime/result_queue_mgr.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -27,9 +23,8 @@
 #include <unordered_map>
 
 #include "common/status.h"
-#include "runtime/primitive_type.h"
-#include "runtime/raw_value.h"
 #include "runtime/record_batch_queue.h"
+#include "types/logical_type.h"
 #include "util/hash_util.hpp"
 
 namespace arrow {
@@ -48,11 +43,12 @@ public:
     ResultQueueMgr();
     ~ResultQueueMgr();
 
-    Status fetch_result(const TUniqueId& fragment_instance_id, std::shared_ptr<arrow::RecordBatch>* result, bool* eos);
+    [[nodiscard]] Status fetch_result(const TUniqueId& fragment_instance_id,
+                                      std::shared_ptr<arrow::RecordBatch>* result, bool* eos);
 
     void create_queue(const TUniqueId& fragment_instance_id, BlockQueueSharedPtr* queue);
 
-    Status cancel(const TUniqueId& fragment_id);
+    [[nodiscard]] Status cancel(const TUniqueId& fragment_id);
 
     void update_queue_status(const TUniqueId& fragment_id, const Status& status);
 

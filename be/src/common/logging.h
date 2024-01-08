@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/common/logging.h
 
@@ -19,9 +32,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef IMPALA_COMMON_LOGGING_H
-#define IMPALA_COMMON_LOGGING_H
-
+#pragma once
 // This is a wrapper around the glog header.  When we are compiling to IR,
 // we don't want to pull in the glog headers.  Pulling them in causes linking
 // issues when we try to dynamically link the codegen'd functions.
@@ -64,6 +75,7 @@
 #define VLOG_RPC VLOG(8)
 #define VLOG_QUERY VLOG(1)
 #define VLOG_FILE VLOG(2)
+#define VLOG_OPERATOR VLOG(3)
 #define VLOG_ROW VLOG(10)
 #define VLOG_PROGRESS VLOG(2)
 
@@ -71,13 +83,14 @@
 #define VLOG_RPC_IS_ON VLOG_IS_ON(2)
 #define VLOG_QUERY_IS_ON VLOG_IS_ON(1)
 #define VLOG_FILE_IS_ON VLOG_IS_ON(2)
-#define VLOG_ROW_IS_ON VLOG_IS_ON(3)
+#define VLOG_OPERATOR_IS_ON VLOG_IS_ON(3)
+#define VLOG_ROW_IS_ON VLOG_IS_ON(10)
 #define VLOG_PROGRESS_IS_ON VLOG_IS_ON(2)
 
 namespace starrocks {
 class TUniqueId;
 }
 
-#define QUERY_LOG(level) LOG(level) << "[" << CurrentThread::query_id_string() << "] "
-
-#endif
+// Print log with query id.
+#define QUERY_LOG(level) LOG(level) << "[" << tls_thread_status.query_id() << "] "
+#define QUERY_LOG_IF(level, cond) LOG_IF(level, cond) << "[" << tls_thread_status.query_id() << "] "

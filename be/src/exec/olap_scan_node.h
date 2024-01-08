@@ -1,303 +1,252 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/olap_scan_node.h
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-#ifndef STARROCKS_BE_SRC_QUERY_EXEC_OLAP_SCAN_NODE_H
+#pragma once
 
-#include <boost/thread.hpp>
-#include <boost/variant/static_visitor.hpp>
 #include <condition_variable>
-#include <queue>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <vector>
 
+#include "column/chunk.h"
+#include "column/column_access_path.h"
 #include "exec/olap_common.h"
-#include "exec/olap_scanner.h"
+#include "exec/olap_scan_prepare.h"
 #include "exec/scan_node.h"
-#include "runtime/descriptors.h"
-#include "runtime/row_batch_interface.hpp"
-#include "runtime/vectorized_row_batch.h"
-#include "util/progress_updater.h"
-#include "util/spinlock.h"
+#include "exec/tablet_scanner.h"
+#include "runtime/global_dict/parser.h"
+
+namespace starrocks {
+class DescriptorTbl;
+class SlotDescriptor;
+class TupleDescriptor;
+
+class Rowset;
+using RowsetSharedPtr = std::shared_ptr<Rowset>;
+class Tablet;
+using TabletSharedPtr = std::shared_ptr<Tablet>;
+} // namespace starrocks
 
 namespace starrocks {
 
-enum TransferStatus {
-    READ_ROWBATCH = 1,
-    INIT_HEAP = 2,
-    BUILD_ROWBATCH = 3,
-    MERGE = 4,
-    FININSH = 5,
-    ADD_ROWBATCH = 6,
-    ERROR = 7
-};
-
-class OlapScanNode : public ScanNode {
+// OlapScanNode fetch records from storage engine and pass them to the parent node.
+// It will submit many TabletScanner to a global-shared thread pool to execute concurrently.
+//
+// Execution flow:
+// 1. OlapScanNode creates many empty chunks and put them into _chunk_pool.
+// 2. OlapScanNode submit many OlapScanners to a global-shared thread pool.
+// 3. TabletScanner fetch an empty Chunk from _chunk_pool and fill it with the records retrieved
+//    from storage engine.
+// 4. TabletScanner put the non-empty Chunk into _result_chunks.
+// 5. OlapScanNode receive chunk from _result_chunks and put an new empty chunk into _chunk_pool.
+//
+// If _chunk_pool is empty, OlapScanners will quit the thread pool and put themself to the
+// _pending_scanners. After enough chunks has been placed into _chunk_pool, OlapScanNode will
+// resubmit OlapScanners to the thread pool.
+class OlapScanNode final : public starrocks::ScanNode {
 public:
     OlapScanNode(ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl& descs);
-    ~OlapScanNode();
-    virtual Status init(const TPlanNode& tnode, RuntimeState* state = nullptr);
-    virtual Status prepare(RuntimeState* state);
-    virtual Status open(RuntimeState* state);
-    virtual Status get_next(RuntimeState* state, RowBatch* row_batch, bool* eos);
+    ~OlapScanNode() override;
+
+    Status init(const TPlanNode& tnode, RuntimeState* state) override;
+    Status prepare(RuntimeState* state) override;
+    Status open(RuntimeState* state) override;
+    Status get_next(RuntimeState* state, ChunkPtr* chunk, bool* eos) override;
+    void close(RuntimeState* statue) override;
+
+    Status set_scan_ranges(const std::vector<TScanRangeParams>& scan_ranges) override;
+    StatusOr<pipeline::MorselQueuePtr> convert_scan_range_to_morsel_queue(
+            const std::vector<TScanRangeParams>& scan_ranges, int node_id, int32_t pipeline_dop,
+            bool enable_tablet_internal_parallel, TTabletInternalParallelMode::type tablet_internal_parallel_mode,
+            size_t num_total_scan_ranges) override;
+
+    void debug_string(int indentation_level, std::stringstream* out) const override { *out << "OlapScanNode"; }
     Status collect_query_statistics(QueryStatistics* statistics) override;
-    virtual Status close(RuntimeState* state);
-    virtual Status set_scan_ranges(const std::vector<TScanRangeParams>& scan_ranges);
-    inline void set_no_agg_finalize() { _need_agg_finalize = false; }
 
-protected:
-    typedef struct {
-        Tuple* tuple;
-        int id;
-    } HeapType;
-    class IsFixedValueRangeVisitor : public boost::static_visitor<bool> {
-    public:
-        template <class T>
-        bool operator()(T& v) const {
-            return v.is_fixed_value_range();
+    Status set_scan_ranges(const std::vector<TInternalScanRange>& ranges);
+
+    Status set_scan_range(const TInternalScanRange& range);
+
+    std::vector<std::shared_ptr<pipeline::OperatorFactory>> decompose_to_pipeline(
+            pipeline::PipelineBuilderContext* context) override;
+
+    const TOlapScanNode& thrift_olap_scan_node() const { return _olap_scan_node; }
+
+    int estimated_max_concurrent_chunks() const;
+
+    static StatusOr<TabletSharedPtr> get_tablet(const TInternalScanRange* scan_range);
+    static int compute_priority(int32_t num_submitted_tasks);
+
+    int io_tasks_per_scan_operator() const override {
+        if (_sorted_by_keys_per_tablet) {
+            return 1;
         }
-    };
-
-    class GetFixedValueSizeVisitor : public boost::static_visitor<size_t> {
-    public:
-        template <class T>
-        size_t operator()(T& v) const {
-            return v.get_fixed_value_size();
-        }
-    };
-
-    class ExtendScanKeyVisitor : public boost::static_visitor<Status> {
-    public:
-        ExtendScanKeyVisitor(OlapScanKeys& scan_keys, int32_t max_scan_key_num)
-                : _scan_keys(scan_keys), _max_scan_key_num(max_scan_key_num) {}
-        template <class T>
-        Status operator()(T& v) {
-            return _scan_keys.extend_scan_key(v, _max_scan_key_num);
-        }
-
-    private:
-        OlapScanKeys& _scan_keys;
-        int32_t _max_scan_key_num;
-    };
-
-    typedef boost::variant<std::list<std::string>> string_list;
-
-    class ToOlapFilterVisitor : public boost::static_visitor<std::string> {
-    public:
-        template <class T, class P>
-        std::string operator()(T& v, P& v2) const {
-            return v.to_olap_filter(v2);
-        }
-    };
-
-    class MergeComparison {
-    public:
-        MergeComparison(CompareLargeFunc compute_fn, int offset) {
-            _compute_fn = compute_fn;
-            _offset = offset;
-        }
-        bool operator()(const HeapType& lhs, const HeapType& rhs) const {
-            return (*_compute_fn)(lhs.tuple->get_slot(_offset), rhs.tuple->get_slot(_offset));
-        }
-
-    private:
-        CompareLargeFunc _compute_fn;
-        int _offset;
-    };
-
-    typedef std::priority_queue<HeapType, std::vector<HeapType>, MergeComparison> Heap;
-
-    void display_heap(Heap& heap) {
-        Heap h = heap;
-        std::stringstream s;
-        s << "Heap: [";
-
-        while (!h.empty()) {
-            HeapType v = h.top();
-            s << "\nID: " << v.id << " Value:" << Tuple::to_string(v.tuple, *_tuple_desc);
-            h.pop();
-        }
-
-        VLOG(1) << s.str() << "\n]";
+        return starrocks::ScanNode::io_tasks_per_scan_operator();
     }
 
-    Status start_scan(RuntimeState* state);
-    Status normalize_conjuncts();
-    Status build_olap_filters();
-    Status build_scan_key();
-    Status start_scan_thread(RuntimeState* state);
+    bool output_chunk_by_bucket() const override { return _output_chunk_by_bucket; }
+    bool is_asc_hint() const override { return _output_asc_hint; }
+    std::optional<bool> partition_order_hint() const override { return _partition_order_hint; }
 
-    template <class T>
-    Status normalize_predicate(ColumnValueRange<T>& range, SlotDescriptor* slot);
-
-    template <class T>
-    Status normalize_in_and_eq_predicate(SlotDescriptor* slot, ColumnValueRange<T>* range);
-
-    template <class T>
-    Status normalize_noneq_binary_predicate(SlotDescriptor* slot, ColumnValueRange<T>* range);
-
-    void transfer_thread(RuntimeState* state);
-    void scanner_thread(OlapScanner* scanner);
-
-    Status add_one_batch(RowBatchInterface* row_batch);
-
-    // Write debug string of this into out.
-    virtual void debug_string(int indentation_level, std::stringstream* out) const;
+    const std::vector<ExprContext*>& bucket_exprs() const { return _bucket_exprs; }
 
 private:
+    friend class TabletScanner;
+
+    constexpr static const int kMaxConcurrency = 50;
+    constexpr static const int kMaxScannerPerRange = 64;
+
+    template <typename T>
+    class Stack {
+    public:
+        void reserve(size_t n) { _items.reserve(n); }
+
+        void push(const T& p) { _items.push_back(p); }
+
+        void push(T&& v) { _items.emplace_back(std::move(v)); }
+
+        void clear() { _items.clear(); }
+
+        // REQUIRES: not empty.
+        T pop() {
+            DCHECK(!_items.empty());
+            T v = _items.back();
+            _items.pop_back();
+            return v;
+        }
+
+        size_t size() const { return _items.size(); }
+
+        bool empty() const { return _items.empty(); }
+
+        void reverse() { std::reverse(_items.begin(), _items.end()); }
+
+    private:
+        std::vector<T> _items;
+    };
+
+private:
+    Status _start_scan(RuntimeState* state);
+    Status _start_scan_thread(RuntimeState* state);
+    void _scanner_thread(TabletScanner* scanner);
+
     void _init_counter(RuntimeState* state);
 
-    void construct_is_null_pred_in_where_pred(Expr* expr, SlotDescriptor* slot, std::string is_null_str);
+    void _update_status(const Status& status);
+    Status _get_status();
 
-    friend class OlapScanner;
+    void _fill_chunk_pool(int count, bool force_column_pool);
+    bool _submit_scanner(TabletScanner* scanner, bool blockable);
+    void _close_pending_scanners();
 
-    std::vector<TCondition> _is_null_vector;
-    // Tuple id resolved in prepare() to set _tuple_desc;
-    TupleId _tuple_id;
-    // starrocks scan node used to scan starrocks
+    // Reference the row sets into _tablet_rowsets in the preparation phase to avoid
+    // the row sets being deleted. Should be called after set_scan_ranges.
+    Status _capture_tablet_rowsets();
+
+    // scanner concurrency
+    size_t _scanner_concurrency() const;
+    void _estimate_scan_and_output_row_bytes();
+
+    StatusOr<bool> _could_tablet_internal_parallel(const std::vector<TScanRangeParams>& scan_ranges,
+                                                   int32_t pipeline_dop, size_t num_total_scan_ranges,
+                                                   TTabletInternalParallelMode::type tablet_internal_parallel_mode,
+                                                   int64_t* scan_dop, int64_t* splitted_scan_rows) const;
+    StatusOr<bool> _could_split_tablet_physically(const std::vector<TScanRangeParams>& scan_ranges) const;
+
+private:
     TOlapScanNode _olap_scan_node;
-    // tuple descriptors
-    const TupleDescriptor* _tuple_desc;
-    // tuple index
-    int _tuple_idx;
-    // string slots
-    std::vector<SlotDescriptor*> _string_slots;
-
-    bool _eos;
-
-    // column -> ColumnValueRange map
-    std::map<std::string, ColumnValueRangeType> _column_value_ranges;
-
-    OlapScanKeys _scan_keys;
-
     std::vector<std::unique_ptr<TInternalScanRange>> _scan_ranges;
+    TupleDescriptor* _tuple_desc = nullptr;
+    OlapScanConjunctsManager _conjuncts_manager;
+    const Schema* _chunk_schema = nullptr;
 
-    std::vector<TCondition> _olap_filter;
+    int32_t _num_scanners = 0;
+    int32_t _chunks_per_scanner = 10;
+    size_t _estimated_scan_row_bytes = 0;
+    size_t _estimated_output_row_bytes = 0;
+    bool _start = false;
 
-    // Pool for storing allocated scanner objects.  We don't want to use the
-    // runtime pool to ensure that the scanner objects are deleted before this
-    // object is.
-    std::unique_ptr<ObjectPool> _scanner_pool;
-
-    boost::thread_group _transfer_thread;
-
-    // Keeps track of total splits and the number finished.
-    ProgressUpdater _progress;
-
-    // Lock and condition variables protecting _materialized_row_batches.  Row batches are
-    // produced asynchronously by the scanner threads and consumed by the main thread in
-    // GetNext.  Row batches must be processed by the main thread in the order they are
-    // queued to avoid freeing attached resources prematurely (row batches will never depend
-    // on resources attached to earlier batches in the queue).
-    // This lock cannot be taken together with any other locks except _lock.
-    std::mutex _row_batches_lock;
-    std::condition_variable _row_batch_added_cv;
-    std::condition_variable _row_batch_consumed_cv;
-
-    std::list<RowBatchInterface*> _materialized_row_batches;
-
-    std::mutex _scan_batches_lock;
-    std::condition_variable _scan_batch_added_cv;
-    int32_t _scanner_task_finish_count = 0;
-
-    std::list<RowBatchInterface*> _scan_row_batches;
-
-    std::list<OlapScanner*> _olap_scanners;
-
-    int _max_materialized_row_batches;
-    bool _start;
-    bool _scanner_done;
-    bool _transfer_done;
-    size_t _direct_conjunct_size = 0;
-
-    int _total_assign_num = 0;
-    int _nice = 0;
-
-    // protect _status, for many thread may change _status
-    SpinLock _status_mutex;
+    mutable SpinLock _status_mutex;
     Status _status;
-    RuntimeState* _runtime_state = nullptr;
+
+    // _mtx protects _chunk_pool and _pending_scanners.
+    std::mutex _mtx;
+    Stack<ChunkPtr> _chunk_pool;
+    Stack<TabletScanner*> _pending_scanners;
+
+    UnboundedBlockingQueue<ChunkPtr> _result_chunks;
+
+    // used to compute task priority.
+    std::atomic<int32_t> _scanner_submit_count{0};
+    std::atomic<int32_t> _running_threads{0};
+    std::atomic<int32_t> _closed_scanners{0};
+
+    std::vector<std::string> _unused_output_columns;
+
+    // The row sets of tablets will become stale and be deleted, if compaction occurs
+    // and these row sets aren't referenced, which will typically happen when the tablets
+    // of the left table are compacted at building the right hash table. Therefore, reference
+    // the row sets into _tablet_rowsets in the preparation phase to avoid the row sets being deleted.
+    std::vector<std::vector<RowsetSharedPtr>> _tablet_rowsets;
+
+    bool _sorted_by_keys_per_tablet = false;
+    bool _output_chunk_by_bucket = false;
+    bool _output_asc_hint = true;
+    std::optional<bool> _partition_order_hint;
+
+    std::vector<ExprContext*> _bucket_exprs;
+
+    // profile
+    RuntimeProfile* _scan_profile = nullptr;
+
     RuntimeProfile::Counter* _scan_timer = nullptr;
+    RuntimeProfile::Counter* _create_seg_iter_timer = nullptr;
     RuntimeProfile::Counter* _tablet_counter = nullptr;
-    RuntimeProfile::Counter* _rows_pushed_cond_filtered_counter = nullptr;
-    RuntimeProfile::Counter* _reader_init_timer = nullptr;
-
-    TResourceInfo* _resource_info;
-
-    int64_t _buffered_bytes;
-    int64_t _running_thread;
-    EvalConjunctsFn _eval_conjuncts_fn;
-
-    bool _need_agg_finalize = true;
-
-    // the max num of scan keys of this scan request.
-    // it will set as BE's config `starrocks_max_scan_key_num`,
-    // or be overwritten by value in TQueryOptions
-    int32_t _max_scan_key_num = 1024;
-    // The max number of conditions in InPredicate  that can be pushed down
-    // into OlapEngine.
-    // If conditions in InPredicate is larger than this, all conditions in
-    // InPredicate will not be pushed to the OlapEngine.
-    // it will set as BE's config `max_pushdown_conditions_per_column`,
-    // or be overwritten by value in TQueryOptions
-    int32_t _max_pushdown_conditions_per_column = 1024;
-
-    // Counters
+    RuntimeProfile::Counter* _io_task_counter = nullptr;
+    RuntimeProfile::Counter* _task_concurrency = nullptr;
     RuntimeProfile::Counter* _io_timer = nullptr;
     RuntimeProfile::Counter* _read_compressed_counter = nullptr;
-    RuntimeProfile::Counter* _decompressor_timer = nullptr;
+    RuntimeProfile::Counter* _decompress_timer = nullptr;
     RuntimeProfile::Counter* _read_uncompressed_counter = nullptr;
     RuntimeProfile::Counter* _raw_rows_counter = nullptr;
-
-    RuntimeProfile::Counter* _rows_vec_cond_counter = nullptr;
-    RuntimeProfile::Counter* _vec_cond_timer = nullptr;
-    RuntimeProfile::Counter* _vec_cond_evaluate_timer = nullptr;
-    RuntimeProfile::Counter* _vec_cond_chunk_copy_timer = nullptr;
-
-    RuntimeProfile::Counter* _stats_filtered_counter = nullptr;
+    RuntimeProfile::Counter* _pred_filter_counter = nullptr;
+    RuntimeProfile::Counter* _del_vec_filter_counter = nullptr;
+    RuntimeProfile::Counter* _pred_filter_timer = nullptr;
+    RuntimeProfile::Counter* _chunk_copy_timer = nullptr;
+    RuntimeProfile::Counter* _get_rowsets_timer = nullptr;
+    RuntimeProfile::Counter* _get_delvec_timer = nullptr;
+    RuntimeProfile::Counter* _get_delta_column_group_timer = nullptr;
+    RuntimeProfile::Counter* _seg_init_timer = nullptr;
+    RuntimeProfile::Counter* _seg_zm_filtered_counter = nullptr;
+    RuntimeProfile::Counter* _seg_rt_filtered_counter = nullptr;
+    RuntimeProfile::Counter* _zm_filtered_counter = nullptr;
     RuntimeProfile::Counter* _bf_filtered_counter = nullptr;
-    RuntimeProfile::Counter* _del_filtered_counter = nullptr;
-    RuntimeProfile::Counter* _key_range_filtered_counter = nullptr;
-
+    RuntimeProfile::Counter* _sk_filtered_counter = nullptr;
     RuntimeProfile::Counter* _block_seek_timer = nullptr;
     RuntimeProfile::Counter* _block_seek_counter = nullptr;
-    RuntimeProfile::Counter* _block_convert_timer = nullptr;
     RuntimeProfile::Counter* _block_load_timer = nullptr;
     RuntimeProfile::Counter* _block_load_counter = nullptr;
     RuntimeProfile::Counter* _block_fetch_timer = nullptr;
-
-    RuntimeProfile::Counter* _index_load_timer = nullptr;
-
-    // total pages read
-    // used by segment v2
-    RuntimeProfile::Counter* _total_pages_num_counter = nullptr;
-    // page read from cache
-    // used by segment v2
+    RuntimeProfile::Counter* _read_pages_num_counter = nullptr;
     RuntimeProfile::Counter* _cached_pages_num_counter = nullptr;
-
-    // row count filtered by bitmap inverted index
-    RuntimeProfile::Counter* _bitmap_index_filter_counter = nullptr;
-    // time fro bitmap inverted index read and filter
-    RuntimeProfile::Counter* _bitmap_index_filter_timer = nullptr;
-    // number of created olap scanners
-    RuntimeProfile::Counter* _num_scanners = nullptr;
+    RuntimeProfile::Counter* _bi_filtered_counter = nullptr;
+    RuntimeProfile::Counter* _bi_filter_timer = nullptr;
+    RuntimeProfile::Counter* _pushdown_predicates_counter = nullptr;
+    RuntimeProfile::Counter* _rowsets_read_count = nullptr;
+    RuntimeProfile::Counter* _segments_read_count = nullptr;
+    RuntimeProfile::Counter* _total_columns_data_page_count = nullptr;
 };
 
 } // namespace starrocks
-
-#endif

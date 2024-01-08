@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/planner/DataSink.java
 
@@ -21,9 +34,14 @@
 
 package com.starrocks.planner;
 
+import com.starrocks.catalog.HiveTable;
+import com.starrocks.catalog.IcebergTable;
 import com.starrocks.catalog.MysqlTable;
+import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
+import com.starrocks.catalog.TableFunctionTable;
 import com.starrocks.common.AnalysisException;
+import com.starrocks.common.Config;
 import com.starrocks.thrift.TDataSink;
 import com.starrocks.thrift.TExplainLevel;
 
@@ -70,5 +88,31 @@ public abstract class DataSink {
         } else {
             throw new AnalysisException("Unknown table type " + table.getType());
         }
+    }
+
+    public static boolean canTableSinkUsePipeline(Table table) {
+        if (table instanceof OlapTable) {
+            return true;
+        } else if (table instanceof MysqlTable) {
+            return true;
+        } else if (table instanceof IcebergTable) {
+            return true;
+        } else if (table instanceof HiveTable) {
+            return true;
+        } else if (table instanceof TableFunctionTable) {
+            return true;
+        } else if (table.isBlackHoleTable()) {
+            return true;
+        }
+
+        return false;
+    }
+
+    public boolean canUsePipeLine() {
+        return true;
+    }
+
+    public boolean canUseRuntimeAdaptiveDop() {
+        return false;
     }
 }

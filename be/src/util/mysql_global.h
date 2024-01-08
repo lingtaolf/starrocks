@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/mysql_global.h
 
@@ -21,8 +34,8 @@
 
 #pragma once
 
-#include <float.h>
-#include <stdint.h>
+#include <cfloat>
+#include <cstdint>
 
 namespace starrocks {
 
@@ -36,28 +49,18 @@ typedef unsigned char uchar;
         *(T + 1) = (uchar)(((uint32_t)(A) >> 8)); \
         *(T + 2) = (uchar)(((A) >> 16));          \
     } while (0)
+#define int4store(T, A) *((uint32_t*)(T)) = (uint32_t)(A)
 #define int8store(T, A) *((int64_t*)(T)) = (uint64_t)(A)
-
-#define MY_ALIGN(A, L) (((A) + (L)-1) & ~((L)-1))
-#define SIZEOF_CHARP 8
-
-#define MAX_TINYINT_WIDTH 3     /* Max width for a TINY w.o. sign */
-#define MAX_SMALLINT_WIDTH 5    /* Max width for a SHORT w.o. sign */
-#define MAX_MEDIUMINT_WIDTH 8   /* Max width for a INT24 w.o. sign */
-#define MAX_INT_WIDTH 10        /* Max width for a LONG w.o. sign */
-#define MAX_BIGINT_WIDTH 20     /* Max width for a LONGLONG */
-#define MAX_CHAR_WIDTH 255      /* Max length for a CHAR colum */
-#define MAX_BLOB_WIDTH 16777216 /* Default width for blob */
-
-#define MAX_DECPT_FOR_F_FORMAT DBL_DIG
-#define MAX_DATETIME_WIDTH 19 /* YYYY-MM-DD HH:MM:SS */
+#define float4store(T, A) *((float*)(T)) = (float)(A)
+#define float8store(T, A) *((double*)(T)) = (double)(A)
+#define MAX_TINYINT_WIDTH 3  /* Max width for a TINY w.o. sign */
+#define MAX_SMALLINT_WIDTH 5 /* Max width for a SHORT w.o. sign */
+#define MAX_INT_WIDTH 10     /* Max width for a LONG w.o. sign */
+#define MAX_BIGINT_WIDTH 20  /* Max width for a LONGLONG */
 
 /* -[digits].E+## */
 #define MAX_FLOAT_STR_LENGTH 24 // see gutil/strings/numbers.h kFloatToBufferSize
 /* -[digits].E+### */
 #define MAX_DOUBLE_STR_LENGTH 32 // see gutil/strings/numbers.h kDoubleToBufferSize
-
-/* -[digits].[frac] */
-#define MAX_DECIMAL_STR_LENGTH 29
 
 } // namespace starrocks

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/IdGenerator.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -26,7 +22,7 @@ package com.starrocks.common;
  * Subclasses of Id should be able to create a generator for their Id type.
  */
 public abstract class IdGenerator<IdType extends Id<IdType>> {
-    protected int nextId_ = 0;
+    protected int nextId = 0;
 
     public abstract IdType getNextId();
 

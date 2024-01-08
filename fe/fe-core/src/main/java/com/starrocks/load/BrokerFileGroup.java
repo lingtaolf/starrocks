@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/load/BrokerFileGroup.java
 
@@ -25,15 +38,11 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import com.starrocks.analysis.DataDescription;
 import com.starrocks.analysis.Delimiter;
 import com.starrocks.analysis.Expr;
-import com.starrocks.analysis.ImportColumnDesc;
-import com.starrocks.analysis.PartitionNames;
 import com.starrocks.analysis.SlotRef;
 import com.starrocks.catalog.AggregateType;
 import com.starrocks.catalog.BrokerTable;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.HiveTable;
@@ -42,18 +51,23 @@ import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.OlapTable.OlapTableState;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Table;
+import com.starrocks.catalog.TableFunctionTable;
 import com.starrocks.common.AnalysisException;
+import com.starrocks.common.CsvFormat;
 import com.starrocks.common.DdlException;
-import com.starrocks.common.FeMetaVersion;
 import com.starrocks.common.Pair;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
+import com.starrocks.sql.ast.DataDescription;
+import com.starrocks.sql.ast.ImportColumnDesc;
+import com.starrocks.sql.ast.PartitionNames;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -72,6 +86,7 @@ public class BrokerFileGroup implements Writable {
     // fileFormat may be null, which means format will be decided by file's suffix
     private String fileFormat;
     private boolean isNegative;
+    private boolean specifyPartition = false;
     private List<Long> partitionIds; // can be null, means no partition specified
     private List<String> filePaths;
 
@@ -89,9 +104,18 @@ public class BrokerFileGroup implements Writable {
     // load from table
     private long srcTableId = -1;
     private boolean isLoadFromTable = false;
+    
+    // for csv
+    private CsvFormat csvFormat;
+
+    public static final String ESCAPE = "escape";
+    public static final String ENCLOSE = "enclose";
+    public static final String TRIMSPACE = "trim_space";
+    public static final String SKIPHEADER = "skip_header";
 
     // for unit test and edit log persistence
     private BrokerFileGroup() {
+        this.csvFormat = new CsvFormat((byte) 0, (byte) 0, 0, false);
     }
 
     // Used for broker table, no need to parse
@@ -102,6 +126,24 @@ public class BrokerFileGroup implements Writable {
         this.isNegative = false;
         this.filePaths = table.getPaths();
         this.fileFormat = table.getFileFormat();
+        this.csvFormat = new CsvFormat((byte) 0, (byte) 0, 0, false);
+    }
+
+    public BrokerFileGroup(TableFunctionTable table) throws AnalysisException {
+        this.tableId = table.getId();
+        this.isNegative = false;
+
+        this.filePaths = new ArrayList<>();
+        this.filePaths.add(table.getPath());
+
+        this.fileFormat = table.getFormat();
+        this.columnSeparator = "\t";
+        this.rowDelimiter = "\n";
+        this.csvFormat = new CsvFormat((byte) 0, (byte) 0, 0, false);
+        this.fileFieldNames = new ArrayList<>();
+
+        this.columnExprList = table.getColumnExprList();
+        this.columnsFromPath = table.getColumnsFromPath();
     }
 
     public BrokerFileGroup(DataDescription dataDescription) {
@@ -110,6 +152,14 @@ public class BrokerFileGroup implements Writable {
         this.columnExprList = dataDescription.getParsedColumnExprList();
         this.columnToHadoopFunction = dataDescription.getColumnToHadoopFunction();
         this.whereExpr = dataDescription.getWhereExpr();
+        this.csvFormat = new CsvFormat((byte) 0, (byte) 0, 0, false);
+    }
+
+    public void parseFormatProperties(DataDescription dataDescription) {
+        CsvFormat csvFormat = dataDescription.getCsvFormat();
+        if (csvFormat != null) {
+            this.csvFormat = csvFormat;
+        }
     }
 
     // NOTE: DBLock will be held
@@ -119,7 +169,7 @@ public class BrokerFileGroup implements Writable {
         Table table = db.getTable(dataDescription.getTableName());
         if (table == null) {
             throw new DdlException("Unknown table " + dataDescription.getTableName()
-                    + " in database " + db.getFullName());
+                    + " in database " + db.getOriginName());
         }
         if (!(table instanceof OlapTable)) {
             throw new DdlException("Table " + table.getName() + " is not OlapTable");
@@ -130,6 +180,7 @@ public class BrokerFileGroup implements Writable {
         // partitionId
         PartitionNames partitionNames = dataDescription.getPartitionNames();
         if (partitionNames != null) {
+            specifyPartition = true;
             partitionIds = Lists.newArrayList();
             for (String pName : partitionNames.getPartitionNames()) {
                 Partition partition = olapTable.getPartition(pName, partitionNames.isTemp());
@@ -169,12 +220,14 @@ public class BrokerFileGroup implements Writable {
 
         fileFormat = dataDescription.getFileFormat();
         if (fileFormat != null) {
-            if (!fileFormat.toLowerCase().equals("parquet") && !fileFormat.toLowerCase().equals("csv") &&
-                    !fileFormat.toLowerCase().equals("orc")) {
+            String format = fileFormat.toLowerCase();
+            if (!format.equals("parquet") && !format.equals("csv") && !format.equals("orc") && !format.equals("json")) {
                 throw new DdlException("File Format Type " + fileFormat + " is invalid.");
             }
         }
         isNegative = dataDescription.isNegative();
+
+        parseFormatProperties(dataDescription);
 
         // FilePath
         filePaths = dataDescription.getFilePaths();
@@ -184,7 +237,7 @@ public class BrokerFileGroup implements Writable {
             // src table should be hive table
             Table srcTable = db.getTable(srcTableName);
             if (srcTable == null) {
-                throw new DdlException("Unknown table " + srcTableName + " in database " + db.getFullName());
+                throw new DdlException("Unknown table " + srcTableName + " in database " + db.getOriginName());
             }
             if (!(srcTable instanceof HiveTable)) {
                 throw new DdlException("Source table " + srcTableName + " is not HiveTable");
@@ -231,6 +284,10 @@ public class BrokerFileGroup implements Writable {
             srcTableId = srcTable.getId();
             isLoadFromTable = true;
         }
+    }
+
+    public boolean isSpecifyPartition() {
+        return specifyPartition;
     }
 
     public long getTableId() {
@@ -287,6 +344,22 @@ public class BrokerFileGroup implements Writable {
 
     public boolean isLoadFromTable() {
         return isLoadFromTable;
+    }
+
+    public long getSkipHeader() {
+        return csvFormat.getSkipheader();
+    }
+
+    public byte getEnclose() {
+        return csvFormat.getEnclose();
+    }
+
+    public byte getEscape() {
+        return csvFormat.getEscape();
+    }
+
+    public boolean isTrimspace() {
+        return csvFormat.isTrimspace();
     }
 
     @Override
@@ -438,16 +511,12 @@ public class BrokerFileGroup implements Writable {
             }
         }
         // file format
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_50) {
-            if (in.readBoolean()) {
-                fileFormat = Text.readString(in);
-            }
+        if (in.readBoolean()) {
+            fileFormat = Text.readString(in);
         }
         // src table
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_87) {
-            srcTableId = in.readLong();
-            isLoadFromTable = in.readBoolean();
-        }
+        srcTableId = in.readLong();
+        isLoadFromTable = in.readBoolean();
 
         // There are no columnExprList in the previous load job which is created before function is supported.
         // The columnExprList could not be analyzed without origin stmt in the previous load job.

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/BloomFilter.cc
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -97,26 +93,13 @@ void checkArgument(bool expression, const std::string& message) {
 }
 
 int32_t optimalNumOfHashFunctions(uint64_t expectedEntries, uint64_t numBits) {
-    double n = static_cast<double>(expectedEntries);
+    auto n = static_cast<double>(expectedEntries);
     return std::max<int32_t>(1, static_cast<int32_t>(std::round(static_cast<double>(numBits) / n * std::log(2.0))));
 }
 
 int32_t optimalNumOfBits(uint64_t expectedEntries, double fpp) {
-    double n = static_cast<double>(expectedEntries);
+    auto n = static_cast<double>(expectedEntries);
     return static_cast<int32_t>(-n * std::log(fpp) / (std::log(2.0) * std::log(2.0)));
-}
-
-// Thomas Wang's integer hash function
-// http://web.archive.org/web/20071223173210/http://www.concentric.net/~Ttwang/tech/inthash.htm
-inline uint64_t getLongHash(uint64_t key) {
-    key = (~key) + (key << 21); // key = (key << 21) - key - 1;
-    key = key ^ (key >> 24);
-    key = (key + (key << 3)) + (key << 8); // key * 265
-    key = key ^ (key >> 14);
-    key = (key + (key << 2)) + (key << 4); // key * 21
-    key = key ^ (key >> 28);
-    key = key + (key << 31);
-    return key;
 }
 
 // We use the trick mentioned in "Less Hashing, Same Performance:
@@ -141,7 +124,7 @@ BloomFilterImpl::BloomFilterImpl(uint64_t expectedEntries, double fpp) {
     checkArgument(expectedEntries > 0, "expectedEntries should be > 0");
     checkArgument(fpp > 0.0 && fpp < 1.0, "False positive probability should be > 0.0 & < 1.0");
 
-    uint64_t nb = static_cast<uint64_t>(optimalNumOfBits(expectedEntries, fpp));
+    auto nb = static_cast<uint64_t>(optimalNumOfBits(expectedEntries, fpp));
     // make 'mNumBits' multiple of 64
     mNumBits = nb + (BITS_OF_LONG - (nb % BITS_OF_LONG));
     mNumHashFunctions = optimalNumOfHashFunctions(expectedEntries, mNumBits);
@@ -150,20 +133,20 @@ BloomFilterImpl::BloomFilterImpl(uint64_t expectedEntries, double fpp) {
 
 void BloomFilterImpl::addBytes(const char* data, int64_t length) {
     uint64_t hash64 = getBytesHash(data, length);
-    addHash(hash64);
+    addHash(static_cast<int64_t>(hash64));
 }
 
 void BloomFilterImpl::addLong(int64_t data) {
-    addHash(getLongHash(static_cast<uint64_t>(data)));
+    addHash(getLongHash(data));
 }
 
 bool BloomFilterImpl::testBytes(const char* data, int64_t length) const {
     uint64_t hash64 = getBytesHash(data, length);
-    return testHash(hash64);
+    return testHash(static_cast<int64_t>(hash64));
 }
 
 bool BloomFilterImpl::testLong(int64_t data) const {
-    return testHash(getLongHash(static_cast<uint64_t>(data)));
+    return testHash(getLongHash(data));
 }
 
 uint64_t BloomFilterImpl::sizeInBytes() const {
@@ -197,7 +180,7 @@ BloomFilterImpl::BloomFilterImpl(const proto::BloomFilter& bloomFilter) {
     mNumBits = bitsetStr.size() << SHIFT_3_BITS;
     checkArgument(mNumBits % BITS_OF_LONG == 0, "numBits should be multiple of 64!");
 
-    const uint64_t* bitset = reinterpret_cast<const uint64_t*>(bitsetStr.data());
+    const auto* bitset = reinterpret_cast<const uint64_t*>(bitsetStr.data());
     if (isLittleEndian()) {
         mBitSet.reset(new BitSet(bitset, mNumBits));
     } else {
@@ -216,18 +199,20 @@ BloomFilterImpl::BloomFilterImpl(const proto::BloomFilter& bloomFilter) {
 }
 
 void BloomFilterImpl::addDouble(double data) {
-    addLong(reinterpret_cast<int64_t&>(data));
+    addLong(*reinterpret_cast<int64_t*>(&data));
 }
 
 bool BloomFilterImpl::testDouble(double data) const {
-    return testLong(reinterpret_cast<int64_t&>(data));
+    return testLong(*reinterpret_cast<int64_t*>(&data));
 }
 
 DIAGNOSTIC_POP
 
-void BloomFilterImpl::addHash(uint64_t hash64) {
-    int32_t hash1 = static_cast<int32_t>(hash64 & 0xffffffff);
-    int32_t hash2 = static_cast<int32_t>(hash64 >> 32);
+void BloomFilterImpl::addHash(int64_t hash64) {
+    auto hash1 = static_cast<int32_t>(hash64 & 0xffffffff);
+    // In Java codes, we use "hash64 >>> 32" which is an unsigned shift op.
+    // So we cast hash64 to uint64_t here for an unsigned right shift.
+    auto hash2 = static_cast<int32_t>(static_cast<uint64_t>(hash64) >> 32);
 
     for (int32_t i = 1; i <= mNumHashFunctions; ++i) {
         int32_t combinedHash = hash1 + i * hash2;
@@ -240,9 +225,11 @@ void BloomFilterImpl::addHash(uint64_t hash64) {
     }
 }
 
-bool BloomFilterImpl::testHash(uint64_t hash64) const {
-    int32_t hash1 = static_cast<int32_t>(hash64 & 0xffffffff);
-    int32_t hash2 = static_cast<int32_t>(hash64 >> 32);
+bool BloomFilterImpl::testHash(int64_t hash64) const {
+    auto hash1 = static_cast<int32_t>(hash64 & 0xffffffff);
+    // In Java codes, we use "hash64 >>> 32" which is an unsigned shift op.
+    // So we cast hash64 to uint64_t here for an unsigned right shift.
+    auto hash2 = static_cast<int32_t>(static_cast<uint64_t>(hash64) >> 32);
 
     for (int32_t i = 1; i <= mNumHashFunctions; ++i) {
         int32_t combinedHash = hash1 + i * hash2;

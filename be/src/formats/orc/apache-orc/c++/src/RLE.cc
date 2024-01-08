@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/RLE.cc
-
 /**
 * Licensed to the Apache Software Foundation (ASF) under one
 * or more contributor license agreements.  See the NOTICE file
@@ -48,13 +44,15 @@ std::unique_ptr<RleEncoder> createRleEncoder(std::unique_ptr<BufferedOutputStrea
 }
 
 std::unique_ptr<RleDecoder> createRleDecoder(std::unique_ptr<SeekableInputStream> input, bool isSigned,
-                                             RleVersion version, MemoryPool& pool, DataBuffer<char>* sharedBufferPtr) {
+                                             RleVersion version, MemoryPool& pool, ReaderMetrics* metrics,
+                                             DataBuffer<char>* sharedBufferPtr) {
     switch (static_cast<int64_t>(version)) {
     case RleVersion_1:
         // We don't have std::make_unique() yet.
-        return std::unique_ptr<RleDecoder>(new RleDecoderV1(std::move(input), isSigned));
+        return std::unique_ptr<RleDecoder>(new RleDecoderV1(std::move(input), isSigned, metrics));
     case RleVersion_2:
-        return std::unique_ptr<RleDecoder>(new RleDecoderV2(std::move(input), isSigned, pool, sharedBufferPtr));
+        return std::unique_ptr<RleDecoder>(
+                new RleDecoderV2(std::move(input), isSigned, pool, metrics, sharedBufferPtr));
     default:
         throw NotImplementedYet("Not implemented yet");
     }
@@ -99,7 +97,7 @@ void RleEncoder::writeByte(char c) {
 
 void RleEncoder::recordPosition(PositionRecorder* recorder) const {
     uint64_t flushedSize = outputStream->getSize();
-    uint64_t unflushedSize = static_cast<uint64_t>(bufferPosition);
+    auto unflushedSize = static_cast<uint64_t>(bufferPosition);
     if (outputStream->isCompressed()) {
         recorder->add(flushedSize);
         recorder->add(unflushedSize);

@@ -1,32 +1,27 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/schema_scanner/schema_tables_scanner.cpp
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "exec/schema_scanner/schema_tables_scanner.h"
 
+#include "column/nullable_column.h"
 #include "exec/schema_scanner/schema_helper.h"
-#include "runtime/primitive_type.h"
+#include "runtime/runtime_state.h"
 #include "runtime/string_value.h"
-//#include "runtime/datetime_value.h"
 
 namespace starrocks {
+
+const int32_t DEF_NULL_NUM = -1;
 
 SchemaScanner::ColumnDesc SchemaTablesScanner::_s_tbls_columns[] = {
         //   name,       type,          size,     is_null
@@ -54,219 +49,328 @@ SchemaScanner::ColumnDesc SchemaTablesScanner::_s_tbls_columns[] = {
 };
 
 SchemaTablesScanner::SchemaTablesScanner()
-        : SchemaScanner(_s_tbls_columns, sizeof(_s_tbls_columns) / sizeof(SchemaScanner::ColumnDesc)),
-          _db_index(0),
-          _table_index(0) {}
+        : SchemaScanner(_s_tbls_columns, sizeof(_s_tbls_columns) / sizeof(SchemaScanner::ColumnDesc)) {}
 
-SchemaTablesScanner::~SchemaTablesScanner() {}
+SchemaTablesScanner::~SchemaTablesScanner() = default;
 
 Status SchemaTablesScanner::start(RuntimeState* state) {
-    if (!_is_init) {
-        return Status::InternalError("used before initialized.");
+    RETURN_IF_ERROR(SchemaScanner::start(state));
+    TAuthInfo auth_info;
+    if (nullptr != _param->catalog) {
+        auth_info.__set_catalog_name(*(_param->catalog));
     }
-    TGetDbsParams db_params;
-    if (NULL != _param->db) {
-        db_params.__set_pattern(*(_param->db));
+    if (nullptr != _param->db) {
+        auth_info.__set_pattern(*(_param->db));
     }
-    if (NULL != _param->current_user_ident) {
-        db_params.__set_current_user_ident(*(_param->current_user_ident));
+    if (nullptr != _param->current_user_ident) {
+        auth_info.__set_current_user_ident(*(_param->current_user_ident));
     } else {
-        if (NULL != _param->user) {
-            db_params.__set_user(*(_param->user));
+        if (nullptr != _param->user) {
+            auth_info.__set_user(*(_param->user));
         }
-        if (NULL != _param->user_ip) {
-            db_params.__set_user_ip(*(_param->user_ip));
+        if (nullptr != _param->user_ip) {
+            auth_info.__set_user_ip(*(_param->user_ip));
         }
     }
 
-    if (NULL != _param->ip && 0 != _param->port) {
-        RETURN_IF_ERROR(SchemaHelper::get_db_names(*(_param->ip), _param->port, db_params, &_db_result));
+    TGetTablesInfoRequest get_tables_info_request;
+    get_tables_info_request.__set_auth_info(auth_info);
+
+    if (nullptr != _param->ip && 0 != _param->port) {
+        int timeout_ms = state->query_options().query_timeout * 1000;
+        RETURN_IF_ERROR(SchemaHelper::get_tables_info(*(_param->ip), _param->port, get_tables_info_request,
+                                                      &_tabls_info_response, timeout_ms));
     } else {
-        return Status::InternalError("IP or port dosn't exists");
+        return Status::InternalError("IP or port doesn't exists");
     }
     return Status::OK();
 }
 
-Status SchemaTablesScanner::fill_one_row(Tuple* tuple, MemPool* pool) {
-    // set all bit to not null
-    memset((void*)tuple, 0, _tuple_desc->num_null_bytes());
-    const TTableStatus& tbl_status = _table_result.tables[_table_index];
-    // catalog
-    { tuple->set_null(_tuple_desc->slots()[0]->null_indicator_offset()); }
-    // schema
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[1]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        std::string db_name = SchemaHelper::extract_db_name(_db_result.dbs[_db_index - 1]);
-        str_slot->ptr = (char*)pool->allocate(db_name.size());
-        if (UNLIKELY(str_slot->ptr == nullptr)) {
-            return Status::InternalError("Mem usage has exceed the limit of BE");
-        }
-        str_slot->len = db_name.size();
-        memcpy(str_slot->ptr, db_name.c_str(), str_slot->len);
-    }
-    // name
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[2]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        const std::string* src = &tbl_status.name;
-        str_slot->len = src->length();
-        str_slot->ptr = (char*)pool->allocate(str_slot->len);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("Allocate memcpy failed.");
-        }
-        memcpy(str_slot->ptr, src->c_str(), str_slot->len);
-    }
-    // type
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[3]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        const std::string* src = &tbl_status.type;
-        str_slot->len = src->length();
-        str_slot->ptr = (char*)pool->allocate(str_slot->len);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("Allocate memcpy failed.");
-        }
-        memcpy(str_slot->ptr, src->c_str(), str_slot->len);
-    }
-    // engine
-    if (tbl_status.__isset.engine) {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[4]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        const std::string* src = &tbl_status.engine;
-        str_slot->len = src->length();
-        str_slot->ptr = (char*)pool->allocate(str_slot->len);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("Allocate memcpy failed.");
-        }
-        memcpy(str_slot->ptr, src->c_str(), str_slot->len);
-    } else {
-        tuple->set_null(_tuple_desc->slots()[4]->null_indicator_offset());
-    }
-    // version
-    { tuple->set_null(_tuple_desc->slots()[5]->null_indicator_offset()); }
-    // row_format
-    { tuple->set_null(_tuple_desc->slots()[6]->null_indicator_offset()); }
-    // rows
-    { tuple->set_null(_tuple_desc->slots()[7]->null_indicator_offset()); }
-    // avg_row_length
-    { tuple->set_null(_tuple_desc->slots()[8]->null_indicator_offset()); }
-    // data_length
-    { tuple->set_null(_tuple_desc->slots()[9]->null_indicator_offset()); }
-    // max_data_length
-    { tuple->set_null(_tuple_desc->slots()[10]->null_indicator_offset()); }
-    // index_length
-    { tuple->set_null(_tuple_desc->slots()[11]->null_indicator_offset()); }
-    // data_free
-    { tuple->set_null(_tuple_desc->slots()[12]->null_indicator_offset()); }
-    // auto_increment
-    { tuple->set_null(_tuple_desc->slots()[13]->null_indicator_offset()); }
-    // creation_time
-    if (tbl_status.__isset.create_time) {
-        int64_t create_time = tbl_status.create_time;
-        if (create_time <= 0) {
-            tuple->set_null(_tuple_desc->slots()[14]->null_indicator_offset());
-        } else {
-            tuple->set_not_null(_tuple_desc->slots()[14]->null_indicator_offset());
-            void* slot = tuple->get_slot(_tuple_desc->slots()[14]->tuple_offset());
-            DateTimeValue* time_slot = reinterpret_cast<DateTimeValue*>(slot);
-            time_slot->from_unixtime(create_time, TimezoneUtils::default_time_zone);
-        }
-    }
-    // update_time
-    { tuple->set_null(_tuple_desc->slots()[15]->null_indicator_offset()); }
-    // check_time
-    if (tbl_status.__isset.last_check_time) {
-        int64_t check_time = tbl_status.last_check_time;
-        if (check_time <= 0) {
-            tuple->set_null(_tuple_desc->slots()[16]->null_indicator_offset());
-        } else {
-            tuple->set_not_null(_tuple_desc->slots()[16]->null_indicator_offset());
-            void* slot = tuple->get_slot(_tuple_desc->slots()[16]->tuple_offset());
-            DateTimeValue* time_slot = reinterpret_cast<DateTimeValue*>(slot);
-            time_slot->from_unixtime(check_time, TimezoneUtils::default_time_zone);
-        }
-    }
-    // collation
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[17]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        const char* collation_str = "utf8_general_ci";
-        int len = strlen(collation_str);
-        str_slot->ptr = (char*)pool->allocate(len + 1);
-        if (NULL == str_slot->ptr) {
-            return Status::InternalError("Allocate memcpy failed.");
-        }
-        memcpy(str_slot->ptr, collation_str, len + 1);
-        str_slot->len = len;
-    }
-    // checksum
-    { tuple->set_null(_tuple_desc->slots()[18]->null_indicator_offset()); }
-    // create_options
-    { tuple->set_null(_tuple_desc->slots()[19]->null_indicator_offset()); }
-    // create_comment
-    {
-        void* slot = tuple->get_slot(_tuple_desc->slots()[20]->tuple_offset());
-        StringValue* str_slot = reinterpret_cast<StringValue*>(slot);
-        const std::string* src = &tbl_status.comment;
-        str_slot->len = src->length();
-        if (str_slot->len == 0) {
-            str_slot->ptr = nullptr;
-        } else {
-            str_slot->ptr = (char*)pool->allocate(str_slot->len);
-            if (NULL == str_slot->ptr) {
-                return Status::InternalError("Allocate memcpy failed.");
-            }
-            memcpy(str_slot->ptr, src->c_str(), str_slot->len);
-        }
-    }
-    _table_index++;
-    return Status::OK();
-}
-
-Status SchemaTablesScanner::get_new_table() {
-    TGetTablesParams table_params;
-    table_params.__set_db(_db_result.dbs[_db_index++]);
-    if (NULL != _param->wild) {
-        table_params.__set_pattern(*(_param->wild));
-    }
-    if (NULL != _param->current_user_ident) {
-        table_params.__set_current_user_ident(*(_param->current_user_ident));
-    } else {
-        if (NULL != _param->user) {
-            table_params.__set_user(*(_param->user));
-        }
-        if (NULL != _param->user_ip) {
-            table_params.__set_user_ip(*(_param->user_ip));
-        }
-    }
-
-    if (NULL != _param->ip && 0 != _param->port) {
-        RETURN_IF_ERROR(SchemaHelper::list_table_status(*(_param->ip), _param->port, table_params, &_table_result));
-    } else {
-        return Status::InternalError("IP or port dosn't exists");
-    }
-    _table_index = 0;
-    return Status::OK();
-}
-
-Status SchemaTablesScanner::get_next_row(Tuple* tuple, MemPool* pool, bool* eos) {
+Status SchemaTablesScanner::get_next(ChunkPtr* chunk, bool* eos) {
     if (!_is_init) {
         return Status::InternalError("Used before initialized.");
     }
-    if (NULL == tuple || NULL == pool || NULL == eos) {
-        return Status::InternalError("input pointer is NULL.");
+    if (nullptr == chunk || nullptr == eos) {
+        return Status::InternalError("input pointer is nullptr.");
     }
-    while (_table_index >= _table_result.tables.size()) {
-        if (_db_index < _db_result.dbs.size()) {
-            RETURN_IF_ERROR(get_new_table());
-        } else {
-            *eos = true;
-            return Status::OK();
-        }
+    if (_tables_info_index >= _tabls_info_response.tables_infos.size()) {
+        *eos = true;
+        return Status::OK();
     }
     *eos = false;
-    return fill_one_row(tuple, pool);
+    return fill_chunk(chunk);
+}
+
+Status SchemaTablesScanner::fill_chunk(ChunkPtr* chunk) {
+    const TTableInfo& table_info = _tabls_info_response.tables_infos[_tables_info_index];
+    const auto& slot_id_to_index_map = (*chunk)->get_slot_id_to_index_map();
+    for (const auto& [slot_id, index] : slot_id_to_index_map) {
+        switch (slot_id) {
+        case 1: {
+            // table_catalog
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(1);
+                const std::string* str = &table_info.table_catalog;
+                Slice value(str->c_str(), str->length());
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
+        }
+        case 2: {
+            // table_schema
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(2);
+                const std::string* str = &table_info.table_schema;
+                Slice value(str->c_str(), str->length());
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
+        }
+        case 3: {
+            // table_name
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(3);
+                const std::string* str = &table_info.table_name;
+                Slice value(str->c_str(), str->length());
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
+        }
+        case 4: {
+            // table_type
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(4);
+                const std::string* str = &table_info.table_type;
+                Slice value(str->c_str(), str->length());
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
+        }
+        case 5: {
+            // engine
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(5);
+                const std::string* str = &table_info.engine;
+                Slice value(str->c_str(), str->length());
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
+        }
+        case 6: {
+            // version
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(6);
+                if (table_info.version == DEF_NULL_NUM) {
+                    fill_data_column_with_null(column.get());
+                } else {
+                    fill_column_with_slot<TYPE_BIGINT>(column.get(), (void*)&table_info.version);
+                }
+            }
+            break;
+        }
+        case 7: {
+            // row_format
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(7);
+                const std::string* str = &table_info.row_format;
+                Slice value(str->c_str(), str->length());
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
+        }
+        case 8: {
+            // table_rows
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(8);
+                if (table_info.table_rows == DEF_NULL_NUM) {
+                    fill_data_column_with_null(column.get());
+                } else {
+                    fill_column_with_slot<TYPE_BIGINT>(column.get(), (void*)&table_info.table_rows);
+                }
+            }
+            break;
+        }
+        case 9: {
+            // avg_row_length
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(9);
+                if (table_info.avg_row_length == DEF_NULL_NUM) {
+                    fill_data_column_with_null(column.get());
+                } else {
+                    fill_column_with_slot<TYPE_BIGINT>(column.get(), (void*)&table_info.avg_row_length);
+                }
+            }
+            break;
+        }
+        case 10: {
+            // data_length
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(10);
+                if (table_info.data_length == DEF_NULL_NUM) {
+                    fill_data_column_with_null(column.get());
+                } else {
+                    fill_column_with_slot<TYPE_BIGINT>(column.get(), (void*)&table_info.data_length);
+                }
+            }
+            break;
+        }
+        case 11: {
+            // max_data_length
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(11);
+                if (table_info.max_data_length == DEF_NULL_NUM) {
+                    fill_data_column_with_null(column.get());
+                } else {
+                    fill_column_with_slot<TYPE_BIGINT>(column.get(), (void*)&table_info.max_data_length);
+                }
+            }
+            break;
+        }
+        case 12: {
+            // index_length
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(12);
+                if (table_info.index_length == DEF_NULL_NUM) {
+                    fill_data_column_with_null(column.get());
+                } else {
+                    fill_column_with_slot<TYPE_BIGINT>(column.get(), (void*)&table_info.index_length);
+                }
+            }
+            break;
+        }
+        case 13: {
+            // data_free
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(13);
+                if (table_info.data_free == DEF_NULL_NUM) {
+                    fill_data_column_with_null(column.get());
+                } else {
+                    fill_column_with_slot<TYPE_BIGINT>(column.get(), (void*)&table_info.data_free);
+                }
+            }
+            break;
+        }
+        case 14: {
+            // auto_increment
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(14);
+                if (table_info.auto_increment == DEF_NULL_NUM) {
+                    fill_data_column_with_null(column.get());
+                } else {
+                    fill_column_with_slot<TYPE_BIGINT>(column.get(), (void*)&table_info.auto_increment);
+                }
+            }
+            break;
+        }
+        case 15: {
+            // create_time
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(15);
+                auto* nullable_column = down_cast<NullableColumn*>(column.get());
+                if (table_info.__isset.create_time) {
+                    int64_t create_time = table_info.create_time;
+                    if (create_time <= 0) {
+                        nullable_column->append_nulls(1);
+                    } else {
+                        DateTimeValue t;
+                        t.from_unixtime(create_time, _runtime_state->timezone_obj());
+                        fill_column_with_slot<TYPE_DATETIME>(column.get(), (void*)&t);
+                    }
+                } else {
+                    nullable_column->append_nulls(1);
+                }
+            }
+            break;
+        }
+        case 16: {
+            // update_time
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(16);
+                auto* nullable_column = down_cast<NullableColumn*>(column.get());
+                if (table_info.__isset.update_time) {
+                    int64_t create_time = table_info.update_time;
+                    if (create_time <= 0) {
+                        nullable_column->append_nulls(1);
+                    } else {
+                        DateTimeValue t;
+                        t.from_unixtime(create_time, _runtime_state->timezone_obj());
+                        fill_column_with_slot<TYPE_DATETIME>(column.get(), (void*)&t);
+                    }
+                } else {
+                    nullable_column->append_nulls(1);
+                }
+            }
+            break;
+        }
+        case 17: {
+            // check_time
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(17);
+                auto* nullable_column = down_cast<NullableColumn*>(column.get());
+                if (table_info.__isset.check_time) {
+                    int64_t check_time = table_info.check_time;
+                    if (check_time <= 0) {
+                        nullable_column->append_nulls(1);
+                    } else {
+                        DateTimeValue t;
+                        t.from_unixtime(check_time, _runtime_state->timezone_obj());
+                        fill_column_with_slot<TYPE_DATETIME>(column.get(), (void*)&t);
+                    }
+                } else {
+                    nullable_column->append_nulls(1);
+                }
+            }
+            break;
+        }
+        case 18: {
+            // table_collation
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(18);
+                const std::string* str = &table_info.table_collation;
+                Slice value(str->c_str(), str->length());
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
+        }
+        case 19: {
+            // checksum
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(19);
+                if (table_info.checksum == DEF_NULL_NUM) {
+                    fill_data_column_with_null(column.get());
+                } else {
+                    fill_column_with_slot<TYPE_BIGINT>(column.get(), (void*)&table_info.checksum);
+                }
+            }
+            break;
+        }
+        case 20: {
+            // create_options
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(20);
+                const std::string* str = &table_info.create_options;
+                Slice value(str->c_str(), str->length());
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
+        }
+        case 21: {
+            // table_comment
+            {
+                ColumnPtr column = (*chunk)->get_column_by_slot_id(21);
+                const std::string* str = &table_info.table_comment;
+                Slice value(str->c_str(), str->length());
+                fill_column_with_slot<TYPE_VARCHAR>(column.get(), (void*)&value);
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    _tables_info_index++;
+    return Status::OK();
 }
 
 } // namespace starrocks

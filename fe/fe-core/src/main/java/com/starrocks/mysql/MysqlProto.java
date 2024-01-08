@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/mysql/MysqlProto.java
 
@@ -22,22 +35,24 @@
 package com.starrocks.mysql;
 
 import com.google.common.base.Strings;
-import com.google.common.collect.Lists;
-import com.starrocks.analysis.UserIdentity;
-import com.starrocks.catalog.Catalog;
-import com.starrocks.cluster.ClusterNamespace;
+import com.starrocks.authentication.AuthenticationMgr;
+import com.starrocks.authentication.UserAuthenticationInfo;
+import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReport;
-import com.starrocks.mysql.privilege.UserResource;
 import com.starrocks.qe.ConnectContext;
-import com.starrocks.system.SystemInfoService;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.UserIdentity;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import static com.starrocks.mysql.MysqlHandshakePacket.AUTHENTICATION_KERBEROS_CLIENT;
 
 // MySQL protocol util
 public class MysqlProto {
@@ -49,62 +64,39 @@ public class MysqlProto {
     private static boolean authenticate(ConnectContext context, byte[] scramble, byte[] randomString, String user) {
         String usePasswd = scramble.length == 0 ? "NO" : "YES";
 
-        String tmpUser = user;
-        if (tmpUser == null || tmpUser.isEmpty()) {
+        if (user == null || user.isEmpty()) {
             ErrorReport.report(ErrorCode.ERR_ACCESS_DENIED_ERROR, "", usePasswd);
             return false;
         }
 
-        // check cluster, user name may contains cluster name or cluster id.
-        // eg:
-        // user_name@cluster_name
-        String clusterName = "";
-        String[] strList = tmpUser.split("@", 2);
-        if (strList.length > 1) {
-            tmpUser = strList[0];
-            clusterName = strList[1];
-            try {
-                // if cluster does not exist and it is not a valid cluster id, authenticate failed
-                if (Catalog.getCurrentCatalog().getCluster(clusterName) == null
-                        && Integer.valueOf(strList[1]) != context.getCatalog().getClusterId()) {
-                    ErrorReport.report(ErrorCode.ERR_UNKNOWN_CLUSTER_ID, strList[1]);
-                    return false;
-                }
-            } catch (Throwable e) {
-                ErrorReport.report(ErrorCode.ERR_UNKNOWN_CLUSTER_ID, strList[1]);
-                return false;
-            }
-        }
-        if (Strings.isNullOrEmpty(clusterName)) {
-            clusterName = SystemInfoService.DEFAULT_CLUSTER;
-        }
-        context.setCluster(clusterName);
-
-        // check resource group level. user name may contains resource group level.
-        // eg:
-        // ...@user_name#HIGH
-        // set resource group if it is valid, or just ignore it
-        strList = tmpUser.split("#", 2);
-        if (strList.length > 1) {
-            tmpUser = strList[0];
-            if (UserResource.isValidGroup(strList[1])) {
-                context.getSessionVariable().setResourceGroup(strList[1]);
-            }
-        }
-
-        LOG.debug("parse cluster: {}", clusterName);
-        String qualifiedUser = ClusterNamespace.getFullName(clusterName, tmpUser);
         String remoteIp = context.getMysqlChannel().getRemoteIp();
 
-        List<UserIdentity> currentUserIdentity = Lists.newArrayList();
-        if (!Catalog.getCurrentCatalog().getAuth().checkPassword(qualifiedUser, remoteIp,
-                scramble, randomString, currentUserIdentity)) {
-            ErrorReport.report(ErrorCode.ERR_ACCESS_DENIED_ERROR, qualifiedUser, usePasswd);
-            return false;
+        AuthenticationMgr authenticationManager = context.getGlobalStateMgr().getAuthenticationMgr();
+        UserIdentity currentUser = null;
+        if (Config.enable_auth_check) {
+            currentUser = authenticationManager.checkPassword(user, remoteIp, scramble, randomString);
+            if (currentUser == null) {
+                ErrorReport.report(ErrorCode.ERR_ACCESS_DENIED_ERROR, user, usePasswd);
+                return false;
+            }
+        } else {
+            Map.Entry<UserIdentity, UserAuthenticationInfo> matchedUserIdentity =
+                    authenticationManager.getBestMatchedUserIdentity(user, remoteIp);
+            if (matchedUserIdentity == null) {
+                LOG.info("enable_auth_check is false, but cannot find user '{}'@'{}'", user, remoteIp);
+                ErrorReport.report(ErrorCode.ERR_ACCESS_DENIED_ERROR, user, usePasswd);
+                return false;
+            } else {
+                currentUser = matchedUserIdentity.getKey();
+            }
         }
-        context.setAuthDataSalt(randomString);
-        context.setCurrentUserIdentity(currentUserIdentity.get(0));
-        context.setQualifiedUser(qualifiedUser);
+
+        context.setCurrentUserIdentity(currentUser);
+        if (!currentUser.isEphemeral()) {
+            context.setCurrentRoleIds(currentUser);
+            context.setAuthDataSalt(randomString);
+        }
+        context.setQualifiedUser(user);
         return true;
     }
 
@@ -129,28 +121,40 @@ public class MysqlProto {
      * Exception:
      * IOException:
      */
-    public static boolean negotiate(ConnectContext context) throws IOException {
+    public static NegotiateResult negotiate(ConnectContext context) throws IOException {
         MysqlSerializer serializer = context.getSerializer();
         MysqlChannel channel = context.getMysqlChannel();
         context.getState().setOk();
 
         // Server send handshake packet to client.
         serializer.reset();
-        MysqlHandshakePacket handshakePacket = new MysqlHandshakePacket(context.getConnectionId());
+        MysqlHandshakePacket handshakePacket = new MysqlHandshakePacket(context.getConnectionId(),
+                context.supportSSL());
         handshakePacket.writeTo(serializer);
         channel.sendAndFlush(serializer.toByteBuffer());
 
-        // Server receive authenticate packet from client.
-        ByteBuffer handshakeResponse = channel.fetchOnePacket();
-        if (handshakeResponse == null) {
-            // receive response failed.
-            return false;
+        MysqlAuthPacket authPacket = readAuthPacket(context);
+        if (authPacket == null) {
+            return new NegotiateResult(null, false);
         }
-        MysqlAuthPacket authPacket = new MysqlAuthPacket();
-        if (!authPacket.readFrom(handshakeResponse)) {
-            ErrorReport.report(ErrorCode.ERR_NOT_SUPPORTED_AUTH_MODE);
-            sendResponsePacket(context);
-            return false;
+
+        if (authPacket.isSSLConnRequest()) {
+            // change to ssl session
+            LOG.info("start to enable ssl connection");
+            if (!context.enableSSL()) {
+                LOG.warn("enable ssl connection failed");
+                ErrorReport.report(ErrorCode.ERR_CHANGE_TO_SSL_CONNECTION_FAILED);
+                sendResponsePacket(context);
+                return new NegotiateResult(authPacket, false);
+            } else {
+                LOG.info("enable ssl connection successfully");
+            }
+
+            // read the authentication package again from client
+            authPacket = readAuthPacket(context);
+            if (authPacket == null) {
+                return new NegotiateResult(null, false);
+            }
         }
 
         // check capability
@@ -158,7 +162,7 @@ public class MysqlProto {
             // TODO: client return capability can not support
             ErrorReport.report(ErrorCode.ERR_NOT_SUPPORTED_AUTH_MODE);
             sendResponsePacket(context);
-            return false;
+            return new NegotiateResult(authPacket, false);
         }
 
         // Starting with MySQL 8.0.4, MySQL changed the default authentication plugin for MySQL client
@@ -176,13 +180,31 @@ public class MysqlProto {
             // 1. clear the serializer
             serializer.reset();
             // 2. build the auth switch request and send to the client
-            handshakePacket.buildAuthSwitchRequest(serializer);
+            if (authPluginName.equals(AUTHENTICATION_KERBEROS_CLIENT)) {
+                if (GlobalStateMgr.getCurrentState().getAuthenticationMgr().isSupportKerberosAuth()) {
+                    try {
+                        handshakePacket.buildKrb5AuthRequest(serializer, context.getRemoteIP(), authPacket.getUser());
+                    } catch (Exception e) {
+                        ErrorReport.report("Building handshake with kerberos error, msg: %s", e.getMessage());
+                        sendResponsePacket(context);
+                        return new NegotiateResult(authPacket, false);
+                    }
+                } else {
+                    ErrorReport.report(ErrorCode.ERR_AUTH_PLUGIN_NOT_LOADED, "authentication_kerberos");
+                    sendResponsePacket(context);
+                    return new NegotiateResult(authPacket, false);
+                }
+            } else {
+                handshakePacket.buildAuthSwitchRequest(serializer);
+            }
             channel.sendAndFlush(serializer.toByteBuffer());
             // Server receive auth switch response packet from client.
             ByteBuffer authSwitchResponse = channel.fetchOnePacket();
             if (authSwitchResponse == null) {
                 // receive response failed.
-                return false;
+                LOG.error("Building handshake with kerberos error, msg: Failed to get a valid service ticket for" +
+                        " {} from the client", authPacket.getUser());
+                return new NegotiateResult(authPacket, false);
             }
             // 3. the client use default password plugin of StarRocks to dispose
             // password
@@ -198,21 +220,36 @@ public class MysqlProto {
         // check authenticate
         if (!authenticate(context, authPacket.getAuthResponse(), randomString, authPacket.getUser())) {
             sendResponsePacket(context);
-            return false;
+            return new NegotiateResult(authPacket, false);
         }
 
         // set database
         String db = authPacket.getDb();
         if (!Strings.isNullOrEmpty(db)) {
             try {
-                String dbFullName = ClusterNamespace.getFullName(context.getClusterName(), db);
-                Catalog.getCurrentCatalog().changeDb(context, dbFullName);
+                GlobalStateMgr.getCurrentState().changeCatalogDb(context, db);
             } catch (DdlException e) {
                 sendResponsePacket(context);
-                return false;
+                return new NegotiateResult(authPacket, false);
             }
         }
-        return true;
+        return new NegotiateResult(authPacket, true);
+    }
+
+    private static MysqlAuthPacket readAuthPacket(ConnectContext context) throws IOException {
+        // Server receive authenticate packet from client.
+        ByteBuffer handshakeResponse = context.getMysqlChannel().fetchOnePacket();
+        if (handshakeResponse == null) {
+            // receive response failed.
+            return null;
+        }
+        MysqlAuthPacket authPacket = new MysqlAuthPacket();
+        if (!authPacket.readFrom(handshakeResponse)) {
+            ErrorReport.report(ErrorCode.ERR_NOT_SUPPORTED_AUTH_MODE);
+            sendResponsePacket(context);
+            return null;
+        }
+        return authPacket;
     }
 
     /**
@@ -231,44 +268,42 @@ public class MysqlProto {
             return false;
         }
         // save previous user login info
-        UserIdentity priviousUserIdentity = context.getCurrentUserIdentity();
-        String priviousQualifiedUser = context.getQualifiedUser();
-        String priviousClusterName = context.getClusterName();
-        String priviousResourceGroup = context.getSessionVariable().getResourceGroup();
+        UserIdentity previousUserIdentity = context.getCurrentUserIdentity();
+        Set<Long> previousRoleIds = context.getCurrentRoleIds();
+        String previousQualifiedUser = context.getQualifiedUser();
+        String previousResourceGroup = context.getSessionVariable().getResourceGroup();
         // do authenticate again
         if (!authenticate(context, changeUserPacket.getAuthResponse(), context.getAuthDataSalt(),
                 changeUserPacket.getUser())) {
-            LOG.warn("Command `Change user` failed, from [{}] to [{}]. ", priviousQualifiedUser,
+            LOG.warn("Command `Change user` failed, from [{}] to [{}]. ", previousQualifiedUser,
                     changeUserPacket.getUser());
             sendResponsePacket(context);
             // reconstruct serializer with context capability
             context.getSerializer().setCapability(context.getCapability());
-            // recover from privious user login info
-            context.setCluster(priviousClusterName);
-            context.getSessionVariable().setResourceGroup(priviousResourceGroup);
+            // recover from previous user login info
+            context.getSessionVariable().setResourceGroup(previousResourceGroup);
             return false;
         }
         // set database
         String db = changeUserPacket.getDb();
         if (!Strings.isNullOrEmpty(db)) {
             try {
-                String dbFullName = ClusterNamespace.getFullName(context.getClusterName(), db);
-                Catalog.getCurrentCatalog().changeDb(context, dbFullName);
+                GlobalStateMgr.getCurrentState().changeCatalogDb(context, db);
             } catch (DdlException e) {
                 LOG.error("Command `Change user` failed at stage changing db, from [{}] to [{}], err[{}] ",
-                        priviousQualifiedUser, changeUserPacket.getUser(), e.getMessage());
+                        previousQualifiedUser, changeUserPacket.getUser(), e.getMessage());
                 sendResponsePacket(context);
                 // reconstruct serializer with context capability
                 context.getSerializer().setCapability(context.getCapability());
-                // recover from privious user login info
-                context.setCluster(priviousClusterName);
-                context.getSessionVariable().setResourceGroup(priviousResourceGroup);
-                context.setCurrentUserIdentity(priviousUserIdentity);
-                context.setQualifiedUser(priviousQualifiedUser);
+                // recover from previous user login info
+                context.getSessionVariable().setResourceGroup(previousResourceGroup);
+                context.setCurrentUserIdentity(previousUserIdentity);
+                context.setCurrentRoleIds(previousRoleIds);
+                context.setQualifiedUser(previousQualifiedUser);
                 return false;
             }
         }
-        LOG.info("Command `Change user` succeeded, from [{}] to [{}]. ", priviousQualifiedUser,
+        LOG.info("Command `Change user` succeeded, from [{}] to [{}]. ", previousQualifiedUser,
                 context.getQualifiedUser());
         return true;
     }
@@ -345,7 +380,7 @@ public class MysqlProto {
 
     public static byte[] readNulTerminateString(ByteBuffer buffer) {
         int oldPos = buffer.position();
-        int nullPos = oldPos;
+        int nullPos;
         for (nullPos = oldPos; nullPos < buffer.limit(); ++nullPos) {
             if (buffer.get(nullPos) == 0) {
                 break;
@@ -358,4 +393,21 @@ public class MysqlProto {
         return buf;
     }
 
+    public static class NegotiateResult {
+        private final MysqlAuthPacket authPacket;
+        private final boolean success;
+
+        public NegotiateResult(MysqlAuthPacket authPacket, boolean success) {
+            this.authPacket = authPacket;
+            this.success = success;
+        }
+
+        public MysqlAuthPacket getAuthPacket() {
+            return authPacket;
+        }
+
+        public boolean isSuccess() {
+            return success;
+        }
+    }
 }

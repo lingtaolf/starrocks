@@ -1,7 +1,21 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.sql.optimizer.rewrite.scalar;
 
+import com.starrocks.analysis.BinaryType;
 import com.starrocks.catalog.Type;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
@@ -17,16 +31,27 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.List;
+import java.util.Optional;
 
 public class FoldConstantsRule extends BottomUpScalarOperatorRewriteRule {
     private static final Logger LOG = LogManager.getLogger(FoldConstantsRule.class);
+
+    private final boolean needMonotonicFunc;
+
+    public FoldConstantsRule() {
+        this(false);
+    }
+
+    public FoldConstantsRule(boolean needMonotonicFunc) {
+        this.needMonotonicFunc = needMonotonicFunc;
+    }
 
     @Override
     public ScalarOperator visitCall(CallOperator call, ScalarOperatorRewriteContext context) {
         if (call.isAggregate() || notAllConstant(call.getChildren())) {
             return call;
         }
-        return ScalarOperatorEvaluator.INSTANCE.evaluation(call);
+        return ScalarOperatorEvaluator.INSTANCE.evaluation(call, needMonotonicFunc);
     }
 
     @Override
@@ -113,11 +138,14 @@ public class FoldConstantsRule extends BottomUpScalarOperatorRewriteRule {
 
         ConstantOperator child = (ConstantOperator) operator.getChild(0);
 
-        try {
-            return child.castTo(operator.getType());
-        } catch (Exception e) {
-            LOG.debug("Fold cast constant error: " + operator + ", " + child.toString());
+        Optional<ConstantOperator> result = child.castTo(operator.getType());
+        if (!result.isPresent()) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Fold cast constant error: " + operator + ", " + child.toString());
+            }
             return operator;
+        } else {
+            return result.get();
         }
     }
 
@@ -143,14 +171,9 @@ public class FoldConstantsRule extends BottomUpScalarOperatorRewriteRule {
     @Override
     public ScalarOperator visitBinaryPredicate(BinaryPredicateOperator predicate,
                                                ScalarOperatorRewriteContext context) {
-        if (!BinaryPredicateOperator.BinaryType.EQ_FOR_NULL.equals(predicate.getBinaryType())
+        if (!BinaryType.EQ_FOR_NULL.equals(predicate.getBinaryType())
                 && hasNull(predicate.getChildren())) {
             return ConstantOperator.createNull(Type.BOOLEAN);
-        }
-
-        ScalarOperator r = simplifyComparisonWithSameColumn(predicate);
-        if (r != null) {
-            return r;
         }
 
         if (notAllConstant(predicate.getChildren())) {
@@ -194,30 +217,6 @@ public class FoldConstantsRule extends BottomUpScalarOperatorRewriteRule {
             return ConstantOperator.createNull(Type.BOOLEAN);
         }
         return predicate;
-    }
-
-    //Simplify the comparison result of the same column
-    //eg a>=a with not nullable transform to true constant;
-    private ScalarOperator simplifyComparisonWithSameColumn(BinaryPredicateOperator predicate) {
-        if (predicate.getChild(0).equals(predicate.getChild(1))) {
-            if (predicate.getChild(0).isNullable()
-                    && predicate.getBinaryType().equals(BinaryPredicateOperator.BinaryType.EQ_FOR_NULL)) {
-                return ConstantOperator.createBoolean(true);
-            } else if (!predicate.getChild(0).isNullable()) {
-                switch (predicate.getBinaryType()) {
-                    case EQ:
-                    case EQ_FOR_NULL:
-                    case GE:
-                    case LE:
-                        return ConstantOperator.createBoolean(true);
-                    case NE:
-                    case LT:
-                    case GT:
-                        return ConstantOperator.createBoolean(false);
-                }
-            }
-        }
-        return null;
     }
 
     private boolean notAllConstant(List<ScalarOperator> operators) {

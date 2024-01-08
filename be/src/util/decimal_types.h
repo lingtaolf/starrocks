@@ -1,4 +1,16 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #pragma once
 
@@ -93,8 +105,18 @@ inline constexpr T get_scale_factor(int n) {
 }
 
 template <typename T>
+inline constexpr T get_max_decimal(int predision) {
+    return get_scale_factor<T>(predision) - 1;
+}
+
+template <typename T>
+inline constexpr T get_min_decimal(int predision) {
+    return -get_max_decimal<T>(predision);
+}
+
+template <typename T>
 inline constexpr T get_max_decimal() {
-    return get_scale_factor<T>(decimal_precision_limit<T>) - 1;
+    return get_max_decimal<T>(decimal_precision_limit<T>);
 }
 
 template <typename T>
@@ -128,6 +150,6 @@ using DecimalType = std::enable_if_t<is_underlying_type_of_decimal<T>, T>;
 template <typename T>
 using FloatType = std::enable_if_t<std::is_floating_point_v<T>, T>;
 template <typename T>
-using IntegerType = std::enable_if_t<starrocks::is_signed_integer<T>, T>;
+using IntegerType = std::enable_if_t<is_signed_integer<T>, T>;
 
 } // namespace starrocks

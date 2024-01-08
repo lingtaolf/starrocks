@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/load/loadv2/LoadJobTest.java
 
@@ -24,8 +37,6 @@ package com.starrocks.load.loadv2;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.starrocks.analysis.LoadStmt;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.DuplicatedRequestException;
@@ -36,20 +47,25 @@ import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.metric.LongCounterMetric;
 import com.starrocks.metric.MetricRepo;
 import com.starrocks.persist.EditLog;
-import com.starrocks.task.MasterTask;
-import com.starrocks.task.MasterTaskExecutor;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.LoadStmt;
+import com.starrocks.task.LeaderTask;
+import com.starrocks.task.LeaderTaskExecutor;
 import com.starrocks.thrift.TUniqueId;
 import com.starrocks.transaction.BeginTransactionException;
 import com.starrocks.transaction.GlobalTransactionMgr;
 import com.starrocks.transaction.TransactionState;
 import mockit.Expectations;
 import mockit.Injectable;
+import mockit.Mock;
+import mockit.MockUp;
 import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
 
 public class LoadJobTest {
 
@@ -59,12 +75,12 @@ public class LoadJobTest {
     }
 
     @Test
-    public void testGetDbNotExists(@Mocked Catalog catalog) {
+    public void testGetDbNotExists(@Mocked GlobalStateMgr globalStateMgr) {
         LoadJob loadJob = new BrokerLoadJob();
         Deencapsulation.setField(loadJob, "dbId", 1L);
         new Expectations() {
             {
-                catalog.getDb(1L);
+                globalStateMgr.getDb(1L);
                 minTimes = 0;
                 result = null;
             }
@@ -111,7 +127,7 @@ public class LoadJobTest {
 
     @Test
     public void testExecute(@Mocked GlobalTransactionMgr globalTransactionMgr,
-                            @Mocked MasterTaskExecutor masterTaskExecutor)
+                            @Mocked LeaderTaskExecutor leaderTaskExecutor)
             throws LabelAlreadyUsedException, BeginTransactionException, AnalysisException, DuplicatedRequestException {
         LoadJob loadJob = new BrokerLoadJob();
         new Expectations() {
@@ -121,9 +137,17 @@ public class LoadJobTest {
                         (TransactionState.LoadJobSourceType) any, anyLong, anyLong);
                 minTimes = 0;
                 result = 1;
-                masterTaskExecutor.submit((MasterTask) any);
+                leaderTaskExecutor.submit((LeaderTask) any);
                 minTimes = 0;
                 result = true;
+            }
+        };
+
+        GlobalStateMgr.getCurrentState().setEditLog(new EditLog(new ArrayBlockingQueue<>(100)));
+        new MockUp<EditLog>() {
+            @Mock
+            public void logSaveNextId(long nextId) {
+
             }
         };
 
@@ -159,6 +183,7 @@ public class LoadJobTest {
     @Test
     public void testProcessTimeoutWithLongTimeoutSecond() {
         LoadJob loadJob = new BrokerLoadJob();
+        Deencapsulation.setField(loadJob, "createTimestamp", System.currentTimeMillis());
         Deencapsulation.setField(loadJob, "timeoutSecond", 1000L);
 
         loadJob.processTimeout();
@@ -166,12 +191,12 @@ public class LoadJobTest {
     }
 
     @Test
-    public void testProcessTimeout(@Mocked Catalog catalog, @Mocked EditLog editLog) {
+    public void testProcessTimeout(@Mocked GlobalStateMgr globalStateMgr, @Mocked EditLog editLog) {
         LoadJob loadJob = new BrokerLoadJob();
         Deencapsulation.setField(loadJob, "timeoutSecond", 0);
         new Expectations() {
             {
-                catalog.getEditLog();
+                globalStateMgr.getEditLog();
                 minTimes = 0;
                 result = editLog;
             }
@@ -186,7 +211,6 @@ public class LoadJobTest {
         LoadJob loadJob = new BrokerLoadJob();
         loadJob.updateState(JobState.LOADING);
         Assert.assertEquals(JobState.LOADING, loadJob.getState());
-        Assert.assertNotEquals(-1, (long) Deencapsulation.getField(loadJob, "loadStartTimestamp"));
     }
 
     @Test
@@ -198,10 +222,10 @@ public class LoadJobTest {
         LoadJob loadJob = new BrokerLoadJob();
         loadJob.idToTasks.put(1L, loadTask1);
 
-        // TxnStateCallbackFactory factory = Catalog.getCurrentCatalog().getGlobalTransactionMgr().getCallbackFactory();
-        Catalog catalog = Catalog.getCurrentCatalog();
-        GlobalTransactionMgr mgr = new GlobalTransactionMgr(catalog);
-        Deencapsulation.setField(catalog, "globalTransactionMgr", mgr);
+        // TxnStateCallbackFactory factory = GlobalStateMgr.getCurrentState().getGlobalTransactionMgr().getCallbackFactory();
+        GlobalStateMgr globalStateMgr = GlobalStateMgr.getCurrentState();
+        GlobalTransactionMgr mgr = new GlobalTransactionMgr(globalStateMgr);
+        Deencapsulation.setField(globalStateMgr, "globalTransactionMgr", mgr);
         Assert.assertEquals(1, loadJob.idToTasks.size());
         loadJob.updateState(JobState.FINISHED);
         Assert.assertEquals(JobState.FINISHED, loadJob.getState());

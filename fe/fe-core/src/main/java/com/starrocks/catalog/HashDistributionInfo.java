@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/HashDistributionInfo.java
 
@@ -22,10 +35,14 @@
 package com.starrocks.catalog;
 
 import com.google.common.base.Joiner;
+import com.google.common.base.Objects;
 import com.google.common.collect.Lists;
 import com.google.gson.annotations.SerializedName;
-import com.starrocks.analysis.DistributionDesc;
-import com.starrocks.analysis.HashDistributionDesc;
+import com.starrocks.planner.OlapScanNode;
+import com.starrocks.sql.ast.DistributionDesc;
+import com.starrocks.sql.ast.HashDistributionDesc;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -42,6 +59,8 @@ public class HashDistributionInfo extends DistributionInfo {
     @SerializedName(value = "bucketNum")
     private int bucketNum;
 
+    private static final Logger LOG = LogManager.getLogger(OlapScanNode.class);
+
     public HashDistributionInfo() {
         super();
         this.distributionColumns = new ArrayList<Column>();
@@ -53,6 +72,11 @@ public class HashDistributionInfo extends DistributionInfo {
         this.bucketNum = bucketNum;
     }
 
+    @Override
+    public boolean supportColocate() {
+        return true;
+    }
+
     public List<Column> getDistributionColumns() {
         return distributionColumns;
     }
@@ -60,6 +84,25 @@ public class HashDistributionInfo extends DistributionInfo {
     @Override
     public int getBucketNum() {
         return bucketNum;
+    }
+
+    @Override
+    public String getDistributionKey() {
+        List<String> colNames = Lists.newArrayList();
+        for (Column column : distributionColumns) {
+            colNames.add("`" + column.getName() + "`");
+        }
+        String colList = Joiner.on(", ").join(colNames);
+        return colList;
+    }
+
+    public void setDistributionColumns(List<Column> columns) {
+        this.distributionColumns = columns;
+    }
+
+    @Override
+    public void setBucketNum(int bucketNum) {
+        this.bucketNum = bucketNum;
     }
 
     public void write(DataOutput out) throws IOException {
@@ -88,16 +131,22 @@ public class HashDistributionInfo extends DistributionInfo {
         return distributionInfo;
     }
 
-    public boolean equals(DistributionInfo info) {
-        if (this == info) {
+    @Override
+    public int hashCode() {
+        return Objects.hashCode(type, bucketNum, distributionColumns);
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
             return true;
         }
 
-        if (!(info instanceof HashDistributionInfo)) {
+        if (!(other instanceof HashDistributionInfo)) {
             return false;
         }
 
-        HashDistributionInfo hashDistributionInfo = (HashDistributionInfo) info;
+        HashDistributionInfo hashDistributionInfo = (HashDistributionInfo) other;
 
         return type == hashDistributionInfo.type
                 && bucketNum == hashDistributionInfo.bucketNum
@@ -115,6 +164,11 @@ public class HashDistributionInfo extends DistributionInfo {
     }
 
     @Override
+    public HashDistributionInfo copy() {
+        return new HashDistributionInfo(bucketNum, distributionColumns);
+    }
+
+    @Override
     public String toSql() {
         StringBuilder builder = new StringBuilder();
         builder.append("DISTRIBUTED BY HASH(");
@@ -125,8 +179,10 @@ public class HashDistributionInfo extends DistributionInfo {
         }
         String colList = Joiner.on(", ").join(colNames);
         builder.append(colList);
-
-        builder.append(") BUCKETS ").append(bucketNum).append(" ");
+        builder.append(")");
+        if (bucketNum > 0) {
+            builder.append(" BUCKETS ").append(bucketNum).append(" ");
+        }
         return builder.toString();
     }
 
@@ -141,8 +197,9 @@ public class HashDistributionInfo extends DistributionInfo {
         }
         builder.append("]; ");
 
-        builder.append("bucket num: ").append(bucketNum).append("; ");
-        ;
+        if (bucketNum > 0) {
+            builder.append("bucket num: ").append(bucketNum).append("; ");
+        }
 
         return builder.toString();
     }

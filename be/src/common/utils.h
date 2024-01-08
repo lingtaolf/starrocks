@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/common/utils.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -37,9 +33,9 @@ struct AuthInfo {
 template <class T>
 void set_request_auth(T* req, const AuthInfo& auth) {
     if (auth.auth_code != -1) {
-        // if auth_code is set, no need to set other info
+        // If 'auth_code' is set, no need to set other info.
         req->__set_auth_code(auth.auth_code);
-        // user name and passwd is unused, but they are required field.
+        // User name and passwd is unused, but they are required field.
         // so they have to be set.
         req->user = "";
         req->passwd = "";

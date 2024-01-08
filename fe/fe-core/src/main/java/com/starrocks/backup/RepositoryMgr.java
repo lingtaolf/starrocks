@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/backup/RepositoryMgr.java
 
@@ -23,10 +36,12 @@ package com.starrocks.backup;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.gson.annotations.SerializedName;
 import com.starrocks.backup.Status.ErrCode;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.common.io.Writable;
 import com.starrocks.common.util.Daemon;
+import com.starrocks.persist.gson.GsonPostProcessable;
+import com.starrocks.server.GlobalStateMgr;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -40,17 +55,18 @@ import java.util.concurrent.locks.ReentrantLock;
 /*
  * A manager to manage all backup repositories
  */
-public class RepositoryMgr extends Daemon implements Writable {
+public class RepositoryMgr extends Daemon implements Writable, GsonPostProcessable {
     private static final Logger LOG = LogManager.getLogger(RepositoryMgr.class);
 
     // all key should be in lower case
-    private Map<String, Repository> repoNameMap = Maps.newConcurrentMap();
-    private Map<Long, Repository> repoIdMap = Maps.newConcurrentMap();
+    @SerializedName("rp")
+    private final Map<String, Repository> repoNameMap = Maps.newConcurrentMap();
+    private final Map<Long, Repository> repoIdMap = Maps.newConcurrentMap();
 
-    private ReentrantLock lock = new ReentrantLock();
+    private final ReentrantLock lock = new ReentrantLock();
 
     public RepositoryMgr() {
-        super(Repository.class.getSimpleName(), 600 * 1000 /* 10min */);
+        super(Repository.class.getSimpleName(), 600L * 1000L /* 10min */);
     }
 
     @Override
@@ -78,7 +94,7 @@ public class RepositoryMgr extends Daemon implements Writable {
 
                 if (!isReplay) {
                     // write log
-                    Catalog.getCurrentCatalog().getEditLog().logCreateRepository(repo);
+                    GlobalStateMgr.getCurrentState().getEditLog().logCreateRepository(repo);
                 }
 
                 LOG.info("successfully adding repo {} to repository mgr. is replay: {}",
@@ -108,7 +124,7 @@ public class RepositoryMgr extends Daemon implements Writable {
 
                 if (!isReplay) {
                     // log
-                    Catalog.getCurrentCatalog().getEditLog().logDropRepository(repoName);
+                    GlobalStateMgr.getCurrentState().getEditLog().logDropRepository(repoName);
                 }
                 LOG.info("successfully removing repo {} from repository mgr", repoName);
                 return Status.OK;
@@ -146,6 +162,13 @@ public class RepositoryMgr extends Daemon implements Writable {
         for (int i = 0; i < size; i++) {
             Repository repo = Repository.read(in);
             repoNameMap.put(repo.getName(), repo);
+            repoIdMap.put(repo.getId(), repo);
+        }
+    }
+
+    @Override
+    public void gsonPostProcess() throws IOException {
+        for (Repository repo : repoNameMap.values()) {
             repoIdMap.put(repo.getId(), repo);
         }
     }

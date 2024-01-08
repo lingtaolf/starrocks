@@ -1,4 +1,17 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.sql.plan;
 
@@ -56,8 +69,10 @@ public class AggTableTest extends PlanTestBase {
 
     @Test
     public void testSingleAgg6() throws Exception {
+        connectContext.getSessionVariable().setEnableRewriteSumByAssociativeRule(false);
         String sql = getFragmentPlan("select SUM(v3 + 1) from test_agg");
         assertTestAggOFF(sql, "The parameter of aggregate function isn't value column or CAST/CASE-WHEN expression");
+        connectContext.getSessionVariable().setEnableRewriteSumByAssociativeRule(true);
     }
 
     @Test
@@ -82,6 +97,18 @@ public class AggTableTest extends PlanTestBase {
     public void testSingleAgg10() throws Exception {
         String sql = getFragmentPlan("select SUM(case k1 when k2 then v3 when 2 then v5 else v6 end) from test_agg");
         assertTestAggON(sql);
+
+        sql = getFragmentPlan("select SUM(case k1 when k2 then v3 else v6 end) from test_agg");
+        assertTestAggON(sql);
+
+        sql = getFragmentPlan("select SUM(if(k1 = k2, v3, v6)) from test_agg");
+        assertTestAggON(sql);
+
+        sql = getFragmentPlan("select SUM(if(k1, v3, NULL)) from test_agg");
+        assertTestAggON(sql);
+
+        sql = getFragmentPlan("select SUM(if(k1 = k2, 1, v6)) from test_agg");
+        assertTestAggOFF(sql, "The result of THEN isn't value column");
     }
 
     @Test
@@ -117,7 +144,7 @@ public class AggTableTest extends PlanTestBase {
     @Test
     public void testSingleAgg16() throws Exception {
         String sql = getFragmentPlan("select SUM(v3) from test_agg, t1 group by k1");
-        assertTestAggOFF(sql, "Has Join");
+        assertTestAggOFF(sql, "Has can not pre-aggregation Join");
     }
 
     @Test

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/util/spinlock.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,9 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_UTIL_SPINLOCK_H
-#define STARROCKS_BE_SRC_UTIL_SPINLOCK_H
-
+#pragma once
 #include "common/logging.h"
 
 namespace starrocks {
@@ -29,7 +23,7 @@ namespace starrocks {
 // Lightweight spinlock.
 class SpinLock {
 public:
-    SpinLock() : _locked(false) {
+    SpinLock() {
         // do nothing
     }
 
@@ -73,9 +67,7 @@ private:
     // TODO: how do we set this.
     static const int NUM_SPIN_CYCLES = 70;
     // TODO: pad this to be a cache line?
-    bool _locked;
+    bool _locked{false};
 };
 
 } // end namespace starrocks
-
-#endif // STARROCKS_BE_SRC_UTIL_SPINLOCK_H

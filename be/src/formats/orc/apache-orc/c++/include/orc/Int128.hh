@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/include/orc/Int128.hh
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -20,8 +16,7 @@
  * limitations under the License.
  */
 
-#ifndef ORC_INT_128
-#define ORC_INT_128
+#pragma once
 
 #include <stdexcept>
 #include <string>
@@ -363,4 +358,3 @@ Int128 scaleUpInt128ByPowerOfTen(Int128 value, int32_t power, bool& overflow);
    */
 Int128 scaleDownInt128ByPowerOfTen(Int128 value, int32_t power);
 } // namespace orc
-#endif

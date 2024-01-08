@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/catalog/MysqlTableTest.java
 
@@ -26,6 +39,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.FeConstants;
+import com.starrocks.server.GlobalStateMgr;
 import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
@@ -46,9 +60,9 @@ public class MysqlTableTest {
     private Map<String, String> properties;
 
     @Mocked
-    private Catalog catalog;
+    private GlobalStateMgr globalStateMgr;
 
-    private FakeCatalog fakeCatalog;
+    private FakeGlobalStateMgr fakeGlobalStateMgr;
 
     @Before
     public void setUp() {
@@ -65,9 +79,9 @@ public class MysqlTableTest {
         properties.put("database", "db");
         properties.put("table", "tbl");
 
-        fakeCatalog = new FakeCatalog();
-        FakeCatalog.setCatalog(catalog);
-        FakeCatalog.setMetaVersion(FeConstants.meta_version);
+        fakeGlobalStateMgr = new FakeGlobalStateMgr();
+        FakeGlobalStateMgr.setGlobalStateMgr(globalStateMgr);
+        FakeGlobalStateMgr.setMetaVersion(FeConstants.META_VERSION);
     }
 
     @Test

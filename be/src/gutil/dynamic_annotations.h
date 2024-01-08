@@ -54,8 +54,7 @@
       Macros are defined as calls to non-inlinable empty functions
       that are intercepted by Valgrind. */
 
-#ifndef __DYNAMIC_ANNOTATIONS_H__
-#define __DYNAMIC_ANNOTATIONS_H__
+#pragma once
 
 #ifndef DYNAMIC_ANNOTATIONS_ENABLED
 #define DYNAMIC_ANNOTATIONS_ENABLED 0
@@ -534,7 +533,7 @@ void __asan_unpoison_memory_region(void const volatile* addr, size_t size);
 
 // Sets the callback to be called right before death on error.
 // Passing 0 will unset the callback.
-void __asan_set_death_callback(void (*callback)(void));
+void __asan_set_death_callback(void (*callback)());
 
 #if defined(__SANITIZE_ADDRESS__) || defined(ADDRESS_SANITIZER)
 #define ASAN_SET_DEATH_CALLBACK(cb) __asan_set_death_callback((cb))
@@ -678,5 +677,3 @@ inline T ANNOTATE_UNPROTECTED_READ(const volatile T& x) {
 /* Undefine the macros intended only in this file. */
 #undef ANNOTALYSIS_STATIC_INLINE
 #undef ANNOTALYSIS_SEMICOLON_OR_EMPTY_BODY
-
-#endif /* __DYNAMIC_ANNOTATIONS_H__ */

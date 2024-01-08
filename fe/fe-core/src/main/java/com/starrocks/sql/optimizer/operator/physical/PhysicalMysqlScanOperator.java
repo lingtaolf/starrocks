@@ -1,35 +1,37 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package com.starrocks.sql.optimizer.operator.physical;
 
-import com.google.common.base.Objects;
-import com.starrocks.catalog.Column;
-import com.starrocks.catalog.Table;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.OperatorVisitor;
-import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalMysqlScanOperator;
 
-import java.util.Map;
+public class PhysicalMysqlScanOperator extends PhysicalScanOperator {
 
-public class PhysicalMysqlScanOperator extends PhysicalOperator {
-    private final Table table;
+    // Optional temporal clause for querying historical data
+    private String temporalClause;
 
-    private final Map<ColumnRefOperator, Column> columnRefMap;
-
-    public PhysicalMysqlScanOperator(Table table, Map<ColumnRefOperator, Column> columnRefMap) {
-        super(OperatorType.PHYSICAL_MYSQL_SCAN);
-        this.table = table;
-        this.columnRefMap = columnRefMap;
+    public PhysicalMysqlScanOperator(LogicalMysqlScanOperator scanOperator) {
+        super(OperatorType.PHYSICAL_MYSQL_SCAN, scanOperator);
+        temporalClause = scanOperator.getTemporalClause();
     }
 
-    public Table getTable() {
-        return table;
-    }
-
-    public Map<ColumnRefOperator, Column> getColumnRefMap() {
-        return columnRefMap;
+    public String getTemporalClause() {
+        return temporalClause;
     }
 
     @Override
@@ -40,22 +42,5 @@ public class PhysicalMysqlScanOperator extends PhysicalOperator {
     @Override
     public <R, C> R accept(OptExpressionVisitor<R, C> visitor, OptExpression optExpression, C context) {
         return visitor.visitPhysicalMysqlScan(optExpression, context);
-    }
-
-    @Override
-    public boolean equals(Object o) {
-        if (this == o) {
-            return true;
-        }
-        if (o == null || getClass() != o.getClass()) {
-            return false;
-        }
-        PhysicalMysqlScanOperator that = (PhysicalMysqlScanOperator) o;
-        return Objects.equal(table, that.table) && Objects.equal(columnRefMap, that.columnRefMap);
-    }
-
-    @Override
-    public int hashCode() {
-        return Objects.hashCode(table, columnRefMap);
     }
 }

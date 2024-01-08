@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/thrift_rpc_helper.cpp
 
@@ -25,13 +38,11 @@
 
 #include "common/status.h"
 #include "gen_cpp/FrontendService.h"
-#include "gen_cpp/FrontendService_types.h"
 #include "monotime.h"
 #include "runtime/client_cache.h"
 #include "runtime/exec_env.h"
 #include "runtime/runtime_state.h"
 #include "util/network_util.h"
-#include "util/runtime_profile.h"
 #include "util/thrift_util.h"
 
 namespace starrocks {
@@ -43,6 +54,7 @@ using apache::thrift::transport::TTransport;
 using apache::thrift::transport::TBufferedTransport;
 
 ExecEnv* ThriftRpcHelper::_s_exec_env;
+const char* ThriftRpcHelper::KInvalidMethodName = "Invalid method name";
 
 void ThriftRpcHelper::setup(ExecEnv* exec_env) {
     _s_exec_env = exec_env;
@@ -55,29 +67,28 @@ Status ThriftRpcHelper::rpc(const std::string& ip, const int32_t port,
     Status status;
     ClientConnection<T> client(_s_exec_env->get_client_cache<T>(), address, timeout_ms, &status);
     if (!status.ok()) {
-        LOG(WARNING) << "Connect frontent failed, address=" << address << ", status=" << status.get_error_msg();
+        LOG(WARNING) << "Connect frontend failed, address=" << address << ", status=" << status.message();
         return status;
     }
     try {
         try {
             callback(client);
         } catch (apache::thrift::transport::TTransportException& e) {
-            LOG(WARNING) << "retrying call frontend service after " << config::thrift_client_retry_interval_ms
-                         << " ms, address=" << address << ", reason=" << e.what();
-            SleepFor(MonoDelta::FromMilliseconds(config::thrift_client_retry_interval_ms));
             status = client.reopen(timeout_ms);
             if (!status.ok()) {
-                LOG(WARNING) << "client repoen failed. address=" << address << ", status=" << status.get_error_msg();
+                LOG(WARNING) << "client reopen failed. address=" << address << ", status=" << status.message();
                 return status;
             }
             callback(client);
         }
     } catch (apache::thrift::TException& e) {
-        LOG(WARNING) << "call frontend service failed, address=" << address << ", reason=" << e.what();
+        std::stringstream ss;
+        ss << "call frontend service failed, address=" << address << ", reason=" << e.what();
+        LOG(WARNING) << ss.str();
         SleepFor(MonoDelta::FromMilliseconds(config::thrift_client_retry_interval_ms * 2));
         // just reopen to disable this connection
-        client.reopen(timeout_ms);
-        return Status::ThriftRpcError("failed to call frontend service");
+        (void)client.reopen(timeout_ms);
+        return Status::ThriftRpcError(ss.str());
     }
     return Status::OK();
 }

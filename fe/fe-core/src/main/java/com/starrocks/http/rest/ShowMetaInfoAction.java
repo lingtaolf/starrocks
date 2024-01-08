@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/http/rest/ShowMetaInfoAction.java
 
@@ -22,14 +35,11 @@
 package com.starrocks.http.rest;
 
 import com.google.gson.Gson;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.MaterializedIndex;
 import com.starrocks.catalog.MaterializedIndex.IndexExtState;
 import com.starrocks.catalog.OlapTable;
-import com.starrocks.catalog.Partition;
-import com.starrocks.catalog.Replica;
-import com.starrocks.catalog.Replica.ReplicaState;
+import com.starrocks.catalog.PhysicalPartition;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.Table.TableType;
 import com.starrocks.catalog.Tablet;
@@ -40,6 +50,7 @@ import com.starrocks.http.BaseRequest;
 import com.starrocks.http.BaseResponse;
 import com.starrocks.http.IllegalArgException;
 import com.starrocks.persist.Storage;
+import com.starrocks.server.GlobalStateMgr;
 import io.netty.handler.codec.http.HttpMethod;
 import org.apache.commons.lang.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -99,16 +110,16 @@ public class ShowMetaInfoAction extends RestBaseAction {
 
     public Map<String, String> getHaInfo() {
         HashMap<String, String> feInfo = new HashMap<String, String>();
-        feInfo.put("role", Catalog.getCurrentCatalog().getFeType().toString());
-        if (Catalog.getCurrentCatalog().isMaster()) {
+        feInfo.put("role", GlobalStateMgr.getCurrentState().getFeType().toString());
+        if (GlobalStateMgr.getCurrentState().isLeader()) {
             feInfo.put("current_journal_id",
-                    String.valueOf(Catalog.getCurrentCatalog().getEditLog().getMaxJournalId()));
+                    String.valueOf(GlobalStateMgr.getCurrentState().getMaxJournalId()));
         } else {
             feInfo.put("current_journal_id",
-                    String.valueOf(Catalog.getCurrentCatalog().getReplayedJournalId()));
+                    String.valueOf(GlobalStateMgr.getCurrentState().getReplayedJournalId()));
         }
 
-        HAProtocol haProtocol = Catalog.getCurrentCatalog().getHaProtocol();
+        HAProtocol haProtocol = GlobalStateMgr.getCurrentState().getHaProtocol();
         if (haProtocol != null) {
 
             InetSocketAddress master = null;
@@ -143,11 +154,11 @@ public class ShowMetaInfoAction extends RestBaseAction {
             }
         }
 
-        feInfo.put("can_read", String.valueOf(Catalog.getCurrentCatalog().canRead()));
-        feInfo.put("is_ready", String.valueOf(Catalog.getCurrentCatalog().isReady()));
+        feInfo.put("can_read", String.valueOf(GlobalStateMgr.getCurrentState().canRead()));
+        feInfo.put("is_ready", String.valueOf(GlobalStateMgr.getCurrentState().isReady()));
         try {
             Storage storage = new Storage(Config.meta_dir + "/image");
-            feInfo.put("last_checkpoint_version", String.valueOf(storage.getImageSeq()));
+            feInfo.put("last_checkpoint_version", String.valueOf(storage.getImageJournalId()));
             long lastCheckpointTime = storage.getCurrentImageFile().lastModified();
             feInfo.put("last_checkpoint_time", String.valueOf(lastCheckpointTime));
         } catch (IOException e) {
@@ -158,11 +169,11 @@ public class ShowMetaInfoAction extends RestBaseAction {
 
     public Map<String, Long> getDataSize() {
         Map<String, Long> result = new HashMap<String, Long>();
-        List<String> dbNames = Catalog.getCurrentCatalog().getDbNames();
+        List<String> dbNames = GlobalStateMgr.getCurrentState().getDbNames();
 
         for (int i = 0; i < dbNames.size(); i++) {
             String dbName = dbNames.get(i);
-            Database db = Catalog.getCurrentCatalog().getDb(dbName);
+            Database db = GlobalStateMgr.getCurrentState().getDb(dbName);
 
             long totalSize = 0;
             List<Table> tables = db.getTables();
@@ -174,21 +185,12 @@ public class ShowMetaInfoAction extends RestBaseAction {
 
                 OlapTable olapTable = (OlapTable) table;
                 long tableSize = 0;
-                for (Partition partition : olapTable.getAllPartitions()) {
+                for (PhysicalPartition partition : olapTable.getAllPhysicalPartitions()) {
                     long partitionSize = 0;
                     for (MaterializedIndex mIndex : partition.getMaterializedIndices(IndexExtState.VISIBLE)) {
                         long indexSize = 0;
                         for (Tablet tablet : mIndex.getTablets()) {
-                            long maxReplicaSize = 0;
-                            for (Replica replica : tablet.getReplicas()) {
-                                if (replica.getState() == ReplicaState.NORMAL
-                                        || replica.getState() == ReplicaState.SCHEMA_CHANGE) {
-                                    if (replica.getDataSize() > maxReplicaSize) {
-                                        maxReplicaSize = replica.getDataSize();
-                                    }
-                                }
-                            } // end for replicas
-                            indexSize += maxReplicaSize;
+                            indexSize += tablet.getDataSize(true);
                         } // end for tablets
                         partitionSize += indexSize;
                     } // end for tables

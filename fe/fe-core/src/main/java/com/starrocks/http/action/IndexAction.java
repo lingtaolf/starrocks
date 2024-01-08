@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/http/action/IndexAction.java
 
@@ -21,6 +34,7 @@
 
 package com.starrocks.http.action;
 
+import com.starrocks.common.Config;
 import com.starrocks.common.Version;
 import com.starrocks.http.ActionController;
 import com.starrocks.http.BaseRequest;
@@ -62,7 +76,17 @@ public class IndexAction extends WebBaseAction {
     public void executeGet(BaseRequest request, BaseResponse response) {
         getPageHeader(request, response.getContent());
         appendVersionInfo(response.getContent());
-        appendHardwareInfo(response.getContent());
+        if (Config.http_web_page_display_hardware) {
+            try {
+                appendHardwareInfo(response.getContent());
+            } catch (Throwable t) {
+                response.getContent().append("<h2>Hardware Info</h2>");
+                response.getContent().append("<pre>Hardware info is generated with error: " + t.getMessage() + "</pre>");
+            }
+        } else {
+            response.getContent().append("<h2>Hardware Info</h2>");
+            response.getContent().append("<pre>Hardware info is disabled by config http_web_page_display_hardware</pre>");
+        }
         getPageFooter(response.getContent());
         writeResponse(request, response);
     }
@@ -78,7 +102,6 @@ public class IndexAction extends WebBaseAction {
     }
 
     private void appendHardwareInfo(StringBuilder buffer) {
-        List<String> hardwareInfo = new ArrayList<>();
         SystemInfo si = new SystemInfo();
         OperatingSystem os = si.getOperatingSystem();
         HardwareAbstractionLayer hal = si.getHardware();
@@ -113,8 +136,9 @@ public class IndexAction extends WebBaseAction {
         processorInfo.add(" " + processor.getPhysicalProcessorCount() + " physical CPU core(s)");
         processorInfo.add(" " + processor.getLogicalProcessorCount() + " logical CPU(s)");
 
-        processorInfo.add("Identifier: " + processor.getIdentifier());
-        processorInfo.add("ProcessorID: " + processor.getProcessorID());
+        CentralProcessor.ProcessorIdentifier processorIdentifier = processor.getProcessorIdentifier();
+        processorInfo.add("Identifier: " + processorIdentifier.getIdentifier());
+        processorInfo.add("ProcessorID: " + processorIdentifier.getProcessorID());
         processorInfo.add("Context Switches/Interrupts: " + processor.getContextSwitches()
                 + " / " + processor.getInterrupts() + "\n");
 
@@ -160,7 +184,8 @@ public class IndexAction extends WebBaseAction {
             procCpu.append(String.format(" %.1f%%", avg * 100));
         }
         processorInfo.add(procCpu.toString());
-        long freq = processor.getVendorFreq();
+
+        long freq = processorIdentifier.getVendorFreq();
         if (freq > 0) {
             processorInfo.add("Vendor Frequency: " + FormatUtil.formatHertz(freq));
         }
@@ -196,7 +221,7 @@ public class IndexAction extends WebBaseAction {
         List<String> processInfo = new ArrayList<>();
         processInfo.add("Processes: " + os.getProcessCount() + ", Threads: " + os.getThreadCount());
         // Sort by highest CPU
-        List<OSProcess> procs = Arrays.asList(os.getProcesses(5, OperatingSystem.ProcessSort.CPU));
+        List<OSProcess> procs = os.getProcesses(null, OperatingSystem.ProcessSorting.CPU_DESC, 5);
 
         processInfo.add("   PID  %CPU %MEM       VSZ       RSS Name");
         for (int i = 0; i < procs.size() && i < 5; i++) {
@@ -209,7 +234,7 @@ public class IndexAction extends WebBaseAction {
         return processInfo;
     }
 
-    private List<String> getDisks(HWDiskStore[] diskStores) {
+    private List<String> getDisks(List<HWDiskStore> diskStores) {
         List<String> diskInfo = new ArrayList<>();
         diskInfo.add("Disks:");
         for (HWDiskStore disk : diskStores) {
@@ -223,7 +248,7 @@ public class IndexAction extends WebBaseAction {
                             readwrite ? disk.getWrites() : "?",
                             readwrite ? FormatUtil.formatBytes(disk.getWriteBytes()) : "?",
                             readwrite ? disk.getTransferTime() : "?"));
-            HWPartition[] partitions = disk.getPartitions();
+            List<HWPartition> partitions = disk.getPartitions();
             for (HWPartition part : partitions) {
                 diskInfo.add(String.format(" |-- %s: %s (%s) Maj:Min=%d:%d, size: %s%s", part.getIdentification(),
                         part.getName(), part.getType(), part.getMajor(), part.getMinor(),
@@ -241,7 +266,7 @@ public class IndexAction extends WebBaseAction {
         fsInfo.add(String.format(" File Descriptors: %d/%d", fileSystem.getOpenFileDescriptors(),
                 fileSystem.getMaxFileDescriptors()));
 
-        OSFileStore[] fsArray = fileSystem.getFileStores();
+        List<OSFileStore> fsArray = fileSystem.getFileStores();
         for (OSFileStore fs : fsArray) {
             long usable = fs.getUsableSpace();
             long total = fs.getTotalSpace();
@@ -257,7 +282,7 @@ public class IndexAction extends WebBaseAction {
         return fsInfo;
     }
 
-    private List<String> getNetworkInterfaces(NetworkIF[] networkIFs) {
+    private List<String> getNetworkInterfaces(List<NetworkIF> networkIFs) {
         List<String> getNetwork = new ArrayList<>();
         getNetwork.add("Network interfaces:");
         for (NetworkIF net : networkIFs) {

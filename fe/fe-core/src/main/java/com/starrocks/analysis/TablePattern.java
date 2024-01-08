@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/analysis/TablePattern.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -25,7 +21,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.starrocks.cluster.ClusterNamespace;
 import com.starrocks.common.AnalysisException;
-import com.starrocks.common.FeNameFormat;
+import com.starrocks.sql.analyzer.FeNameFormat;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.mysql.privilege.Auth.PrivLevel;
@@ -48,7 +44,7 @@ public class TablePattern implements Writable {
     static {
         ALL = new TablePattern("*", "*");
         try {
-            ALL.analyze("");
+            ALL.analyze();
         } catch (AnalysisException e) {
             // will not happen
         }
@@ -82,7 +78,7 @@ public class TablePattern implements Writable {
         }
     }
 
-    public void analyze(String clusterName) throws AnalysisException {
+    public void analyze() throws AnalysisException {
         if (isAnalyzed) {
             return;
         }
@@ -92,7 +88,6 @@ public class TablePattern implements Writable {
 
         if (!db.equals("*")) {
             FeNameFormat.checkDbName(db);
-            db = ClusterNamespace.getFullName(clusterName, db);
         }
 
         if (!tbl.equals("*")) {
@@ -134,12 +129,17 @@ public class TablePattern implements Writable {
     @Override
     public void write(DataOutput out) throws IOException {
         Preconditions.checkState(isAnalyzed);
-        Text.writeString(out, db);
+        // compatible with old version
+        if (db.equals("*")) {
+            Text.writeString(out, db);
+        } else {
+            Text.writeString(out, ClusterNamespace.getFullName(db));
+        }
         Text.writeString(out, tbl);
     }
 
     public void readFields(DataInput in) throws IOException {
-        db = Text.readString(in);
+        db = ClusterNamespace.getNameFromFullName(Text.readString(in));
         tbl = Text.readString(in);
         isAnalyzed = true;
     }

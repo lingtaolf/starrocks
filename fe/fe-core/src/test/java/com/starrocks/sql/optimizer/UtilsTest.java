@@ -1,24 +1,53 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.sql.optimizer;
 
+
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.starrocks.analysis.BinaryType;
+import com.starrocks.analysis.JoinOperator;
 import com.starrocks.catalog.Column;
+import com.starrocks.catalog.OlapTable;
+import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Type;
-import com.starrocks.sql.optimizer.operator.OperatorType;
-import com.starrocks.sql.optimizer.operator.logical.LogicalFilterOperator;
+import com.starrocks.common.Config;
+import com.starrocks.common.DdlException;
+import com.starrocks.common.FeConstants;
+import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.CreateDbStmt;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalOlapScanOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalProjectOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalValuesOperator;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
-import mockit.Expectations;
-import mockit.Mocked;
+import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
+import com.starrocks.statistic.StatsConstants;
+import com.starrocks.utframe.StarRocksAssert;
+import com.starrocks.utframe.UtFrameUtils;
+import org.junit.Assert;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -27,6 +56,87 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class UtilsTest {
+    private static final String DEFAULT_CREATE_TABLE_TEMPLATE = ""
+            + "CREATE TABLE IF NOT EXISTS `table_statistic_v1` (\n"
+            + "  `table_id` bigint NOT NULL,\n"
+            + "  `column_name` varchar(65530) NOT NULL,\n"
+            + "  `db_id` bigint NOT NULL,\n"
+            + "  `table_name` varchar(65530) NOT NULL,\n"
+            + "  `db_name` varchar(65530) NOT NULL,\n"
+            + "  `row_count` bigint NOT NULL,\n"
+            + "  `data_size` bigint NOT NULL,\n"
+            + "  `distinct_count` bigint NOT NULL,\n"
+            + "  `null_count` bigint NOT NULL,\n"
+            + "  `max` varchar(65530) NOT NULL,\n"
+            + "  `min` varchar(65530) NOT NULL,\n"
+            + "  `update_time` datetime NOT NULL\n"
+            + "  )\n"
+            + "ENGINE=OLAP\n"
+            + "UNIQUE KEY(`table_id`,  `column_name`, `db_id`)\n"
+            + "DISTRIBUTED BY HASH(`table_id`, `column_name`, `db_id`) BUCKETS 2\n"
+            + "PROPERTIES (\n"
+            + "\"replication_num\" = \"1\",\n"
+            + "\"in_memory\" = \"false\"\n"
+            + ");";
+
+    private static ConnectContext connectContext;
+    private static StarRocksAssert starRocksAssert;
+
+    protected static void setTableStatistics(OlapTable table, long rowCount) {
+        for (Partition partition : table.getAllPartitions()) {
+            partition.getBaseIndex().setRowCount(rowCount);
+        }
+    }
+
+    @BeforeClass
+    public static void beforeClass() throws Exception {
+        Config.alter_scheduler_interval_millisecond = 1;
+        UtFrameUtils.createMinStarRocksCluster();
+
+        // create connect context
+        connectContext = UtFrameUtils.createDefaultCtx();
+        starRocksAssert = new StarRocksAssert(connectContext);
+        String dbName = "test";
+        starRocksAssert.withDatabase(dbName).useDatabase(dbName);
+
+        connectContext.getSessionVariable().setMaxTransformReorderJoins(8);
+        connectContext.getSessionVariable().setOptimizerExecuteTimeout(30000);
+        connectContext.getSessionVariable().setEnableReplicationJoin(false);
+
+        starRocksAssert.withTable("CREATE TABLE `t0` (\n" +
+                "  `v1` bigint NULL COMMENT \"\",\n" +
+                "  `v2` bigint NULL COMMENT \"\",\n" +
+                "  `v3` bigint NULL\n" +
+                ") ENGINE=OLAP\n" +
+                "DUPLICATE KEY(`v1`, `v2`, v3)\n" +
+                "DISTRIBUTED BY HASH(`v1`) BUCKETS 3\n" +
+                "PROPERTIES (\n" +
+                "\"replication_num\" = \"1\",\n" +
+                "\"in_memory\" = \"false\"\n" +
+                ");");
+
+        starRocksAssert.withTable("CREATE TABLE `t1` (\n" +
+                "  `v1` bigint NULL COMMENT \"\",\n" +
+                "  `v2` bigint NULL COMMENT \"\",\n" +
+                "  `v3` bigint NULL\n" +
+                ") ENGINE=OLAP\n" +
+                "AGGREGATE KEY(`v1`, `v2`, v3)\n" +
+                "DISTRIBUTED BY HASH(`v1`) BUCKETS 3\n" +
+                "PROPERTIES (\n" +
+                "\"replication_num\" = \"1\",\n" +
+                "\"in_memory\" = \"false\"\n" +
+                ");");
+
+        CreateDbStmt dbStmt = new CreateDbStmt(false, StatsConstants.STATISTICS_DB_NAME);
+        try {
+            GlobalStateMgr.getCurrentState().getMetadata().createDb(dbStmt.getFullDbName());
+        } catch (DdlException e) {
+            return;
+        }
+        starRocksAssert.useDatabase(StatsConstants.STATISTICS_DB_NAME);
+        starRocksAssert.withTable(DEFAULT_CREATE_TABLE_TEMPLATE);
+        FeConstants.runningUnitTest = true;
+    }
 
     @Test
     public void extractConjuncts() {
@@ -54,7 +164,7 @@ public class UtilsTest {
                 new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND,
                         ConstantOperator.createBoolean(false),
                         new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND,
-                                new BinaryPredicateOperator(BinaryPredicateOperator.BinaryType.EQ,
+                                new BinaryPredicateOperator(BinaryType.EQ,
                                         new ColumnRefOperator(3, Type.INT, "hello", true),
                                         ConstantOperator.createInt(1)),
                                 new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND,
@@ -70,57 +180,6 @@ public class UtilsTest {
         assertEquals(3, list.get(0).getId());
         assertEquals(1, list.get(1).getId());
         assertEquals(2, list.get(2).getId());
-    }
-
-    @Test
-    public void extractScanColumn(@Mocked LogicalOlapScanOperator so1,
-                                  @Mocked LogicalOlapScanOperator so2) {
-        Map<ColumnRefOperator, Column> col1 = Maps.newHashMap();
-        col1.put(new ColumnRefOperator(1, Type.INT, "name", true), null);
-        col1.put(new ColumnRefOperator(2, Type.INT, "age", true), null);
-        Map<ColumnRefOperator, Column> col2 = Maps.newHashMap();
-        col2.put(new ColumnRefOperator(3, Type.INT, "id", true), null);
-
-        new Expectations(so1, so2) {{
-            so1.getOpType();
-            minTimes = 0;
-            result = OperatorType.LOGICAL_OLAP_SCAN;
-
-            so1.getColumnRefMap();
-            minTimes = 0;
-            result = col1;
-
-            so2.getOpType();
-            minTimes = 0;
-            result = OperatorType.LOGICAL_OLAP_SCAN;
-
-            so2.getColumnRefMap();
-            minTimes = 0;
-            result = col2;
-        }};
-
-        GroupExpression scan1 = new GroupExpression(so1, Lists.newArrayList());
-        Group gs1 = new Group(1);
-        gs1.addExpression(scan1);
-        GroupExpression scan2 = new GroupExpression(so2, Lists.newArrayList());
-        Group gs2 = new Group(2);
-        gs2.addExpression(scan2);
-
-        GroupExpression join =
-                new GroupExpression(new LogicalJoinOperator(), Lists.newArrayList(gs1, gs2));
-        Group gj = new Group(3);
-        gj.addExpression(join);
-
-        GroupExpression filter = new GroupExpression(new LogicalFilterOperator(ConstantOperator.createBoolean(false)),
-                Lists.newArrayList(gj));
-
-        List<ColumnRefOperator> list = Utils.extractScanColumn(filter);
-
-        System.out.println(list);
-        assertEquals(3, list.size());
-        assertEquals(1, list.get(0).getId());
-        assertEquals(2, list.get(1).getId());
-        assertEquals(3, list.get(2).getId());
     }
 
     @Test
@@ -196,5 +255,125 @@ public class UtilsTest {
 
         assertEquals(5, ((ConstantOperator) rightChild.getChild(0)).getInt());
         assertEquals(6, ((ConstantOperator) rightChild.getChild(1)).getInt());
+    }
+
+    @Test
+    public void unknownStats1() {
+        GlobalStateMgr globalStateMgr = connectContext.getGlobalStateMgr();
+
+        OlapTable t0 = (OlapTable) globalStateMgr.getDb("test").getTable("t0");
+        setTableStatistics(t0, 10);
+        GlobalStateMgr.getCurrentStatisticStorage().addColumnStatistic(t0, "v1",
+                new ColumnStatistic(1, 1, 0, 1, 1));
+
+        Map<ColumnRefOperator, Column> columnRefMap = new HashMap<>();
+        columnRefMap.put(new ColumnRefOperator(1, Type.BIGINT, "v1", true),
+                t0.getBaseColumn("v1"));
+        columnRefMap.put(new ColumnRefOperator(2, Type.BIGINT, "v2", true),
+                t0.getBaseColumn("v2"));
+        columnRefMap.put(new ColumnRefOperator(3, Type.BIGINT, "v3", true),
+                t0.getBaseColumn("v3"));
+
+        OptExpression opt =
+                new OptExpression(new LogicalOlapScanOperator(t0, columnRefMap, Maps.newHashMap(), null, -1, null));
+        Assert.assertTrue(Utils.hasUnknownColumnsStats(opt));
+
+        GlobalStateMgr.getCurrentStatisticStorage().addColumnStatistic(t0, "v2",
+                new ColumnStatistic(1, 1, 0, 1, 1));
+        GlobalStateMgr.getCurrentStatisticStorage().addColumnStatistic(t0, "v3",
+                new ColumnStatistic(1, 1, 0, 1, 1));
+        opt = new OptExpression(new LogicalOlapScanOperator(t0, columnRefMap, Maps.newHashMap(), null, -1, null));
+        Assert.assertFalse(Utils.hasUnknownColumnsStats(opt));
+    }
+
+    @Test
+    public void unknownStats2() {
+        GlobalStateMgr globalStateMgr = connectContext.getGlobalStateMgr();
+        OlapTable t1 = (OlapTable) globalStateMgr.getDb("test").getTable("t1");
+        OptExpression opt =
+                new OptExpression(
+                        new LogicalOlapScanOperator(t1, Maps.newHashMap(), Maps.newHashMap(), null, -1, null));
+        Assert.assertFalse(Utils.hasUnknownColumnsStats(opt));
+    }
+
+    @Test
+    public void testCountJoinNode() {
+        OptExpression root = OptExpression.create(
+                new LogicalJoinOperator(JoinOperator.LEFT_OUTER_JOIN, null),
+                OptExpression.create(new LogicalJoinOperator(JoinOperator.LEFT_OUTER_JOIN, null),
+                        OptExpression.create(new LogicalJoinOperator(JoinOperator.LEFT_SEMI_JOIN, null)),
+                        OptExpression.create(new LogicalValuesOperator(Lists.newArrayList(), Lists.newArrayList()))),
+                OptExpression.create(new LogicalValuesOperator(Lists.newArrayList(), Lists.newArrayList())));
+
+        assertEquals(1, Utils.countJoinNodeSize(root, JoinOperator.semiAntiJoinSet()));
+
+
+        //      outer join (left child semi join node = 1, right child semi join node = 3) => result is 3
+        //      /         \
+        //  semi join      semi join (left child semi join node = 1, right child semi join node = 1)
+        //                   /    \            => result is 1 + 1 + 1 = 3
+        //           outer join   semi join
+        //             /      \
+        //         semi join   node
+        root = OptExpression.create(
+                new LogicalJoinOperator(JoinOperator.LEFT_OUTER_JOIN, null),
+                OptExpression.create(new LogicalJoinOperator(JoinOperator.LEFT_SEMI_JOIN, null)),
+                OptExpression.create(new LogicalProjectOperator(Maps.newHashMap()),
+                        OptExpression.create(new LogicalJoinOperator(JoinOperator.LEFT_SEMI_JOIN, null),
+                                OptExpression.create(new LogicalJoinOperator(JoinOperator.LEFT_OUTER_JOIN, null),
+                                        OptExpression.create(
+                                                new LogicalJoinOperator(JoinOperator.LEFT_SEMI_JOIN, null)),
+                                        OptExpression.create(
+                                                new LogicalValuesOperator(Lists.newArrayList(), Lists.newArrayList()))),
+                                OptExpression.create(
+                                        new LogicalJoinOperator(JoinOperator.LEFT_SEMI_JOIN, null)))));
+
+        assertEquals(3, Utils.countJoinNodeSize(root, JoinOperator.semiAntiJoinSet()));
+
+        //      semi join (left child semi join node = 0, right child semi join node = 3) => result is 0 + 3 + 1 = 4
+        //      /         \
+        //  inner join   semi join (left child semi join node = 2, right child semi join node = 0)
+        //                /    \            => result is 2 + 0 + 1 = 3
+        //        semi join    node
+        //         /      \
+        //   semi join  node
+        root = OptExpression.create(
+                new LogicalJoinOperator(JoinOperator.LEFT_SEMI_JOIN, null),
+                OptExpression.create(new LogicalJoinOperator(JoinOperator.INNER_JOIN, null)),
+                OptExpression.create(new LogicalProjectOperator(Maps.newHashMap()),
+                        OptExpression.create(new LogicalJoinOperator(JoinOperator.LEFT_SEMI_JOIN, null),
+                                OptExpression.create(new LogicalJoinOperator(JoinOperator.LEFT_SEMI_JOIN, null),
+                                        OptExpression.create(
+                                                new LogicalJoinOperator(JoinOperator.LEFT_SEMI_JOIN, null)),
+                                        OptExpression.create(
+                                                new LogicalValuesOperator(Lists.newArrayList(), Lists.newArrayList()))),
+                                OptExpression.create(
+                                        new LogicalValuesOperator(Lists.newArrayList(), Lists.newArrayList())))));
+
+        assertEquals(4, Utils.countJoinNodeSize(root, JoinOperator.semiAntiJoinSet()));
+    }
+
+    @Test
+    public void testComputeMaxLEPower2() {
+        Assert.assertEquals(0, Utils.computeMaxLEPower2(0));
+
+        for (int i = 1; i < 10000; i++) {
+            int out = Utils.computeMaxLEPower2(i);
+            // The number i belongs to the range [out, out*2).
+            Assert.assertTrue(out <= i);
+            Assert.assertTrue(out * 2 > i);
+        }
+    }
+
+    @Test
+    public void testComputeMinGEPower2() {
+        Assert.assertEquals(1, Utils.computeMinGEPower2(0));
+
+        for (int i = 1; i < 10000; i++) {
+            int out = Utils.computeMinGEPower2(i);
+            // The number i belongs to the range (out/2, out].
+            Assert.assertTrue(out >= i);
+            Assert.assertTrue(out / 2 < i);
+        }
     }
 }

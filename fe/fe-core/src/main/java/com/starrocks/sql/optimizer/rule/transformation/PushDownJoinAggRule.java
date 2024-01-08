@@ -1,4 +1,17 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.sql.optimizer.rule.transformation;
 
@@ -13,6 +26,7 @@ import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.OperatorType;
+import com.starrocks.sql.optimizer.operator.Projection;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAggregationOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalOlapScanOperator;
@@ -28,8 +42,12 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
+@Deprecated
+// Can't promise output unique columns
+//
 // Push down Join
 // Before:
 //        Join
@@ -69,10 +87,10 @@ public class PushDownJoinAggRule extends TransformationRule {
                 Pattern.create(OperatorType.LOGICAL_AGGR, OperatorType.PATTERN_LEAF)));
     }
 
-    private static final PushDownJoinAggRule instance = new PushDownJoinAggRule();
+    private static final PushDownJoinAggRule INSTANCE = new PushDownJoinAggRule();
 
     public static PushDownJoinAggRule getInstance() {
-        return instance;
+        return INSTANCE;
     }
 
     @Override
@@ -103,13 +121,6 @@ public class PushDownJoinAggRule extends TransformationRule {
         List<ColumnRefOperator> leftOutput =
                 Arrays.stream(leftExpression.getOutputColumns().getColumnIds()).mapToObj(factory::getColumnRef).collect(
                         Collectors.toList());
-        // For LogicalJoinOperator, use pruneOutputColumns instead of output columns
-        if (leftExpression.getOp() instanceof LogicalJoinOperator) {
-            LogicalJoinOperator leftJoinOperator = (LogicalJoinOperator) leftExpression.getOp();
-            if (leftJoinOperator.getPruneOutputColumns() != null) {
-                leftOutput = Lists.newArrayList(leftJoinOperator.getPruneOutputColumns());
-            }
-        }
 
         if (!checkIsUnique(leftOutput, leftExpression)) {
             return Collections.emptyList();
@@ -135,17 +146,8 @@ public class PushDownJoinAggRule extends TransformationRule {
             }
         }
 
-        LogicalJoinOperator newJoin =
-                new LogicalJoinOperator(inputJoinOperator.getJoinType(), Utils.compoundAnd(newJoinOnPredicate),
-                        inputJoinOperator.getJoinHint());
-        newJoin.setPredicate(Utils.compoundAnd(newJoinFilterPredicate));
-
-        OptExpression newJoinExpression = new OptExpression(newJoin);
-        newJoinExpression.getInputs().add(input.getInputs().get(0));
-        newJoinExpression.getInputs().addAll(rightAggExpression.getInputs());
-
         List<ScalarOperator> requiredOutput =
-                Arrays.stream(context.getTaskContext().get(0).getRequiredColumns().getColumnIds())
+                Arrays.stream(context.getTaskContext().getRequiredColumns().getColumnIds())
                         .mapToObj(factory::getColumnRef).collect(Collectors.toList());
 
         ScalarEquivalenceExtractor equivalenceExtractor = new ScalarEquivalenceExtractor();
@@ -163,11 +165,26 @@ public class PushDownJoinAggRule extends TransformationRule {
             }
         }
 
-        // calculate the prune output columns for newJoin
         ColumnRefSet newJoinPruneOutPutColumns = new ColumnRefSet(leftOutput);
         newJoinPruneOutPutColumns.union(rightAggExpression.inputAt(0).getOutputColumns());
-        newJoin.setPruneOutputColumns(
-                newJoinPruneOutPutColumns.getStream().mapToObj(factory::getColumnRef).collect(Collectors.toList()));
+        LogicalJoinOperator.Builder newJoinBuilder = new LogicalJoinOperator.Builder().withOperator(inputJoinOperator)
+                .setOnPredicate(Utils.compoundAnd(newJoinOnPredicate))
+                .setPredicate(Utils.compoundAnd(newJoinFilterPredicate));
+
+        ColumnRefSet inputColumns = new ColumnRefSet();
+        inputColumns.union(input.inputAt(0).getOutputColumns());
+        inputColumns.union(rightAggExpression.inputAt(0).getOutputColumns());
+        if (newJoinPruneOutPutColumns.equals(inputColumns)) {
+            newJoinBuilder.setProjection(null);
+        } else {
+            newJoinBuilder.setProjection(
+                    new Projection(newJoinPruneOutPutColumns.getStream().map(factory::getColumnRef)
+                            .collect(Collectors.toMap(Function.identity(), Function.identity()))));
+        }
+
+        OptExpression newJoinExpression = new OptExpression(newJoinBuilder.build());
+        newJoinExpression.getInputs().add(input.getInputs().get(0));
+        newJoinExpression.getInputs().addAll(rightAggExpression.getInputs());
 
         LogicalAggregationOperator newAgg = new LogicalAggregationOperator(rightAggOperator.getType(), leftOutput,
                 rightAggOperator.getAggregations());
@@ -190,9 +207,9 @@ public class PushDownJoinAggRule extends TransformationRule {
                                                GroupExpression groupExpression) {
         if (OperatorType.LOGICAL_OLAP_SCAN.equals(groupExpression.getOp().getOpType())) {
             LogicalOlapScanOperator loso = (LogicalOlapScanOperator) groupExpression.getOp();
-            Map<ColumnRefOperator, Column> askColumnsMap = loso.getColumnRefMap();
+            Map<ColumnRefOperator, Column> askColumnsMap = loso.getColRefToColumnMetaMap();
 
-            List<String> keyColumns = getTpchMockPrimaryKeys(loso.getOlapTable().getName());
+            List<String> keyColumns = getTpchMockPrimaryKeys(loso.getTable().getName());
 
             if (keyColumns.isEmpty()) {
                 return false;

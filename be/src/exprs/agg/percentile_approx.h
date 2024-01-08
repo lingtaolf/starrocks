@@ -1,4 +1,16 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #pragma once
 
@@ -7,9 +19,10 @@
 #include "column/vectorized_fwd.h"
 #include "exprs/agg/aggregate.h"
 #include "gutil/casts.h"
+#include "util/percentile_value.h"
 #include "util/tdigest.h"
 
-namespace starrocks::vectorized {
+namespace starrocks {
 
 struct PercentileApproxState {
 public:
@@ -43,7 +56,7 @@ public:
         data(state).is_null = false;
     }
 
-    void merge(FunctionContext* ctx, const Column* column, AggDataPtr state, size_t row_num) const override {
+    void merge(FunctionContext* ctx, const Column* column, AggDataPtr __restrict state, size_t row_num) const override {
         Slice src;
         if (column->is_nullable()) {
             if (column->is_null(row_num)) {
@@ -67,7 +80,7 @@ public:
         data(state).is_null = false;
     }
 
-    void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr state, Column* to) const override {
+    void serialize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
         size_t size = data(state).percentile->serialize_size();
         uint8_t result[size + sizeof(double)];
         memcpy(result, &(data(state).targetQuantile), sizeof(double));
@@ -82,12 +95,13 @@ public:
                 column->null_column_data().push_back(0);
             }
         } else {
-            BinaryColumn* column = down_cast<BinaryColumn*>(to);
+            auto* column = down_cast<BinaryColumn*>(to);
             column->append(Slice(result, size));
         }
     }
 
-    void convert_to_serialize_format(const Columns& src, size_t chunk_size, ColumnPtr* dst) const override {
+    void convert_to_serialize_format(FunctionContext* ctx, const Columns& src, size_t chunk_size,
+                                     ColumnPtr* dst) const override {
         const DoubleColumn* input = nullptr;
         BinaryColumn* result = nullptr;
         // get input data column
@@ -141,7 +155,7 @@ public:
         }
     }
 
-    void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr state, Column* to) const override {
+    void finalize_to_column(FunctionContext* ctx, ConstAggDataPtr __restrict state, Column* to) const override {
         if (to->is_nullable()) {
             auto* nullable_column = down_cast<NullableColumn*>(to);
             if (data(state).is_null) {
@@ -165,4 +179,4 @@ public:
 
     std::string get_name() const override { return "percentile_approx"; }
 };
-} // namespace starrocks::vectorized
+} // namespace starrocks

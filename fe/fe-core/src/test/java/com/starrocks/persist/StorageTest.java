@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/persist/StorageTest.java
 
@@ -104,10 +117,9 @@ public class StorageTest {
         Assert.assertEquals(1, storage1.getClusterID());
         Assert.assertEquals("test", storage1.getMetaDir());
 
-        Storage storage2 = new Storage(1, "token", 2, 3, "test");
+        Storage storage2 = new Storage(1, "token", 2, "test");
         Assert.assertEquals(1, storage2.getClusterID());
-        Assert.assertEquals(2, storage2.getImageSeq());
-        Assert.assertEquals(3, storage2.getEditsSeq());
+        Assert.assertEquals(2, storage2.getImageJournalId());
         Assert.assertEquals("test", storage2.getMetaDir());
     }
 
@@ -120,28 +132,17 @@ public class StorageTest {
         Assert.assertEquals(966271669, storage.getClusterID());
         storage.setClusterID(1234);
         Assert.assertEquals(1234, storage.getClusterID());
-        Assert.assertEquals(0, storage.getImageSeq());
-        Assert.assertEquals(10, Storage.getMetaSeq(new File("storageTestDir/edits.10")));
-        Assert.assertTrue(Storage.getCurrentEditsFile(new File("storageTestDir"))
-                .equals(new File("storageTestDir/edits")));
+        Assert.assertEquals(0, storage.getImageJournalId());
 
         Assert.assertTrue(storage.getCurrentImageFile().equals(new File("storageTestDir/image.0")));
         Assert.assertTrue(storage.getImageFile(0).equals(new File("storageTestDir/image.0")));
         Assert.assertTrue(Storage.getImageFile(new File("storageTestDir"), 0)
                 .equals(new File("storageTestDir/image.0")));
 
-        Assert.assertTrue(storage.getCurrentEditsFile().equals(new File("storageTestDir/edits")));
-        Assert.assertTrue(storage.getEditsFile(5).equals(new File("storageTestDir/edits.5")));
-        Assert.assertTrue(Storage.getEditsFile(new File("storageTestDir"), 3)
-                .equals(new File("storageTestDir/edits.3")));
-
         Assert.assertTrue(storage.getVersionFile().equals(new File("storageTestDir/VERSION")));
 
-        storage.setImageSeq(100);
-        Assert.assertEquals(100, storage.getImageSeq());
-
-        storage.setEditsSeq(100);
-        Assert.assertEquals(100, storage.getEditsSeq());
+        storage.setImageJournalId(100);
+        Assert.assertEquals(100, storage.getImageJournalId());
 
         Assert.assertEquals("storageTestDir", storage.getMetaDir());
         storage.setMetaDir("abcd");

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/runtime/stream_load/load_stream_mgr.h
 
@@ -42,16 +55,23 @@ public:
             return _stream_map.size();
         });
     }
-    ~LoadStreamMgr() {}
+    ~LoadStreamMgr() = default;
 
-    Status put(const UniqueId& id, std::shared_ptr<StreamLoadPipe> stream) {
+    void close() {
+        std::lock_guard<std::mutex> l(_lock);
+        for (auto iter = _stream_map.begin(); iter != _stream_map.end();) {
+            iter->second->close();
+            iter = _stream_map.erase(iter);
+        }
+    }
+
+    Status put(const UniqueId& id, const std::shared_ptr<StreamLoadPipe>& stream) {
         std::lock_guard<std::mutex> l(_lock);
         auto it = _stream_map.find(id);
         if (it != std::end(_stream_map)) {
             return Status::InternalError("id already exist");
         }
         _stream_map.emplace(id, stream);
-        VLOG(3) << "put stream load pipe: " << id;
         return Status::OK();
     }
 
@@ -62,7 +82,6 @@ public:
             return nullptr;
         }
         auto stream = it->second;
-        _stream_map.erase(it);
         return stream;
     }
 
@@ -71,9 +90,7 @@ public:
         auto it = _stream_map.find(id);
         if (it != std::end(_stream_map)) {
             _stream_map.erase(it);
-            VLOG(3) << "remove stream load pipe: " << id;
         }
-        return;
     }
 
 private:

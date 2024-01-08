@@ -1,19 +1,32 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #include "column/datum_convert.h"
 
 #include "gutil/strings/substitute.h"
 #include "runtime/mem_pool.h"
+#include "storage/olap_type_infra.h"
+#include "storage/type_traits.h"
 
-namespace starrocks::vectorized {
+namespace starrocks {
 
 using strings::Substitute;
 
-template <FieldType TYPE>
+template <LogicalType TYPE>
 Status datum_from_string(TypeInfo* type_info, Datum* dst, const std::string& str) {
     typename CppTypeTraits<TYPE>::CppType value;
-    if (type_info->from_string(&value, str) != OLAP_SUCCESS) {
-        return Status::InvalidArgument(Substitute("Failed to convert $0 to type $1", str, TYPE));
-    }
+    RETURN_IF_ERROR(type_info->from_string(&value, str));
     dst->set(value);
     return Status::OK();
 }
@@ -21,50 +34,25 @@ Status datum_from_string(TypeInfo* type_info, Datum* dst, const std::string& str
 Status datum_from_string(TypeInfo* type_info, Datum* dst, const std::string& str, MemPool* mem_pool) {
     const auto type = type_info->type();
     switch (type) {
-    case OLAP_FIELD_TYPE_BOOL: {
+#define M(type) \
+    case type:  \
+        return datum_from_string<type>(type_info, dst, str);
+
+        APPLY_FOR_TYPE_INTEGER(M)
+        APPLY_FOR_TYPE_TIME(M)
+        APPLY_FOR_TYPE_DECIMAL(M)
+        M(TYPE_FLOAT)
+        M(TYPE_DOUBLE)
+#undef M
+    case TYPE_BOOLEAN: {
         bool v;
-        auto st = type_info->from_string(&v, str);
-        if (st != OLAP_SUCCESS) {
-            return Status::InvalidArgument(Substitute("Failed to conert $0 to Bool type", str));
-        }
+        RETURN_IF_ERROR(type_info->from_string(&v, str));
         dst->set_int8(v);
         return Status::OK();
     }
-    case OLAP_FIELD_TYPE_TINYINT:
-        return datum_from_string<OLAP_FIELD_TYPE_TINYINT>(type_info, dst, str);
-    case OLAP_FIELD_TYPE_SMALLINT:
-        return datum_from_string<OLAP_FIELD_TYPE_SMALLINT>(type_info, dst, str);
-    case OLAP_FIELD_TYPE_INT:
-        return datum_from_string<OLAP_FIELD_TYPE_INT>(type_info, dst, str);
-    case OLAP_FIELD_TYPE_BIGINT:
-        return datum_from_string<OLAP_FIELD_TYPE_BIGINT>(type_info, dst, str);
-    case OLAP_FIELD_TYPE_LARGEINT:
-        return datum_from_string<OLAP_FIELD_TYPE_LARGEINT>(type_info, dst, str);
-    case OLAP_FIELD_TYPE_FLOAT:
-        return datum_from_string<OLAP_FIELD_TYPE_FLOAT>(type_info, dst, str);
-    case OLAP_FIELD_TYPE_DOUBLE:
-        return datum_from_string<OLAP_FIELD_TYPE_DOUBLE>(type_info, dst, str);
-    case OLAP_FIELD_TYPE_DATE:
-        return datum_from_string<OLAP_FIELD_TYPE_DATE>(type_info, dst, str);
-    case OLAP_FIELD_TYPE_DATE_V2:
-        return datum_from_string<OLAP_FIELD_TYPE_DATE_V2>(type_info, dst, str);
-    case OLAP_FIELD_TYPE_DATETIME:
-        return datum_from_string<OLAP_FIELD_TYPE_DATETIME>(type_info, dst, str);
-    case OLAP_FIELD_TYPE_TIMESTAMP:
-        return datum_from_string<OLAP_FIELD_TYPE_TIMESTAMP>(type_info, dst, str);
-    case OLAP_FIELD_TYPE_DECIMAL:
-        return datum_from_string<OLAP_FIELD_TYPE_DECIMAL>(type_info, dst, str);
-    case OLAP_FIELD_TYPE_DECIMAL_V2:
-        return datum_from_string<OLAP_FIELD_TYPE_DECIMAL_V2>(type_info, dst, str);
-    case OLAP_FIELD_TYPE_DECIMAL32:
-        return datum_from_string<OLAP_FIELD_TYPE_DECIMAL32>(type_info, dst, str);
-    case OLAP_FIELD_TYPE_DECIMAL64:
-        return datum_from_string<OLAP_FIELD_TYPE_DECIMAL64>(type_info, dst, str);
-    case OLAP_FIELD_TYPE_DECIMAL128:
-        return datum_from_string<OLAP_FIELD_TYPE_DECIMAL128>(type_info, dst, str);
         /* Type need memory allocated */
-    case OLAP_FIELD_TYPE_CHAR:
-    case OLAP_FIELD_TYPE_VARCHAR: {
+    case TYPE_CHAR:
+    case TYPE_VARCHAR: {
         /* Type need memory allocated */
         Slice slice;
         slice.size = str.size();
@@ -72,13 +60,11 @@ Status datum_from_string(TypeInfo* type_info, Datum* dst, const std::string& str
             slice.data = (char*)str.data();
         } else {
             slice.data = reinterpret_cast<char*>(mem_pool->allocate(slice.size));
-            if (UNLIKELY(slice.data == nullptr)) {
-                return Status::InternalError("Mem usage has exceed the limit of BE");
-            }
+            RETURN_IF_UNLIKELY_NULL(slice.data, Status::MemoryAllocFailed("alloc mem for varchar field failed"));
             memcpy(slice.data, str.data(), slice.size);
         }
-        // If type is OLAP_FIELD_TYPE_CHAR, strip its tailing '\0'
-        if (type == OLAP_FIELD_TYPE_CHAR) {
+        // If type is TYPE_CHAR, strip its tailing '\0'
+        if (type == TYPE_CHAR) {
             slice.size = strnlen(slice.data, slice.size);
         }
         dst->set_slice(slice);
@@ -91,7 +77,7 @@ Status datum_from_string(TypeInfo* type_info, Datum* dst, const std::string& str
     return Status::OK();
 }
 
-template <FieldType TYPE>
+template <LogicalType TYPE>
 std::string datum_to_string(TypeInfo* type_info, const Datum& datum) {
     using CppType = typename CppTypeTraits<TYPE>::CppType;
     auto value = datum.template get<CppType>();
@@ -104,45 +90,19 @@ std::string datum_to_string(TypeInfo* type_info, const Datum& datum) {
     }
     const auto type = type_info->type();
     switch (type) {
-    case OLAP_FIELD_TYPE_BOOL:
-    case OLAP_FIELD_TYPE_TINYINT:
-        return datum_to_string<OLAP_FIELD_TYPE_TINYINT>(type_info, datum);
-    case OLAP_FIELD_TYPE_SMALLINT:
-        return datum_to_string<OLAP_FIELD_TYPE_SMALLINT>(type_info, datum);
-    case OLAP_FIELD_TYPE_INT:
-        return datum_to_string<OLAP_FIELD_TYPE_INT>(type_info, datum);
-    case OLAP_FIELD_TYPE_BIGINT:
-        return datum_to_string<OLAP_FIELD_TYPE_BIGINT>(type_info, datum);
-    case OLAP_FIELD_TYPE_LARGEINT:
-        return datum_to_string<OLAP_FIELD_TYPE_LARGEINT>(type_info, datum);
-    case OLAP_FIELD_TYPE_FLOAT:
-        return datum_to_string<OLAP_FIELD_TYPE_FLOAT>(type_info, datum);
-    case OLAP_FIELD_TYPE_DOUBLE:
-        return datum_to_string<OLAP_FIELD_TYPE_DOUBLE>(type_info, datum);
-    case OLAP_FIELD_TYPE_DATE:
-        return datum_to_string<OLAP_FIELD_TYPE_DATE>(type_info, datum);
-    case OLAP_FIELD_TYPE_DATE_V2:
-        return datum_to_string<OLAP_FIELD_TYPE_DATE_V2>(type_info, datum);
-    case OLAP_FIELD_TYPE_DATETIME:
-        return datum_to_string<OLAP_FIELD_TYPE_DATETIME>(type_info, datum);
-    case OLAP_FIELD_TYPE_TIMESTAMP:
-        return datum_to_string<OLAP_FIELD_TYPE_TIMESTAMP>(type_info, datum);
-    case OLAP_FIELD_TYPE_DECIMAL:
-        return datum_to_string<OLAP_FIELD_TYPE_DECIMAL>(type_info, datum);
-    case OLAP_FIELD_TYPE_DECIMAL_V2:
-        return datum_to_string<OLAP_FIELD_TYPE_DECIMAL_V2>(type_info, datum);
-    case OLAP_FIELD_TYPE_DECIMAL32:
-        return datum_to_string<OLAP_FIELD_TYPE_DECIMAL32>(type_info, datum);
-    case OLAP_FIELD_TYPE_DECIMAL64:
-        return datum_to_string<OLAP_FIELD_TYPE_DECIMAL64>(type_info, datum);
-    case OLAP_FIELD_TYPE_DECIMAL128:
-        return datum_to_string<OLAP_FIELD_TYPE_DECIMAL128>(type_info, datum);
-    case OLAP_FIELD_TYPE_CHAR:
-    case OLAP_FIELD_TYPE_VARCHAR:
-        return datum_to_string<OLAP_FIELD_TYPE_VARCHAR>(type_info, datum);
+    case TYPE_BOOLEAN:
+        return datum_to_string<TYPE_TINYINT>(type_info, datum);
+    case TYPE_CHAR:
+    case TYPE_VARCHAR:
+        return datum_to_string<TYPE_VARCHAR>(type_info, datum);
+#define M(type) \
+    case type:  \
+        return datum_to_string<type>(type_info, datum);
+        APPLY_FOR_TYPE_CONVERT_TO_VARCHAR(M)
+#undef M
     default:
         return "";
     }
 }
 
-} // namespace starrocks::vectorized
+} // namespace starrocks

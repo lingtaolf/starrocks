@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/planner/RangePartitionPruner.java
 
@@ -21,6 +34,7 @@
 
 package com.starrocks.planner;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.BoundType;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Range;
@@ -33,9 +47,12 @@ import com.starrocks.catalog.Column;
 import com.starrocks.catalog.PartitionKey;
 import com.starrocks.catalog.Type;
 import com.starrocks.common.AnalysisException;
+import com.starrocks.connector.PartitionUtil;
+import com.starrocks.qe.ConnectContext;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -56,11 +73,11 @@ public class RangePartitionPruner implements PartitionPruner {
         partitionColumnFilters = filters;
     }
 
-    private Collection<Long> prune(RangeMap<PartitionKey, Long> rangeMap,
-                                   int columnIdx,
-                                   PartitionKey minKey,
-                                   PartitionKey maxKey,
-                                   int complex)
+    private List<Long> prune(RangeMap<PartitionKey, Long> rangeMap,
+                             int columnIdx,
+                             PartitionKey minKey,
+                             PartitionKey maxKey,
+                             int complex)
             throws AnalysisException {
         LOG.debug("column idx {}, column filters {}", columnIdx, partitionColumnFilters);
         // the last column in partition Key
@@ -79,7 +96,7 @@ public class RangePartitionPruner implements PartitionPruner {
                     keyColumn.getPrimitiveType());
             maxKey.pushColumn(LiteralExpr.createInfinity(Type.fromPrimitiveType(keyColumn.getPrimitiveType()), true),
                     keyColumn.getPrimitiveType());
-            Collection<Long> result = null;
+            List<Long> result;
             try {
                 result = Lists.newArrayList(
                         rangeMap.subRangeMap(Range.closed(minKey, maxKey)).asMapOfRanges().values());
@@ -91,23 +108,34 @@ public class RangePartitionPruner implements PartitionPruner {
             return result;
         }
         List<LiteralExpr> inPredicateLiterals = filter.getInPredicateLiterals();
-        if (null == inPredicateLiterals || inPredicateLiterals.size() * complex > 100) {
+        int inPredicateMaxLen = 100;
+        if (ConnectContext.get() != null && ConnectContext.get().getSessionVariable() != null) {
+            inPredicateMaxLen = ConnectContext.get().getSessionVariable().getRangePrunerPredicateMaxLen();
+        }
+
+        boolean isConvertToDate = PartitionUtil.isConvertToDate(keyColumn, filter);
+        LiteralExpr lowerBound = filter.getLowerBound();
+        LiteralExpr upperBound = filter.getUpperBound();
+        if (null == inPredicateLiterals || ((lowerBound != null || upperBound != null) &&
+                inPredicateLiterals.size() * complex > inPredicateMaxLen)) {
             if (filter.lowerBoundInclusive && filter.upperBoundInclusive
-                    && filter.lowerBound != null && filter.upperBound != null
-                    && 0 == filter.lowerBound.compareLiteral(filter.upperBound)) {
+                    && lowerBound != null && upperBound != null
+                    && 0 == lowerBound.compareLiteral(upperBound)) {
 
                 // eg: [10, 10], [null, null]
-                if (filter.lowerBound instanceof NullLiteral && filter.upperBound instanceof NullLiteral) {
+                if (lowerBound instanceof NullLiteral && upperBound instanceof NullLiteral) {
                     // replace Null with min value
                     LiteralExpr minKeyValue = LiteralExpr.createInfinity(
                             Type.fromPrimitiveType(keyColumn.getPrimitiveType()), false);
                     minKey.pushColumn(minKeyValue, keyColumn.getPrimitiveType());
                     maxKey.pushColumn(minKeyValue, keyColumn.getPrimitiveType());
                 } else {
-                    minKey.pushColumn(filter.lowerBound, keyColumn.getPrimitiveType());
-                    maxKey.pushColumn(filter.upperBound, keyColumn.getPrimitiveType());
+                    LiteralExpr lowerBoundExpr = filter.getLowerBound(isConvertToDate);
+                    LiteralExpr upperBoundExpr = filter.getUpperBound(isConvertToDate);
+                    minKey.pushColumn(lowerBoundExpr, keyColumn.getPrimitiveType());
+                    maxKey.pushColumn(upperBoundExpr, keyColumn.getPrimitiveType());
                 }
-                Collection<Long> result = prune(rangeMap, columnIdx + 1, minKey, maxKey, complex);
+                List<Long> result = prune(rangeMap, columnIdx + 1, minKey, maxKey, complex);
                 minKey.popColumn();
                 maxKey.popColumn();
                 return result;
@@ -119,8 +147,8 @@ public class RangePartitionPruner implements PartitionPruner {
             int pushMinCount = 0;
             int pushMaxCount = 0;
             int lastColumnId = partitionColumns.size() - 1;
-            if (filter.lowerBound != null) {
-                minKey.pushColumn(filter.lowerBound, keyColumn.getPrimitiveType());
+            if (lowerBound != null) {
+                minKey.pushColumn(filter.getLowerBound(isConvertToDate), keyColumn.getPrimitiveType());
                 pushMinCount++;
                 if (filter.lowerBoundInclusive && columnIdx != lastColumnId) {
                     Column column = partitionColumns.get(columnIdx + 1);
@@ -133,8 +161,8 @@ public class RangePartitionPruner implements PartitionPruner {
                 minKey.pushColumn(LiteralExpr.createInfinity(type, false), keyColumn.getPrimitiveType());
                 pushMinCount++;
             }
-            if (filter.upperBound != null) {
-                maxKey.pushColumn(filter.upperBound, keyColumn.getPrimitiveType());
+            if (upperBound != null) {
+                maxKey.pushColumn(filter.getUpperBound(isConvertToDate), keyColumn.getPrimitiveType());
                 pushMaxCount++;
                 if (filter.upperBoundInclusive && columnIdx != lastColumnId) {
                     Column column = partitionColumns.get(columnIdx + 1);
@@ -150,7 +178,7 @@ public class RangePartitionPruner implements PartitionPruner {
                 pushMaxCount++;
             }
 
-            Collection<Long> result = null;
+            List<Long> result;
             try {
                 result = Lists.newArrayList(rangeMap.subRangeMap(
                         Range.range(minKey, lowerType, maxKey, upperType)).asMapOfRanges().values());
@@ -169,20 +197,26 @@ public class RangePartitionPruner implements PartitionPruner {
         Set<Long> resultSet = Sets.newHashSet();
         int newComplex = inPredicateLiterals.size() * complex;
         for (LiteralExpr expr : inPredicateLiterals) {
-            minKey.pushColumn(expr, keyColumn.getPrimitiveType());
-            maxKey.pushColumn(expr, keyColumn.getPrimitiveType());
-            Collection<Long> subList = prune(rangeMap, columnIdx + 1, minKey, maxKey, newComplex);
-            for (long partId : subList) {
-                resultSet.add(partId);
+            if (isConvertToDate) {
+                LiteralExpr convertExpr = PartitionUtil.convertToDateLiteral(expr);
+                Preconditions.checkState(convertExpr.getType().equals(keyColumn.getType()));
+                minKey.pushColumn(convertExpr, keyColumn.getPrimitiveType());
+                maxKey.pushColumn(convertExpr, keyColumn.getPrimitiveType());
+            } else {
+                Preconditions.checkState(expr.getType().equals(keyColumn.getType()));
+                minKey.pushColumn(expr, keyColumn.getPrimitiveType());
+                maxKey.pushColumn(expr, keyColumn.getPrimitiveType());
             }
+            Collection<Long> subList = prune(rangeMap, columnIdx + 1, minKey, maxKey, newComplex);
+            resultSet.addAll(subList);
             minKey.popColumn();
             maxKey.popColumn();
         }
 
-        return resultSet;
+        return new ArrayList<>(resultSet);
     }
 
-    public Collection<Long> prune() throws AnalysisException {
+    public List<Long> prune() throws AnalysisException {
         PartitionKey minKey = new PartitionKey();
         PartitionKey maxKey = new PartitionKey();
         // Map to RangeMapTree

@@ -1,18 +1,41 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "column/array_column.h"
 
+#include <cstdint>
+
 #include "column/column_helper.h"
 #include "column/fixed_length_column.h"
+#include "column/vectorized_fwd.h"
 #include "gutil/bits.h"
 #include "gutil/casts.h"
 #include "gutil/strings/fastmem.h"
 #include "util/mysql_row_buffer.h"
 
-namespace starrocks::vectorized {
+namespace starrocks {
+
+void ArrayColumn::check_or_die() const {
+    CHECK_EQ(_offsets->get_data().back(), _elements->size());
+    DCHECK(_elements->is_nullable());
+    _offsets->check_or_die();
+    _elements->check_or_die();
+}
 
 ArrayColumn::ArrayColumn(ColumnPtr elements, UInt32Column::Ptr offsets)
         : _elements(std::move(elements)), _offsets(std::move(offsets)) {
+    DCHECK(_elements->is_nullable());
     if (_offsets->empty()) {
         _offsets->append(0);
     }
@@ -20,6 +43,10 @@ ArrayColumn::ArrayColumn(ColumnPtr elements, UInt32Column::Ptr offsets)
 
 size_t ArrayColumn::size() const {
     return _offsets->size() - 1;
+}
+
+size_t ArrayColumn::capacity() const {
+    return _offsets->capacity() - 1;
 }
 
 const uint8_t* ArrayColumn::raw_data() const {
@@ -32,8 +59,9 @@ uint8_t* ArrayColumn::mutable_raw_data() {
 
 size_t ArrayColumn::byte_size(size_t from, size_t size) const {
     DCHECK_LE(from + size, this->size()) << "Range error";
-    return _elements->byte_size(_offsets->get_data()[from], _offsets->get_data()[from + size]) +
-           _offsets->Column::byte_size(from, size);
+    return _elements->byte_size(_offsets->get_data()[from],
+                                _offsets->get_data()[from + size] - _offsets->get_data()[from]) +
+           _offsets->byte_size(from, size);
 }
 
 size_t ArrayColumn::byte_size(size_t idx) const {
@@ -42,6 +70,7 @@ size_t ArrayColumn::byte_size(size_t idx) const {
 }
 
 void ArrayColumn::reserve(size_t n) {
+    _elements->reserve(n);
     _offsets->reserve(n + 1);
 }
 
@@ -52,7 +81,12 @@ void ArrayColumn::resize(size_t n) {
 }
 
 void ArrayColumn::assign(size_t n, size_t idx) {
-    DCHECK(false) << "array column shouldn't call assign";
+    DCHECK_LE(idx, this->size()) << "Range error when assign arrayColumn.";
+    auto desc = this->clone_empty();
+    auto datum = get(idx); // just reference
+    desc->append_value_multiple_times(&datum, n);
+    swap_column(*desc);
+    desc->reset_column();
 }
 
 void ArrayColumn::append_datum(const Datum& datum) {
@@ -61,7 +95,13 @@ void ArrayColumn::append_datum(const Datum& datum) {
     for (size_t i = 0; i < array_size; ++i) {
         _elements->append_datum(array[i]);
     }
-    _offsets->append(_offsets->get_data().back() + array_size);
+    _offsets->append(_offsets->get_data().back() + static_cast<uint32_t>(array_size));
+}
+
+void ArrayColumn::append_array_element(const Column& elem, size_t null_elem) {
+    _elements->append(elem);
+    _elements->append_nulls(null_elem);
+    _offsets->append(_offsets->get_data().back() + static_cast<uint32_t>(elem.size() + null_elem));
 }
 
 void ArrayColumn::append(const Column& src, size_t offset, size_t count) {
@@ -74,7 +114,7 @@ void ArrayColumn::append(const Column& src, size_t offset, size_t count) {
     _elements->append(array_column.elements(), src_offset, src_count);
 
     for (size_t i = offset; i < offset + count; i++) {
-        size_t l = src_offsets.get_data()[i + 1] - src_offsets.get_data()[i];
+        uint32_t l = src_offsets.get_data()[i + 1] - src_offsets.get_data()[i];
         _offsets->append(_offsets->get_data().back() + l);
     }
 }
@@ -85,6 +125,7 @@ void ArrayColumn::append_selective(const Column& src, const uint32_t* indexes, u
     }
 }
 
+// TODO(fzh): directly copy elements for un-nested arrays
 void ArrayColumn::append_value_multiple_times(const Column& src, uint32_t index, uint32_t size) {
     for (uint32_t i = 0; i < size; i++) {
         append(src, index, 1);
@@ -92,7 +133,7 @@ void ArrayColumn::append_value_multiple_times(const Column& src, uint32_t index,
 }
 
 void ArrayColumn::append_value_multiple_times(const void* value, size_t count) {
-    const Datum* datum = reinterpret_cast<const Datum*>(value);
+    const auto* datum = reinterpret_cast<const Datum*>(value);
     const auto& array = datum->get<DatumArray>();
     size_t array_size = array.size();
 
@@ -100,7 +141,7 @@ void ArrayColumn::append_value_multiple_times(const void* value, size_t count) {
         for (size_t i = 0; i < array_size; ++i) {
             _elements->append_datum(array[i]);
         }
-        _offsets->append(_offsets->get_data().back() + array_size);
+        _offsets->append(_offsets->get_data().back() + static_cast<uint32_t>(array_size));
     }
 }
 
@@ -108,6 +149,7 @@ bool ArrayColumn::append_nulls(size_t count) {
     return false;
 }
 
+// append an empty array []
 void ArrayColumn::append_default() {
     _offsets->append(_offsets->get_data().back());
 }
@@ -115,6 +157,73 @@ void ArrayColumn::append_default() {
 void ArrayColumn::append_default(size_t count) {
     size_t offset = _offsets->get_data().back();
     _offsets->append_value_multiple_times(&offset, count);
+}
+
+void ArrayColumn::fill_default(const Filter& filter) {
+    std::vector<uint32_t> indexes;
+    for (size_t i = 0; i < filter.size(); i++) {
+        if (filter[i] == 1 && get_element_size(i) > 0) {
+            indexes.push_back(static_cast<uint32_t>(i));
+        }
+    }
+    auto default_column = clone_empty();
+    default_column->append_default(indexes.size());
+    update_rows(*default_column, indexes.data());
+}
+
+void ArrayColumn::update_rows(const Column& src, const uint32_t* indexes) {
+    const auto& array_column = down_cast<const ArrayColumn&>(src);
+
+    const UInt32Column& src_offsets = array_column.offsets();
+    size_t replace_num = src.size();
+    bool need_resize = false;
+    for (size_t i = 0; i < replace_num; ++i) {
+        if (_offsets->get_data()[indexes[i] + 1] - _offsets->get_data()[indexes[i]] !=
+            src_offsets.get_data()[i + 1] - src_offsets.get_data()[i]) {
+            need_resize = true;
+            break;
+        }
+    }
+
+    if (!need_resize) {
+        Buffer<uint32_t> element_idxes;
+        for (size_t i = 0; i < replace_num; ++i) {
+            size_t element_count = src_offsets.get_data()[i + 1] - src_offsets.get_data()[i];
+            size_t element_offset = _offsets->get_data()[indexes[i]];
+            for (size_t j = 0; j < element_count; j++) {
+                element_idxes.emplace_back(element_offset + j);
+            }
+        }
+        _elements->update_rows(array_column.elements(), element_idxes.data());
+    } else {
+        MutableColumnPtr new_array_column = clone_empty();
+        size_t idx_begin = 0;
+        for (size_t i = 0; i < replace_num; ++i) {
+            size_t count = indexes[i] - idx_begin;
+            new_array_column->append(*this, idx_begin, count);
+            new_array_column->append(src, i, 1);
+            idx_begin = indexes[i] + 1;
+        }
+        int64_t remain_count = _offsets->size() - idx_begin - 1;
+        if (remain_count > 0) {
+            new_array_column->append(*this, idx_begin, remain_count);
+        }
+        swap_column(*new_array_column.get());
+    }
+}
+
+void ArrayColumn::remove_first_n_values(size_t count) {
+    if (count >= _offsets->size()) {
+        count = _offsets->size() - 1;
+    }
+
+    size_t offset = _offsets->get_data()[count];
+    _elements->remove_first_n_values(offset);
+    _offsets->remove_first_n_values(count);
+
+    for (size_t i = 0; i < _offsets->size(); i++) {
+        _offsets->get_data()[i] -= offset;
+    }
 }
 
 uint32_t ArrayColumn::serialize(size_t idx, uint8_t* pos) {
@@ -126,7 +235,7 @@ uint32_t ArrayColumn::serialize(size_t idx, uint8_t* pos) {
     for (size_t i = 0; i < array_size; ++i) {
         ser_size += _elements->serialize(offset + i, pos + ser_size);
     }
-    return ser_size;
+    return static_cast<uint32_t>(ser_size);
 }
 
 uint32_t ArrayColumn::serialize_default(uint8_t* pos) {
@@ -175,36 +284,20 @@ void ArrayColumn::serialize_batch(uint8_t* dst, Buffer<uint32_t>& slice_sizes, s
     }
 }
 
-void ArrayColumn::deserialize_and_append_batch(std::vector<Slice>& srcs, size_t batch_size) {
-    reserve(batch_size);
-    for (size_t i = 0; i < batch_size; ++i) {
+void ArrayColumn::deserialize_and_append_batch(Buffer<Slice>& srcs, size_t chunk_size) {
+    reserve(chunk_size);
+    for (size_t i = 0; i < chunk_size; ++i) {
         srcs[i].data = (char*)deserialize_and_append((uint8_t*)srcs[i].data);
     }
-}
-
-size_t ArrayColumn::serialize_size() const {
-    return _offsets->serialize_size() + _elements->serialize_size();
-}
-
-uint8_t* ArrayColumn::serialize_column(uint8_t* dst) {
-    dst = _offsets->serialize_column(dst);
-    dst = _elements->serialize_column(dst);
-    return dst;
-}
-
-const uint8_t* ArrayColumn::deserialize_column(const uint8_t* src) {
-    src = _offsets->deserialize_column(src);
-    src = _elements->deserialize_column(src);
-    return src;
 }
 
 MutableColumnPtr ArrayColumn::clone_empty() const {
     return create_mutable(_elements->clone_empty(), UInt32Column::create());
 }
 
-size_t ArrayColumn::filter_range(const Column::Filter& filter, size_t from, size_t to) {
+size_t ArrayColumn::filter_range(const Filter& filter, size_t from, size_t to) {
     DCHECK_EQ(size(), to);
-    uint32_t* offsets = reinterpret_cast<uint32_t*>(_offsets->mutable_raw_data());
+    auto* offsets = reinterpret_cast<uint32_t*>(_offsets->mutable_raw_data());
     uint32_t elements_start = offsets[from];
     uint32_t elements_end = offsets[to];
     Filter element_filter(elements_end, 0);
@@ -286,7 +379,7 @@ size_t ArrayColumn::filter_range(const Column::Filter& filter, size_t from, size
 }
 
 int ArrayColumn::compare_at(size_t left, size_t right, const Column& right_column, int nan_direction_hint) const {
-    const ArrayColumn& rhs = down_cast<const ArrayColumn&>(right_column);
+    const auto& rhs = down_cast<const ArrayColumn&>(right_column);
 
     size_t lhs_offset = _offsets->get_data()[left];
     size_t lhs_size = _offsets->get_data()[left + 1] - lhs_offset;
@@ -305,14 +398,103 @@ int ArrayColumn::compare_at(size_t left, size_t right, const Column& right_colum
     return lhs_size < rhs_size ? -1 : (lhs_size == rhs_size ? 0 : 1);
 }
 
-void ArrayColumn::fvn_hash(uint32_t* seed, uint16_t from, uint16_t to) const {
-    // TODO: only used in shuffle.
-    DCHECK(false) << "If you use array element as join column, it should be implemented";
+int ArrayColumn::equals(size_t left, const Column& rhs, size_t right, bool safe_eq) const {
+    const auto& rhs_array = down_cast<const ArrayColumn&>(rhs);
+
+    size_t lhs_offset = _offsets->get_data()[left];
+    size_t lhs_end = _offsets->get_data()[left + 1];
+
+    size_t rhs_offset = rhs_array._offsets->get_data()[right];
+    size_t rhs_end = rhs_array._offsets->get_data()[right + 1];
+
+    if (lhs_end - lhs_offset != rhs_end - rhs_offset) {
+        return EQUALS_FALSE;
+    }
+
+    int ret = EQUALS_TRUE;
+    while (lhs_offset < lhs_end) {
+        auto tmp = _elements->equals(lhs_offset, *(rhs_array._elements.get()), rhs_offset, safe_eq);
+
+        // return directly if false
+        if (tmp == EQUALS_FALSE) {
+            return EQUALS_FALSE;
+        } else if (tmp == EQUALS_NULL) {
+            // need check all if is null
+            ret = EQUALS_NULL;
+        }
+
+        lhs_offset++;
+        rhs_offset++;
+    }
+
+    return safe_eq ? EQUALS_TRUE : ret;
 }
 
-void ArrayColumn::crc32_hash(uint32_t* seed, uint16_t from, uint16_t to) const {
-    // TODO: only used in shuffle.
-    DCHECK(false) << "If you use array element as join column, it should be implemented";
+void ArrayColumn::compare_column(const Column& rhs_column, std::vector<int8_t>* output) const {
+    if (size() != rhs_column.size()) {
+        throw std::runtime_error("Two input columns in comparison must have same rows");
+    }
+
+    size_t rows = size();
+    output->resize(rows);
+    for (size_t i = 0; i < rows; i++) {
+        (*output)[i] = static_cast<int8_t>(compare_at(i, i, rhs_column, 1));
+    }
+}
+
+void ArrayColumn::fnv_hash_at(uint32_t* hash, uint32_t idx) const {
+    DCHECK_LT(idx + 1, _offsets->size()) << "idx + 1 should be less than offsets size";
+    uint32_t offset = _offsets->get_data()[idx];
+    // Should use size_t not uint32_t for compatible
+    size_t array_size = _offsets->get_data()[idx + 1] - offset;
+
+    *hash = HashUtil::fnv_hash(&array_size, sizeof(array_size), *hash);
+    for (size_t i = 0; i < array_size; ++i) {
+        uint32_t ele_offset = offset + static_cast<uint32_t>(i);
+        _elements->fnv_hash_at(hash, ele_offset);
+    }
+}
+
+void ArrayColumn::crc32_hash_at(uint32_t* hash, uint32_t idx) const {
+    DCHECK_LT(idx + 1, _offsets->size()) << "idx + 1 should be less than offsets size";
+    uint32_t offset = _offsets->get_data()[idx];
+    // Should use size_t not uint32_t for compatible
+    size_t array_size = _offsets->get_data()[idx + 1] - offset;
+
+    *hash = HashUtil::zlib_crc_hash(&array_size, static_cast<uint32_t>(sizeof(array_size)), *hash);
+    for (size_t i = 0; i < array_size; ++i) {
+        uint32_t ele_offset = offset + static_cast<uint32_t>(i);
+        _elements->crc32_hash_at(hash, ele_offset);
+    }
+}
+
+// TODO: fnv_hash and crc32_hash in array column may has performance problem
+// We need to make it possible in the future to provide vistor interface to iterator data
+// as much as possible
+
+void ArrayColumn::fnv_hash(uint32_t* hash, uint32_t from, uint32_t to) const {
+    for (uint32_t i = from; i < to; ++i) {
+        fnv_hash_at(hash + i, i);
+    }
+}
+
+void ArrayColumn::crc32_hash(uint32_t* hash, uint32_t from, uint32_t to) const {
+    for (uint32_t i = from; i < to; ++i) {
+        crc32_hash_at(hash + i, i);
+    }
+}
+
+int64_t ArrayColumn::xor_checksum(uint32_t from, uint32_t to) const {
+    // The XOR of ArrayColumn
+    // XOR the offsets column and elements column
+    int64_t xor_checksum = 0;
+    for (size_t idx = from; idx < to; ++idx) {
+        int64_t array_size = _offsets->get_data()[idx + 1] - _offsets->get_data()[idx];
+        xor_checksum ^= array_size;
+    }
+    uint32_t element_from = _offsets->get_data()[from];
+    uint32_t element_to = _offsets->get_data()[to];
+    return (xor_checksum ^ _elements->xor_checksum(element_from, element_to));
 }
 
 void ArrayColumn::put_mysql_row_buffer(MysqlRowBuffer* buf, size_t idx) const {
@@ -341,21 +523,40 @@ Datum ArrayColumn::get(size_t idx) const {
     for (size_t i = 0; i < array_size; ++i) {
         res[i] = _elements->get(offset + i);
     }
-    return Datum(res);
+    return {res};
+}
+
+std::pair<size_t, size_t> ArrayColumn::get_element_offset_size(size_t idx) const {
+    DCHECK_LT(idx + 1, _offsets->size());
+    size_t offset = _offsets->get_data()[idx];
+    size_t size = _offsets->get_data()[idx + 1] - _offsets->get_data()[idx];
+    return {offset, size};
+}
+
+size_t ArrayColumn::get_element_null_count(size_t idx) const {
+    auto offset_size = get_element_offset_size(idx);
+    auto nullable = down_cast<NullableColumn*>(_elements.get());
+    return nullable->null_count(offset_size.first, offset_size.second);
+}
+
+size_t ArrayColumn::get_element_size(size_t idx) const {
+    DCHECK_LT(idx + 1, _offsets->size());
+    return _offsets->get_data()[idx + 1] - _offsets->get_data()[idx];
 }
 
 bool ArrayColumn::set_null(size_t idx) {
     return false;
 }
 
-size_t ArrayColumn::element_memory_usage(size_t from, size_t size) const {
+size_t ArrayColumn::reference_memory_usage(size_t from, size_t size) const {
     DCHECK_LE(from + size, this->size()) << "Range error";
-    return _elements->element_memory_usage(_offsets->get_data()[from], _offsets->get_data()[from + size]) +
-           _offsets->Column::element_memory_usage(from, size);
+    size_t start_offset = _offsets->get_data()[from];
+    size_t elements_num = _offsets->get_data()[from + size] - start_offset;
+    return _elements->reference_memory_usage(start_offset, elements_num) + _offsets->reference_memory_usage(from, size);
 }
 
 void ArrayColumn::swap_column(Column& rhs) {
-    ArrayColumn& array_column = down_cast<ArrayColumn&>(rhs);
+    auto& array_column = down_cast<ArrayColumn&>(rhs);
     _offsets->swap_column(*array_column.offsets_column());
     _elements->swap_column(*array_column.elements_column());
 }
@@ -366,32 +567,16 @@ void ArrayColumn::reset_column() {
     _elements->reset_column();
 }
 
-const Column& ArrayColumn::elements() const {
-    return *(_elements.get());
-}
-
-ColumnPtr& ArrayColumn::elements_column() {
-    return _elements;
-}
-
-const UInt32Column& ArrayColumn::offsets() const {
-    return *_offsets;
-}
-
-UInt32Column::Ptr& ArrayColumn::offsets_column() {
-    return _offsets;
-}
-
-std::string ArrayColumn::debug_item(uint32_t idx) const {
+std::string ArrayColumn::debug_item(size_t idx) const {
     DCHECK_LT(idx, size());
-    size_t offset = _offsets->get_data()[idx];
-    size_t array_size = _offsets->get_data()[idx + 1] - offset;
+    uint32_t offset = _offsets->get_data()[idx];
+    uint32_t array_size = _offsets->get_data()[idx + 1] - offset;
 
     std::stringstream ss;
     ss << "[";
-    for (size_t i = 0; i < array_size; ++i) {
+    for (uint32_t i = 0; i < array_size; ++i) {
         if (i > 0) {
-            ss << ", ";
+            ss << ",";
         }
         ss << _elements->debug_item(offset + i);
     }
@@ -401,13 +586,33 @@ std::string ArrayColumn::debug_item(uint32_t idx) const {
 
 std::string ArrayColumn::debug_string() const {
     std::stringstream ss;
+    ss << "[";
     for (size_t i = 0; i < size(); ++i) {
         if (i > 0) {
             ss << ", ";
         }
         ss << debug_item(i);
     }
+    ss << "]";
     return ss.str();
 }
 
-} // namespace starrocks::vectorized
+StatusOr<ColumnPtr> ArrayColumn::upgrade_if_overflow() {
+    if (_offsets->size() > Column::MAX_CAPACITY_LIMIT) {
+        return Status::InternalError("Size of ArrayColumn exceed the limit");
+    }
+
+    return upgrade_helper_func(&_elements);
+}
+
+StatusOr<ColumnPtr> ArrayColumn::downgrade() {
+    return downgrade_helper_func(&_elements);
+}
+
+Status ArrayColumn::unfold_const_children(const starrocks::TypeDescriptor& type) {
+    DCHECK(type.children.size() == 1) << "Array schema does not match data's";
+    _elements = ColumnHelper::unfold_const_column(type.children[0], _elements->size(), _elements);
+    return Status::OK();
+}
+
+} // namespace starrocks

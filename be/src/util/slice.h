@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/slice.h
 
@@ -19,17 +32,16 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_OLAP_STRING_SLICE_H
-#define STARROCKS_BE_SRC_OLAP_STRING_SLICE_H
+#pragma once
 
-#include <assert.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <string.h>
-
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "util/memcmp.h"
@@ -52,7 +64,7 @@ class faststring;
 class Slice {
 public:
     char* data;
-    size_t size;
+    size_t size{0};
 
     static void init();
     static const Slice& max_value();
@@ -61,7 +73,7 @@ public:
     // Intentionally copyable
 
     /// Create an empty slice.
-    Slice() : data(const_cast<char*>("")), size(0) {}
+    Slice() : data(const_cast<char*>("")) {}
 
     /// Create a slice that refers to a @c char byte array.
     Slice(const char* d, size_t n) : data(const_cast<char*>(d)), size(n) {}
@@ -87,6 +99,8 @@ public:
             : // NOLINT(runtime/explicit)
               data(const_cast<char*>(s)),
               size(strlen(s)) {}
+
+    operator std::string_view() const { return {data, size}; }
 
     /// @return A pointer to the beginning of the referenced data.
     const char* get_data() const { return data; }
@@ -315,6 +329,8 @@ public:
         swap(_slice, rhs._slice);
     }
 
+    bool is_loaded() { return _slice.get_data() && (_slice.get_size() > 0); }
+
 private:
     friend void swap(OwnedSlice& s1, OwnedSlice& s2);
 
@@ -326,4 +342,3 @@ inline void swap(OwnedSlice& s1, OwnedSlice& s2) {
 }
 
 } // namespace starrocks
-#endif // STARROCKS_BE_SRC_OLAP_STRING_SLICE_H

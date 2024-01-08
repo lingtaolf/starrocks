@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/proc/SchemaChangeProcDir.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -29,6 +25,7 @@ import com.starrocks.alter.AlterJobV2;
 import com.starrocks.alter.SchemaChangeHandler;
 import com.starrocks.alter.SchemaChangeJobV2;
 import com.starrocks.analysis.BinaryPredicate;
+import com.starrocks.analysis.BinaryType;
 import com.starrocks.analysis.DateLiteral;
 import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.LimitElement;
@@ -72,7 +69,7 @@ public class SchemaChangeProcDir implements ProcDirInterface {
             return true;
         }
         BinaryPredicate binaryPredicate = (BinaryPredicate) subExpr;
-        if (subExpr.getChild(1) instanceof StringLiteral && binaryPredicate.getOp() == BinaryPredicate.Operator.EQ) {
+        if (subExpr.getChild(1) instanceof StringLiteral && binaryPredicate.getOp() == BinaryType.EQ) {
             return ((StringLiteral) subExpr.getChild(1)).getValue().equals(element);
         }
         if (subExpr.getChild(1) instanceof DateLiteral) {

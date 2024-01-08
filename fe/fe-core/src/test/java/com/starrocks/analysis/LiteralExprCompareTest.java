@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/analysis/LiteralExprCompareTest.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -58,16 +54,14 @@ public class LiteralExprCompareTest {
         Assert.assertTrue(0 == boolTrue1.compareLiteral(boolTrue1));
     }
 
-    @Test(expected = AnalysisException.class)
+    @Test
     public void dateFormat1Test() throws AnalysisException {
         LiteralExpr date = new DateLiteral("2015-02-15 12:12:12", ScalarType.DATE);
-        Assert.fail();
     }
 
-    @Test(expected = AnalysisException.class)
+    @Test
     public void dateFormat2Test() throws AnalysisException {
         LiteralExpr datetime = new DateLiteral("2015-02-15", ScalarType.DATETIME);
-        Assert.fail();
     }
 
     @Test
@@ -89,7 +83,7 @@ public class LiteralExprCompareTest {
         LiteralExpr minDatetime1 = new DateLiteral(ScalarType.DATETIME, false);
         LiteralExpr minDatetime1Same = new DateLiteral(ScalarType.DATETIME, false);
         LiteralExpr date8 = new DateLiteral("9999-12-31", ScalarType.DATE);
-        LiteralExpr date9 = new DateLiteral("9999-12-31 23:59:59", ScalarType.DATETIME);
+        LiteralExpr date9 = new DateLiteral("9999-12-31 23:59:59.999999", ScalarType.DATETIME);
         LiteralExpr date10 = new DateLiteral("0000-01-01", ScalarType.DATE);
         LiteralExpr date11 = new DateLiteral("0000-01-01 00:00:00", ScalarType.DATETIME);
 
@@ -146,7 +140,8 @@ public class LiteralExprCompareTest {
         Assert.assertTrue(0 == decimal1.compareLiteral(decimal1));
     }
 
-    public void floatAndDoubleExpr() {
+    @Test
+    public void floatAndDoubleExpr() throws AnalysisException {
         LiteralExpr float1 = new FloatLiteral(1.12345, ScalarType.FLOAT);
         LiteralExpr float2 = new FloatLiteral(1.12345, ScalarType.FLOAT);
         LiteralExpr float3 = new FloatLiteral(1.12346, ScalarType.FLOAT);

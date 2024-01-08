@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/path_util.cpp
 
@@ -21,12 +34,10 @@
 
 #include "util/path_util.h"
 
-#include <cstring>
 #include <memory>
-// Use the POSIX version of dirname(3). See `man 3 dirname`
+// Use the POSIX version of basename(3). See `man 3 basename`
 #include <libgen.h>
 
-#include "common/logging.h"
 #include "gutil/strings/split.h"
 #include "gutil/strings/stringpiece.h"
 #include "gutil/strings/strip.h"
@@ -36,8 +47,7 @@ using std::vector;
 using strings::SkipEmpty;
 using strings::Split;
 
-namespace starrocks {
-namespace path_util {
+namespace starrocks::path_util {
 
 const string kTmpInfix = ".starrockstmp";
 
@@ -53,6 +63,7 @@ std::string join_path_segments(const string& a, const string& b) {
 
 std::vector<string> join_path_segments_v(const std::vector<string>& v, const string& s) {
     std::vector<string> out;
+    out.reserve(v.size());
     for (const string& path : v) {
         out.emplace_back(join_path_segments(path, s));
     }
@@ -89,13 +100,12 @@ std::string base_name(const string& path) {
 
 std::string file_extension(const string& path) {
     string file_name = base_name(path);
-    if (file_name == "." || file_name == "..") {
+    if (file_name == "." || file_name == ".." || file_name.find('.') == 0) {
         return "";
     }
 
-    string::size_type pos = file_name.rfind(".");
+    string::size_type pos = file_name.rfind('.');
     return pos == string::npos ? "" : file_name.substr(pos);
 }
 
-} // namespace path_util
-} // namespace starrocks
+} // namespace starrocks::path_util

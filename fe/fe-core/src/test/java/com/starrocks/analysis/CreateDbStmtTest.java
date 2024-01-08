@@ -1,63 +1,48 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/analysis/CreateDbStmtTest.java
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
 
 package com.starrocks.analysis;
 
-import com.starrocks.common.AnalysisException;
-import com.starrocks.common.UserException;
-import com.starrocks.mysql.privilege.Auth;
-import com.starrocks.mysql.privilege.MockedAuth;
 import com.starrocks.qe.ConnectContext;
-import mockit.Mocked;
-import org.junit.Assert;
-import org.junit.Before;
+import com.starrocks.sql.analyzer.AnalyzeTestUtil;
+import com.starrocks.sql.ast.CreateDbStmt;
+import com.starrocks.utframe.StarRocksAssert;
+import com.starrocks.utframe.UtFrameUtils;
+import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ExpectedException;
 
 public class CreateDbStmtTest {
-    private Analyzer analyzer;
+    private static ConnectContext connectContext;
 
-    @Mocked
-    private Auth auth;
-    @Mocked
-    private ConnectContext ctx;
+    @Rule
+    public ExpectedException expectedEx = ExpectedException.none();
 
-    @Before()
-    public void setUp() {
-        analyzer = AccessTestUtil.fetchAdminAnalyzer(true);
-        MockedAuth.mockedAuth(auth);
-        MockedAuth.mockedConnectContext(ctx, "root", "192.168.1.1");
+    @BeforeClass
+    public static void beforeClass() throws Exception {
+        UtFrameUtils.createMinStarRocksCluster();
+        // create connect context
+        connectContext = UtFrameUtils.createDefaultCtx();
     }
 
     @Test
-    public void testAnalyzeNormal() throws UserException, AnalysisException {
-        CreateDbStmt dbStmt = new CreateDbStmt(false, "test");
-        dbStmt.analyze(analyzer);
-        Assert.assertEquals("testCluster:test", dbStmt.getFullDbName());
-        Assert.assertEquals("CREATE DATABASE `testCluster:test`", dbStmt.toString());
-    }
-
-    @Test(expected = AnalysisException.class)
-    public void testAnnlyzeWithException() throws UserException, AnalysisException {
-        CreateDbStmt stmt = new CreateDbStmt(false, "");
-        stmt.analyze(analyzer);
-        Assert.fail("no exception");
+    public void testNormal() throws Exception {
+        // Dbeaver 23 Use
+        String stmt = "CREATE SCHEMA `test_db` DEFAULT CHARACTER SET utf8 DEFAULT COLLATE utf8_general_ci";
+        CreateDbStmt adminSetConfigStmt =
+                (CreateDbStmt) UtFrameUtils.parseStmtWithNewParser(stmt, connectContext);
     }
 }

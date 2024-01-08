@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/http/rest/GetDdlStmtAction.java
 
@@ -24,7 +37,6 @@ package com.starrocks.http.rest;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.DdlException;
@@ -32,12 +44,15 @@ import com.starrocks.http.ActionController;
 import com.starrocks.http.BaseRequest;
 import com.starrocks.http.BaseResponse;
 import com.starrocks.http.IllegalArgException;
-import com.starrocks.mysql.privilege.PrivPredicate;
+import com.starrocks.meta.lock.LockType;
+import com.starrocks.meta.lock.Locker;
+import com.starrocks.privilege.AccessDeniedException;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.UserIdentity;
 import io.netty.handler.codec.http.HttpMethod;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jackson.map.ObjectMapper;
 
 import java.util.List;
 import java.util.Map;
@@ -63,8 +78,9 @@ public class GetDdlStmtAction extends RestBaseAction {
 
     @Override
     public void executeWithoutPassword(BaseRequest request, BaseResponse response)
-            throws DdlException {
-        checkGlobalAuth(ConnectContext.get().getCurrentUserIdentity(), PrivPredicate.ADMIN);
+            throws DdlException, AccessDeniedException {
+        UserIdentity currentUser = ConnectContext.get().getCurrentUserIdentity();
+        checkUserOwnsAdminRole(currentUser);
 
         String dbName = request.getSingleParameter(DB_PARAM);
         String tableName = request.getSingleParameter(TABLE_PARAM);
@@ -73,7 +89,7 @@ public class GetDdlStmtAction extends RestBaseAction {
             throw new DdlException("Missing params. Need database name and Table name");
         }
 
-        Database db = Catalog.getCurrentCatalog().getDb(dbName);
+        Database db = GlobalStateMgr.getCurrentState().getDb(dbName);
         if (db == null) {
             throw new DdlException("Database[" + dbName + "] does not exist");
         }
@@ -82,18 +98,19 @@ public class GetDdlStmtAction extends RestBaseAction {
         List<String> addPartitionStmt = Lists.newArrayList();
         List<String> createRollupStmt = Lists.newArrayList();
 
-        db.readLock();
+        Locker locker = new Locker();
+        locker.lockDatabase(db, LockType.READ);
         try {
             Table table = db.getTable(tableName);
             if (table == null) {
                 throw new DdlException("Table[" + tableName + "] does not exist");
             }
 
-            Catalog.getDdlStmt(table, createTableStmt, addPartitionStmt, createRollupStmt, true,
+            GlobalStateMgr.getDdlStmt(table, createTableStmt, addPartitionStmt, createRollupStmt, true,
                     false /* show password */);
 
         } finally {
-            db.readUnlock();
+            locker.unLockDatabase(db, LockType.READ);
         }
 
         Map<String, List<String>> results = Maps.newHashMap();
@@ -102,17 +119,6 @@ public class GetDdlStmtAction extends RestBaseAction {
         results.put("ROLLUP", createRollupStmt);
 
         // to json response
-        String result = "";
-        ObjectMapper mapper = new ObjectMapper();
-        try {
-            result = mapper.writeValueAsString(results);
-        } catch (Exception e) {
-            //  do nothing
-        }
-
-        // send result
-        response.setContentType("application/json");
-        response.getContent().append(result);
-        sendResult(request, response);
+        sendResultByJson(request, response, results);
     }
 }

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/test/runtime/routine_load_task_executor_test.cpp
 
@@ -43,8 +56,8 @@ extern TStreamLoadPutResult k_stream_load_put_result;
 
 class RoutineLoadTaskExecutorTest : public testing::Test {
 public:
-    RoutineLoadTaskExecutorTest() {}
-    virtual ~RoutineLoadTaskExecutorTest() {}
+    RoutineLoadTaskExecutorTest() = default;
+    ~RoutineLoadTaskExecutorTest() override = default;
 
     void SetUp() override {
         k_stream_load_begin_result = TLoadTxnBeginResult();
@@ -52,17 +65,14 @@ public:
         k_stream_load_rollback_result = TLoadTxnRollbackResult();
         k_stream_load_put_result = TStreamLoadPutResult();
 
-        _env._master_info = new TMasterInfo();
         _env._load_stream_mgr = new LoadStreamMgr();
         _env._stream_load_executor = new StreamLoadExecutor(&_env);
 
-        config::routine_load_thread_pool_size = 5;
         config::max_consumer_num_per_group = 3;
+        config::routine_load_kafka_timeout_second = 3;
     }
 
     void TearDown() override {
-        delete _env._master_info;
-        _env._master_info = nullptr;
         delete _env._load_stream_mgr;
         _env._load_stream_mgr = nullptr;
         delete _env._stream_load_executor;
@@ -126,9 +136,3 @@ TEST_F(RoutineLoadTaskExecutorTest, exec_task) {
 }
 
 } // namespace starrocks
-
-int main(int argc, char* argv[]) {
-    starrocks::CpuInfo::init();
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

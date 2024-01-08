@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/util/RangeUtils.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -42,7 +38,7 @@ public class RangeUtils {
             Comparator.comparing(o -> o.getValue().lowerEndpoint());
 
     public static final Comparator<Range<PartitionKey>> RANGE_COMPARATOR =
-            Comparator.comparing(o -> o.lowerEndpoint());
+            Comparator.comparing(Range::lowerEndpoint);
 
     public static void checkRangeIntersect(Range<PartitionKey> range1, Range<PartitionKey> range2) throws DdlException {
         if (range2.isConnected(range1)) {
@@ -50,6 +46,14 @@ public class RangeUtils {
                 throw new DdlException("Range " + range1 + " is intersected with range: " + range2);
             }
         }
+    }
+
+    public static <T extends Comparable> boolean isRangeEqual(Range<T> l, Range<T> r) {
+        if (l == null || r == null) {
+            return false;
+        }
+        return l.lowerEndpoint().compareTo(r.lowerEndpoint()) == 0 &&
+                l.upperEndpoint().compareTo(r.upperEndpoint()) == 0;
     }
 
     /*
@@ -88,7 +92,7 @@ public class RangeUtils {
         Range<PartitionKey> range2 = list2.get(idx2);
         while (true) {
             if (range1.lowerEndpoint().compareTo(range2.lowerEndpoint()) != 0) {
-                throw new DdlException("2 range lists are not stricly matched. "
+                throw new DdlException("2 range lists are not strictly matched. "
                         + range1.lowerEndpoint() + " vs. " + range2.lowerEndpoint());
             }
 
@@ -118,7 +122,7 @@ public class RangeUtils {
         }
 
         if (idx1 < list1.size() || idx2 < list2.size()) {
-            throw new DdlException("2 range lists are not stricly matched. "
+            throw new DdlException("2 range lists are not strictly matched. "
                     + list1 + " vs. " + list2);
         }
     }
@@ -126,6 +130,12 @@ public class RangeUtils {
     public static void writeRange(DataOutput out, Range<PartitionKey> range) throws IOException {
         boolean hasLowerBound = false;
         boolean hasUpperBound = false;
+
+        if (range == null) {
+            out.writeBoolean(hasLowerBound);
+            out.writeBoolean(hasUpperBound);
+            return;
+        }
 
         // write lower bound if lower bound exists
         hasLowerBound = range.hasLowerBound();

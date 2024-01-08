@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/orc/tree/main/c++/test/TestBufferedOutputStream.cc
 
@@ -113,7 +126,7 @@ TEST(BufferedOutputStream, protobuff_serialization) {
 
     EXPECT_TRUE(ps.SerializeToZeroCopyStream(&bufStream));
     bufStream.flush();
-    EXPECT_EQ(ps.ByteSize(), memStream.getLength());
+    EXPECT_EQ(ps.ByteSizeLong(), memStream.getLength());
 
     proto::PostScript ps2;
     ps2.ParseFromArray(memStream.getData(), static_cast<int>(memStream.getLength()));

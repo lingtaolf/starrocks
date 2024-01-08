@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/persist/AlterViewInfo.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -45,18 +41,22 @@ public class AlterViewInfo implements Writable {
     private long sqlMode;
     @SerializedName(value = "newFullSchema")
     private List<Column> newFullSchema;
+    @SerializedName(value = "comment")
+    private String comment;
 
     public AlterViewInfo() {
         // for persist
         newFullSchema = Lists.newArrayList();
     }
 
-    public AlterViewInfo(long dbId, long tableId, String inlineViewDef, List<Column> newFullSchema, long sqlMode) {
+    public AlterViewInfo(long dbId, long tableId, String inlineViewDef, List<Column> newFullSchema, long sqlMode,
+                         String comment) {
         this.dbId = dbId;
         this.tableId = tableId;
         this.inlineViewDef = inlineViewDef;
         this.newFullSchema = newFullSchema;
         this.sqlMode = sqlMode;
+        this.comment = comment;
     }
 
     public long getDbId() {
@@ -79,6 +79,10 @@ public class AlterViewInfo implements Writable {
         return sqlMode;
     }
 
+    public String getComment() {
+        return comment;
+    }
+
     @Override
     public int hashCode() {
         return Objects.hash(dbId, tableId, inlineViewDef, sqlMode, newFullSchema);
@@ -93,9 +97,17 @@ public class AlterViewInfo implements Writable {
             return false;
         }
         AlterViewInfo otherInfo = (AlterViewInfo) other;
+        boolean commentEqual;
+        if (comment == null && otherInfo.getComment() == null) {
+            commentEqual = true;
+        } else if (comment != null) {
+            commentEqual = comment.equalsIgnoreCase(otherInfo.getComment());
+        } else {
+            commentEqual = false;
+        }
         return dbId == otherInfo.getDbId() && tableId == otherInfo.getTableId() &&
                 inlineViewDef.equalsIgnoreCase(otherInfo.getInlineViewDef()) && sqlMode == otherInfo.getSqlMode() &&
-                newFullSchema.equals(otherInfo.getNewFullSchema());
+                newFullSchema.equals(otherInfo.getNewFullSchema()) && commentEqual;
     }
 
     @Override

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/http/action/HaAction.java
 
@@ -21,7 +34,6 @@
 
 package com.starrocks.http.action;
 
-import com.starrocks.catalog.Catalog;
 import com.starrocks.common.Config;
 import com.starrocks.ha.HAProtocol;
 import com.starrocks.http.ActionController;
@@ -29,8 +41,11 @@ import com.starrocks.http.BaseRequest;
 import com.starrocks.http.BaseResponse;
 import com.starrocks.http.IllegalArgException;
 import com.starrocks.persist.Storage;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.system.Frontend;
 import io.netty.handler.codec.http.HttpMethod;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -38,6 +53,8 @@ import java.util.Date;
 import java.util.List;
 
 public class HaAction extends WebBaseAction {
+
+    private static final Logger LOG = LogManager.getLogger(HaAction.class);
 
     public HaAction(ActionController controller) {
         super(controller);
@@ -67,23 +84,23 @@ public class HaAction extends WebBaseAction {
     private void appendRoleInfo(StringBuilder buffer) {
         buffer.append("<h2>Frontend Role</h2>");
         buffer.append("<pre>");
-        buffer.append("<p>" + Catalog.getCurrentCatalog().getFeType() + "</p>");
+        buffer.append("<p>" + GlobalStateMgr.getCurrentState().getFeType() + "</p>");
         buffer.append("</pre>");
     }
 
     private void appendJournalInfo(StringBuilder buffer) {
         buffer.append("<h2>Current Journal Id</h2>");
         buffer.append("<pre>");
-        if (Catalog.getCurrentCatalog().isMaster()) {
-            buffer.append("<p>" + Catalog.getCurrentCatalog().getEditLog().getMaxJournalId() + "</p>");
+        if (GlobalStateMgr.getCurrentState().isLeader()) {
+            buffer.append("<p>" + GlobalStateMgr.getCurrentState().getMaxJournalId() + "</p>");
         } else {
-            buffer.append("<p>" + Catalog.getCurrentCatalog().getReplayedJournalId() + "</p>");
+            buffer.append("<p>" + GlobalStateMgr.getCurrentState().getReplayedJournalId() + "</p>");
         }
         buffer.append("</pre>");
     }
 
     private void appendNodesInfo(StringBuilder buffer) {
-        HAProtocol haProtocol = Catalog.getCurrentCatalog().getHaProtocol();
+        HAProtocol haProtocol = GlobalStateMgr.getCurrentState().getHaProtocol();
         if (haProtocol == null) {
             return;
         }
@@ -114,7 +131,7 @@ public class HaAction extends WebBaseAction {
     private void appendCanReadInfo(StringBuilder buffer) {
         buffer.append("<h2>Can Read</h2>");
         buffer.append("<pre>");
-        buffer.append("<p>" + Catalog.getCurrentCatalog().canRead() + "</p>");
+        buffer.append("<p>" + GlobalStateMgr.getCurrentState().canRead() + "</p>");
 
         buffer.append("</pre>");
     }
@@ -124,18 +141,18 @@ public class HaAction extends WebBaseAction {
             Storage storage = new Storage(Config.meta_dir + "/image");
             buffer.append("<h2>Checkpoint Info</h2>");
             buffer.append("<pre>");
-            buffer.append("<p>last checkpoint version:" + storage.getImageSeq() + "</p>");
+            buffer.append("<p>last checkpoint version:" + storage.getImageJournalId() + "</p>");
             long lastCheckpointTime = storage.getCurrentImageFile().lastModified();
             Date date = new Date(lastCheckpointTime);
             buffer.append("<p>last checkpoint time: " + date + "</p>");
             buffer.append("</pre>");
         } catch (IOException e) {
-            e.printStackTrace();
+            LOG.warn(e);
         }
     }
 
     private void appendDbNames(StringBuilder buffer) {
-        List<Long> names = Catalog.getCurrentCatalog().getEditLog().getDatabaseNames();
+        List<Long> names = GlobalStateMgr.getCurrentState().getJournal().getDatabaseNames();
         if (names == null) {
             return;
         }
@@ -151,7 +168,7 @@ public class HaAction extends WebBaseAction {
     }
 
     private void appendFe(StringBuilder buffer) {
-        List<Frontend> fes = Catalog.getCurrentCatalog().getFrontends(null /* all */);
+        List<Frontend> fes = GlobalStateMgr.getCurrentState().getFrontends(null /* all */);
         if (fes == null) {
             return;
         }
@@ -165,7 +182,7 @@ public class HaAction extends WebBaseAction {
     }
 
     private void appendRemovedFe(StringBuilder buffer) {
-        List<String> feNames = Catalog.getCurrentCatalog().getRemovedFrontendNames();
+        List<String> feNames = GlobalStateMgr.getCurrentState().getRemovedFrontendNames();
         buffer.append("<h2>Removed Frontends</h2>");
         buffer.append("<pre>");
         for (String feName : feNames) {

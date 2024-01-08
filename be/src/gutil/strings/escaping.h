@@ -18,11 +18,9 @@
 //                         - see RE2::QuoteMeta).
 // And probably many more places, as well.
 
-#ifndef STRINGS_ESCAPING_H_
-#define STRINGS_ESCAPING_H_
+#pragma once
 
-#include <stddef.h>
-
+#include <cstddef>
 #include <string>
 using std::string;
 #include <vector>
@@ -142,7 +140,7 @@ bool CUnescape(const StringPiece& source, string* dest, string* error);
 
 // A version with no error reporting.
 inline bool CUnescape(const StringPiece& source, string* dest) {
-    return CUnescape(source, dest, NULL);
+    return CUnescape(source, dest, nullptr);
 }
 
 // ----------------------------------------------------------------------
@@ -163,7 +161,7 @@ bool CUnescapeForNullTerminatedString(const StringPiece& source, string* dest, s
 
 // A version with no error reporting.
 inline bool CUnescapeForNullTerminatedString(const StringPiece& source, string* dest) {
-    return CUnescapeForNullTerminatedString(source, dest, NULL);
+    return CUnescapeForNullTerminatedString(source, dest, nullptr);
 }
 
 // ----------------------------------------------------------------------
@@ -648,5 +646,3 @@ using strings::ShellEscapeCommandLine;
 using strings::ByteStringFromAscii;
 using strings::ByteStringToAscii;
 using strings::CleanStringLineEndings;
-
-#endif // STRINGS_ESCAPING_H_

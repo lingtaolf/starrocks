@@ -1,0 +1,13 @@
+diff --git a/lib/CompressionCodecZstd.cc b/lib/CompressionCodecZstd.cc
+index 14c0992..74e533f 100644
+--- a/lib/CompressionCodecZstd.cc
++++ b/lib/CompressionCodecZstd.cc
+@@ -19,7 +19,7 @@
+ #include "CompressionCodecZstd.h"
+
+ #if HAS_ZSTD
+-#include <zstd.h>
++#include <zstd/zstd.h>
+
+ namespace pulsar {
+

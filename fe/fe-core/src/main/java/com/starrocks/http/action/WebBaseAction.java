@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/http/action/WebBaseAction.java
 
@@ -22,9 +35,6 @@
 package com.starrocks.http.action;
 
 import com.google.common.base.Strings;
-import com.starrocks.analysis.CompoundPredicate.Operator;
-import com.starrocks.analysis.UserIdentity;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Config;
 import com.starrocks.common.proc.ProcNodeInterface;
@@ -36,13 +46,13 @@ import com.starrocks.http.BaseRequest;
 import com.starrocks.http.BaseResponse;
 import com.starrocks.http.HttpAuthManager;
 import com.starrocks.http.HttpAuthManager.SessionValue;
-import com.starrocks.http.UnauthorizedException;
 import com.starrocks.http.rest.RestBaseResult;
-import com.starrocks.mysql.privilege.PrivBitSet;
-import com.starrocks.mysql.privilege.PrivPredicate;
-import com.starrocks.mysql.privilege.Privilege;
+import com.starrocks.privilege.AccessDeniedException;
+import com.starrocks.privilege.PrivilegeType;
 import com.starrocks.qe.ConnectContext;
-import com.starrocks.system.SystemInfoService;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.analyzer.Authorizer;
+import com.starrocks.sql.ast.UserIdentity;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpResponseStatus;
@@ -57,7 +67,7 @@ public class WebBaseAction extends BaseAction {
     private static final Logger LOG = LogManager.getLogger(WebBaseAction.class);
 
     protected static final String STARROCKS_SESSION_ID = "STARROCKS_SESSION_ID";
-    private static final long STARROCKS_SESSION_EXPIRED_TIME = 3600 * 24; // one day
+    private static final long STARROCKS_SESSION_EXPIRED_TIME = 3600L * 24L; // one day
 
     protected static final String PAGE_HEADER = "<!DOCTYPE html>"
             + "<html>"
@@ -75,7 +85,7 @@ public class WebBaseAction extends BaseAction {
             + "  <script type=\"text/javascript\" src=\"/static?res=jquery.js\"></script>"
             + "  <script type=\"text/javascript\" src=\"/static?res=jquery.dataTables.js\"></script>"
             + "  <script type=\"text/javascript\" src=\"/static?res=datatables_bootstrap.js\"></script>"
-
+            + "  <script type=\"text/javascript\" src=\"/static?res=starrocks.js\"></script>"
             + "  <script type=\"text/javascript\"> "
             + "    $(document).ready(function() { "
             + "      $('#table_id').dataTable({ "
@@ -167,8 +177,11 @@ public class WebBaseAction extends BaseAction {
             authInfo = getAuthorizationInfo(request);
             UserIdentity currentUser = checkPassword(authInfo);
             if (needAdmin()) {
-                checkGlobalAuth(currentUser, PrivPredicate.of(PrivBitSet.of(Privilege.ADMIN_PRIV,
-                        Privilege.NODE_PRIV), Operator.OR));
+                try {
+                    Authorizer.checkSystemAction(currentUser, null, PrivilegeType.NODE);
+                } catch (AccessDeniedException e) {
+                    checkUserOwnsAdminRole(currentUser);
+                }
             }
             request.setAuthorized(true);
             SessionValue value = new SessionValue();
@@ -180,12 +193,13 @@ public class WebBaseAction extends BaseAction {
             ctx.setQueryId(UUIDUtil.genUUID());
             ctx.setRemoteIP(authInfo.remoteIp);
             ctx.setCurrentUserIdentity(currentUser);
-            ctx.setCatalog(Catalog.getCurrentCatalog());
-            ctx.setCluster(SystemInfoService.DEFAULT_CLUSTER);
+            ctx.setGlobalStateMgr(GlobalStateMgr.getCurrentState());
+            ctx.setCurrentRoleIds(currentUser);
+
             ctx.setThreadLocalInfo();
 
             return true;
-        } catch (UnauthorizedException e) {
+        } catch (AccessDeniedException e) {
             response.appendContent("Authentication Failed. <br/> " + e.getMessage());
             writeAuthResponse(request, response);
             return false;
@@ -200,20 +214,32 @@ public class WebBaseAction extends BaseAction {
             if (sessionValue == null) {
                 return false;
             }
-            if (Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(sessionValue.currentUser,
-                    PrivPredicate.of(PrivBitSet.of(Privilege.ADMIN_PRIV,
-                            Privilege.NODE_PRIV),
-                            Operator.OR))) {
+
+            boolean authorized = false;
+
+            try {
+                try {
+                    Authorizer.checkSystemAction(sessionValue.currentUser, null, PrivilegeType.NODE);
+                } catch (AccessDeniedException e) {
+                    checkUserOwnsAdminRole(sessionValue.currentUser);
+                }
+                authorized = true;
+            } catch (AccessDeniedException e) {
+                // ignore
+            }
+
+            if (authorized) {
                 response.updateCookieAge(request, STARROCKS_SESSION_ID, STARROCKS_SESSION_EXPIRED_TIME);
                 request.setAuthorized(true);
 
                 ConnectContext ctx = new ConnectContext(null);
-                ctx.setQualifiedUser(sessionValue.currentUser.getQualifiedUser());
+                ctx.setQualifiedUser(sessionValue.currentUser.getUser());
                 ctx.setQueryId(UUIDUtil.genUUID());
                 ctx.setRemoteIP(request.getHostString());
                 ctx.setCurrentUserIdentity(sessionValue.currentUser);
-                ctx.setCatalog(Catalog.getCurrentCatalog());
-                ctx.setCluster(SystemInfoService.DEFAULT_CLUSTER);
+                ctx.setGlobalStateMgr(GlobalStateMgr.getCurrentState());
+                ctx.setCurrentRoleIds(sessionValue.currentUser);
+
                 ctx.setThreadLocalInfo();
                 return true;
             }
@@ -281,9 +307,6 @@ public class WebBaseAction extends BaseAction {
                     .append("ha")
                     .append("</a></li>");
         }
-        sb.append("<li id=\"nav_help\"><a href=\"/help\">")
-                .append("help")
-                .append("</a></li></tr>");
 
         sb.append(NAVIGATION_BAR_SUFFIX);
     }
@@ -354,7 +377,7 @@ public class WebBaseAction extends BaseAction {
                     buff.append("&lt;");
                     break;
                 case '>':
-                    buff.append("&lt;");
+                    buff.append("&gt;");
                     break;
                 case '"':
                     buff.append("&quot;");

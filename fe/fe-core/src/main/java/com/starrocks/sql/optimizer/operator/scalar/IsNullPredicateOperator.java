@@ -1,4 +1,17 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package com.starrocks.sql.optimizer.operator.scalar;
 
 import com.starrocks.sql.optimizer.operator.OperatorType;
@@ -9,13 +22,17 @@ public class IsNullPredicateOperator extends PredicateOperator {
     private final boolean isNotNull;
 
     public IsNullPredicateOperator(ScalarOperator arguments) {
-        super(OperatorType.IS_NULL, arguments);
-        this.isNotNull = false;
+        this(false, arguments, false);
     }
 
     public IsNullPredicateOperator(boolean isNotNull, ScalarOperator arguments) {
+        this(isNotNull, arguments, false);
+
+    }
+    public IsNullPredicateOperator(boolean isNotNull, ScalarOperator arguments, boolean isRedundant) {
         super(OperatorType.IS_NULL, arguments);
         this.isNotNull = isNotNull;
+        this.isRedundant = isRedundant;
     }
 
     public boolean isNotNull() {
@@ -59,14 +76,5 @@ public class IsNullPredicateOperator extends PredicateOperator {
     @Override
     public int hashCode() {
         return Objects.hash(super.hashCode(), isNotNull);
-    }
-
-    @Override
-    public boolean isStrictPredicate() {
-        if (getChild(0).isColumnRefOrCast()) {
-            return isNotNull;
-        } else {
-            return false;
-        }
     }
 }

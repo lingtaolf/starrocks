@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/Replica.java
 
@@ -22,7 +35,6 @@
 package com.starrocks.catalog;
 
 import com.google.gson.annotations.SerializedName;
-import com.starrocks.common.FeMetaVersion;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import org.apache.logging.log4j.LogManager;
@@ -40,6 +52,8 @@ public class Replica implements Writable {
     private static final Logger LOG = LogManager.getLogger(Replica.class);
     public static final VersionComparator<Replica> VERSION_DESC_COMPARATOR = new VersionComparator<Replica>();
 
+    public static final int DEPRECATED_PROP_SCHEMA_HASH = 0;
+
     public enum ReplicaState {
         NORMAL,
         @Deprecated
@@ -48,7 +62,8 @@ public class Replica implements Writable {
         SCHEMA_CHANGE,
         CLONE,
         ALTER, // replica is under rollup or schema change
-        DECOMMISSION; // replica is ready to be deleted
+        DECOMMISSION, // replica is ready to be deleted
+        RECOVER;  // replica is recovering
 
         public boolean canLoad() {
             return this == NORMAL || this == SCHEMA_CHANGE || this == ALTER;
@@ -75,8 +90,24 @@ public class Replica implements Writable {
     // the version could be queried
     @SerializedName(value = "version")
     private volatile long version;
-    @SerializedName(value = "versionHash")
-    private long versionHash;
+
+    // minimal readable version for this replica, the value is 0 at beginning and will change to larger values when:
+    //   1. replica perform some version GC, and then tablet report from BE
+    //   2. a replica clone task finishes, and report TTabletInfo to FE with the new minReadableVersion
+    // the main purpose of adding this field is to avoid the situation that:
+    //   1. tablet has 2 replica A has version[7,8,9,10], B: [7,8,9,10]
+    //   2. a newly cloned replica C full clone from replica A, then has version [10]
+    //   3. current partition visible version is still 9
+    //   4. A query read this tablet at version 9, and picks replica C, but replica C doesn't have version 10,
+    //      causing `version not found` error
+    @SerializedName(value = "minReadableVersion")
+    private volatile long minReadableVersion = 0;
+
+    // The last version reported from BE, this version should be increased monotonically.
+    // Use this version to detect data lose on BE.
+    // This version is only accessed by ReportHandler, so lock is unnecessary when updating.
+    private volatile long lastReportVersion = 0;
+
     private int schemaHash = -1;
     @SerializedName(value = "dataSize")
     private volatile long dataSize = 0;
@@ -88,25 +119,23 @@ public class Replica implements Writable {
     // the last load failed version
     @SerializedName(value = "lastFailedVersion")
     private long lastFailedVersion = -1L;
-    @SerializedName(value = "lastFailedVersionHash")
-    private long lastFailedVersionHash = 0L;
     // not serialized, not very important
     private long lastFailedTimestamp = 0;
     // the last load successful version
     @SerializedName(value = "lastSuccessVersion")
     private long lastSuccessVersion = -1L;
-    @SerializedName(value = "lastSuccessVersionHash")
-    private long lastSuccessVersionHash = 0L;
 
     private volatile long versionCount = -1;
 
     private long pathHash = -1;
 
-    // bad means this Replica is unrecoverable and we will delete it
+    // If bad and setBadForce are both true, it means this Replica is unrecoverable and we will delete it
+    // if bad is true and isForceSetBad is false, it means this replica can be recover by be.
     private boolean bad = false;
+    private boolean setBadForce = false;
 
     /*
-     * If set to true, with means this replica need to be repaired. explicitly.
+     * If set to true, which means this replica need to be repaired explicitly.
      * This can happen when this replica is created by a balance clone task, and
      * when task finished, the version of this replica is behind the partition's visible version.
      * So this replica need a further repair.
@@ -125,28 +154,65 @@ public class Replica implements Writable {
     // we should ensure that all txns on this replicas are finished.
     private long watermarkTxnId = -1;
 
+    /**
+     * In the following situation, a normally cloned replica could be falsely deleted:
+     * <p>
+     * 1. BE X generates tablet report and sends it to FE<p>
+     * 2. FE creates clone task(for balance or repair) and a new replica on BE X,
+     * so the corresponding tablet is not included in the report sent above.<p>
+     * 3. BE X finishes clone and then FE will receive the message and set the state
+     * of new replica to NORMAL<p>
+     * 4. FE processes the tablet report from step 1 and finds that BE X doesn't report
+     * the tablet info corresponding to the newly created replica, so it will delete
+     * the replica from its meta<p>
+     * 5. On the next tablet report of BE X which will include the tablet info, FE finds
+     * that the tablet reported by BE X doesn't exist in its meta, so it will send a
+     * request asking BE X to delete the newly cloned replica physically.
+     * <p>
+     * The main reason causes this problem is that FE handles tablet report task and clone
+     * task concurrently, with specific timing, this will happen. So we add a new state
+     * `deferReplicaDeleteToNextReport` for `Replica`, default to true. When FE meets a replica
+     * only existed in FE's meta, not in the tablet report, it will check
+     * `deferReplicaDeleteToNextReport` and defer the meta delete till next report of the BE.
+     */
+    private boolean deferReplicaDeleteToNextReport = true;
+
+    // if lastWriteFail is true, we can not use it as replicated storage primary replica
+    private volatile boolean lastWriteFail = false;
+
+    private boolean isErrorState = false;
+
+    // This variable will be used in Primary Key table only. It is the max rowset creation time for
+    // the corresponding replica. This variable is in-memory only.
+    private long maxRowsetCreationTime = -1L;
+
     public Replica() {
     }
 
     // for rollup
     // the new replica's version is -1 and last failed version is -1
     public Replica(long replicaId, long backendId, int schemaHash, ReplicaState state) {
-        this(replicaId, backendId, -1, 0, schemaHash, 0L, 0L, state, -1, 0, -1, 0);
+        this(replicaId, backendId, -1, schemaHash, 0L, 0L, state, -1, -1);
     }
 
     // for create tablet and restore
-    public Replica(long replicaId, long backendId, ReplicaState state, long version, long versionHash, int schemaHash) {
-        this(replicaId, backendId, version, versionHash, schemaHash, 0L, 0L, state, -1L, 0L, version, versionHash);
+    public Replica(long replicaId, long backendId, ReplicaState state, long version, int schemaHash) {
+        this(replicaId, backendId, version, schemaHash, 0L, 0L, state, -1L, version);
     }
 
-    public Replica(long replicaId, long backendId, long version, long versionHash, int schemaHash,
+    public Replica(long replicaId, long backendId, long version, int schemaHash,
                    long dataSize, long rowCount, ReplicaState state,
-                   long lastFailedVersion, long lastFailedVersionHash,
-                   long lastSuccessVersion, long lastSuccessVersionHash) {
+                   long lastFailedVersion, long lastSuccessVersion) {
+        this(replicaId, backendId, version, schemaHash, dataSize, rowCount, state,
+                lastFailedVersion, lastSuccessVersion, 0);
+    }
+
+    public Replica(long replicaId, long backendId, long version, int schemaHash,
+                   long dataSize, long rowCount, ReplicaState state,
+                   long lastFailedVersion, long lastSuccessVersion, long minReadableVersion) {
         this.id = replicaId;
         this.backendId = backendId;
         this.version = version;
-        this.versionHash = versionHash;
         this.schemaHash = schemaHash;
 
         this.dataSize = dataSize;
@@ -156,25 +222,35 @@ public class Replica implements Writable {
             this.state = ReplicaState.NORMAL;
         }
         this.lastFailedVersion = lastFailedVersion;
-        this.lastFailedVersionHash = lastFailedVersionHash;
         if (this.lastFailedVersion > 0) {
             this.lastFailedTimestamp = System.currentTimeMillis();
         }
         if (lastSuccessVersion < this.version) {
             this.lastSuccessVersion = this.version;
-            this.lastSuccessVersionHash = this.versionHash;
         } else {
             this.lastSuccessVersion = lastSuccessVersion;
-            this.lastSuccessVersionHash = lastSuccessVersionHash;
         }
+        this.minReadableVersion = minReadableVersion;
+    }
+
+    public void setLastWriteFail(boolean lastWriteFail) {
+        this.lastWriteFail = lastWriteFail;
+    }
+
+    public boolean getLastWriteFail() {
+        return this.lastWriteFail;
+    }
+
+    public void setLastFailedTime(long lastFailedTime) {
+        this.lastFailedTimestamp = lastFailedTime;
     }
 
     public long getVersion() {
         return this.version;
     }
 
-    public long getVersionHash() {
-        return this.versionHash;
+    public long getMinReadableVersion() {
+        return this.minReadableVersion;
     }
 
     public int getSchemaHash() {
@@ -206,10 +282,6 @@ public class Replica implements Writable {
         return lastFailedVersion;
     }
 
-    public long getLastFailedVersionHash() {
-        return lastFailedVersionHash;
-    }
-
     public long getLastFailedTimestamp() {
         return lastFailedTimestamp;
     }
@@ -218,8 +290,8 @@ public class Replica implements Writable {
         return lastSuccessVersion;
     }
 
-    public long getLastSuccessVersionHash() {
-        return lastSuccessVersionHash;
+    public long getMaxRowsetCreationTime() {
+        return maxRowsetCreationTime;
     }
 
     public long getPathHash() {
@@ -242,6 +314,40 @@ public class Replica implements Writable {
         return true;
     }
 
+    public boolean setBadForce(boolean bad) {
+        if (this.bad == bad) {
+            return false;
+        }
+        this.bad = bad;
+        this.setBadForce = bad;
+        return true;
+    }
+
+    public boolean isSetBadForce() {
+        return this.setBadForce;
+    }
+
+    public boolean isErrorState() {
+        return this.isErrorState;
+    }
+
+    public boolean setIsErrorState(boolean state) {
+        if (this.isErrorState == state) {
+            return false;
+        }
+        this.isErrorState = state;
+        return true;
+    }
+
+    public boolean setMaxRowsetCreationTime(long newCreationTime) {
+        if (newCreationTime < maxRowsetCreationTime) {
+            return false;
+        }
+
+        maxRowsetCreationTime = newCreationTime;
+        return true;
+    }
+
     public boolean needFurtherRepair() {
         if (needFurtherRepair && System.currentTimeMillis() - this.furtherRepairSetTime < FURTHER_REPAIR_TIMEOUT_MS) {
             return true;
@@ -254,42 +360,52 @@ public class Replica implements Writable {
         this.furtherRepairSetTime = System.currentTimeMillis();
     }
 
+    public boolean getDeferReplicaDeleteToNextReport() {
+        return deferReplicaDeleteToNextReport;
+    }
+
+    public void setDeferReplicaDeleteToNextReport(boolean defer) {
+        this.deferReplicaDeleteToNextReport = defer;
+    }
+
     // only update data size and row num
-    public synchronized void updateStat(long dataSize, long rowNum) {
+    public synchronized void updateStat(long dataSize, long rowNum, long versionCount) {
         this.dataSize = dataSize;
         this.rowCount = rowNum;
+        this.versionCount = versionCount;
     }
 
-    public synchronized void updateVersionInfo(long newVersion, long newVersionHash, long newDataSize,
-                                               long newRowCount) {
-        updateReplicaInfo(newVersion, newVersionHash, this.lastFailedVersion, this.lastFailedVersionHash,
-                this.lastSuccessVersion, this.lastSuccessVersionHash, newDataSize, newRowCount);
+    public synchronized void updateRowCount(long newVersion, long minReadableVersion, long newDataSize,
+                                            long newRowCount) {
+        updateReplicaInfo(newVersion, this.lastFailedVersion,
+                this.lastSuccessVersion, minReadableVersion, newDataSize, newRowCount);
     }
 
-    public synchronized void updateVersionInfo(long newVersion, long newVersionHash,
-                                               long lastFailedVersion, long lastFailedVersionHash,
-                                               long lastSuccessVersion, long lastSuccessVersionHash) {
-        updateReplicaInfo(newVersion, newVersionHash, lastFailedVersion, lastFailedVersionHash,
-                lastSuccessVersion, lastSuccessVersionHash, dataSize, rowCount);
+    public synchronized void updateRowCount(long newVersion, long newDataSize,
+                                            long newRowCount) {
+        updateReplicaInfo(newVersion, this.lastFailedVersion,
+                this.lastSuccessVersion, this.minReadableVersion, newDataSize, newRowCount);
     }
 
-    public void updateVersionInfoForRecovery(
-            long newVersion, long newVersionHash,
-            long lastFailedVersion, long lastFailedVersionHash,
-            long lastSuccessVersion, long lastSuccessVersionHash) {
+    public synchronized void updateVersionInfo(long newVersion,
+                                               long lastFailedVersion,
+                                               long lastSuccessVersion) {
+        updateReplicaInfo(newVersion, lastFailedVersion,
+                lastSuccessVersion, this.minReadableVersion, dataSize, rowCount);
+    }
 
-        LOG.warn("update replica {} on backend {}'s version for recovery. version: {}-{}:{}-{}."
-                        + " last failed version: {}-{}:{}-{}, last success version: {}-{}:{}-{}",
-                this.id, this.backendId, this.version, this.versionHash, newVersion, newVersionHash,
-                this.lastFailedVersion, this.lastFailedVersionHash, lastFailedVersion, lastFailedVersionHash,
-                this.lastSuccessVersion, this.lastSuccessVersionHash, lastSuccessVersion, lastSuccessVersionHash);
+    public synchronized void updateVersion(long version) {
+        updateReplicaInfo(version, this.lastFailedVersion,
+                this.lastSuccessVersion, this.minReadableVersion, dataSize, rowCount);
+    }
 
+    public synchronized void updateForRestore(long newVersion, long newDataSize,
+                                              long newRowCount) {
         this.version = newVersion;
-        this.versionHash = newVersionHash;
-        this.lastFailedVersion = lastFailedVersion;
-        this.lastFailedVersionHash = lastFailedVersionHash;
-        this.lastSuccessVersion = lastSuccessVersion;
-        this.lastSuccessVersionHash = lastSuccessVersionHash;
+        this.lastFailedVersion = -1;
+        this.lastSuccessVersion = newVersion;
+        this.dataSize = newDataSize;
+        this.rowCount = newRowCount;
     }
 
     /* last failed version:  LFV
@@ -316,10 +432,12 @@ public class Replica implements Writable {
      *      the V(hash) equals to LSV(hash), and V equals to LFV, but LFV hash is 0 or some unknown number.
      *      We just reset the LFV(hash) to recovery this replica.
      */
-    private void updateReplicaInfo(long newVersion, long newVersionHash,
-                                   long lastFailedVersion, long lastFailedVersionHash,
-                                   long lastSuccessVersion, long lastSuccessVersionHash,
-                                   long newDataSize, long newRowCount) {
+    private void updateReplicaInfo(long newVersion,
+                                   long lastFailedVersion,
+                                   long lastSuccessVersion,
+                                   long minReadableVersion,
+                                   long newDataSize,
+                                   long newRowCount) {
         if (LOG.isDebugEnabled()) {
             LOG.debug("before update: {}", this.toString());
         }
@@ -340,60 +458,48 @@ public class Replica implements Writable {
         }
 
         this.version = newVersion;
-        this.versionHash = newVersionHash;
         this.dataSize = newDataSize;
         this.rowCount = newRowCount;
 
         // just check it
         if (lastSuccessVersion <= this.version) {
             lastSuccessVersion = this.version;
-            lastSuccessVersionHash = this.versionHash;
         }
 
         // case 1:
         if (this.lastSuccessVersion <= this.lastFailedVersion) {
             this.lastSuccessVersion = this.version;
-            this.lastSuccessVersionHash = this.versionHash;
-        }
-
-        // TODO: this case is unknown, add log to observe
-        if (this.version > lastFailedVersion && lastFailedVersion > 0) {
-            LOG.debug("current version {} is larger than last failed version {}, "
-                            + "last failed version hash {}, maybe a fatal error or be report version, print a stack here ",
-                    this.version, lastFailedVersion, lastFailedVersionHash, new Exception());
         }
 
         if (lastFailedVersion != this.lastFailedVersion) {
             // Case 2:
             if (lastFailedVersion > this.lastFailedVersion) {
                 this.lastFailedVersion = lastFailedVersion;
-                this.lastFailedVersionHash = lastFailedVersionHash;
                 this.lastFailedTimestamp = System.currentTimeMillis();
             }
 
             this.lastSuccessVersion = this.version;
-            this.lastSuccessVersionHash = this.versionHash;
         } else {
             // Case 3:
             if (lastSuccessVersion >= this.lastSuccessVersion) {
                 this.lastSuccessVersion = lastSuccessVersion;
-                this.lastSuccessVersionHash = lastSuccessVersionHash;
             }
             if (lastFailedVersion >= this.lastSuccessVersion) {
                 this.lastSuccessVersion = this.version;
-                this.lastSuccessVersionHash = this.versionHash;
             }
         }
 
         // Case 4:
         if (this.version >= this.lastFailedVersion) {
             this.lastFailedVersion = -1;
-            this.lastFailedVersionHash = 0;
             this.lastFailedTimestamp = -1;
             if (this.version < this.lastSuccessVersion) {
                 this.version = this.lastSuccessVersion;
-                this.versionHash = this.lastSuccessVersionHash;
             }
+        }
+
+        if (minReadableVersion <= this.version) {
+            this.minReadableVersion = minReadableVersion;
         }
 
         if (LOG.isDebugEnabled()) {
@@ -401,9 +507,9 @@ public class Replica implements Writable {
         }
     }
 
-    public synchronized void updateLastFailedVersion(long lastFailedVersion, long lastFailedVersionHash) {
-        updateReplicaInfo(this.version, this.versionHash, lastFailedVersion, lastFailedVersionHash,
-                this.lastSuccessVersion, this.lastSuccessVersionHash, dataSize, rowCount);
+    public synchronized void updateLastFailedVersion(long lastFailedVersion) {
+        updateReplicaInfo(this.version, lastFailedVersion,
+                this.lastSuccessVersion, this.minReadableVersion, dataSize, rowCount);
     }
 
     /*
@@ -415,21 +521,19 @@ public class Replica implements Writable {
      *      But if state is ALTER but version larger than PARTITION_INIT_VERSION, which means this replica
      *      is already updated by load process, so we need to consider its version.
      */
-    public boolean checkVersionCatchUp(long expectedVersion, long expectedVersionHash, boolean ignoreAlter) {
-        if (ignoreAlter && state == ReplicaState.ALTER && version == Partition.PARTITION_INIT_VERSION
-                && versionHash == Partition.PARTITION_INIT_VERSION_HASH) {
+    public boolean checkVersionCatchUp(long expectedVersion, boolean ignoreAlter) {
+        if (ignoreAlter && state == ReplicaState.ALTER && version == Partition.PARTITION_INIT_VERSION) {
             return true;
         }
 
-        if (expectedVersion == Partition.PARTITION_INIT_VERSION
-                && expectedVersionHash == Partition.PARTITION_INIT_VERSION_HASH) {
+        if (expectedVersion == Partition.PARTITION_INIT_VERSION) {
             // no data is loaded into this replica, just return true
             return true;
         }
 
         if (this.version < expectedVersion) {
-            LOG.debug("replica version does not catch up with version: {}-{}. replica: {}",
-                    expectedVersion, expectedVersionHash, this);
+            LOG.debug("replica version does not catch up with version: {}. replica: {}",
+                    expectedVersion, this);
             return false;
         }
         return true;
@@ -460,7 +564,11 @@ public class Replica implements Writable {
         strBuffer.append(", version=");
         strBuffer.append(version);
         strBuffer.append(", versionHash=");
-        strBuffer.append(versionHash);
+        strBuffer.append(0);
+        strBuffer.append(", minReadableVersion=");
+        strBuffer.append(minReadableVersion);
+        strBuffer.append(", lastReportVersion=");
+        strBuffer.append(lastReportVersion);
         strBuffer.append(", dataSize=");
         strBuffer.append(dataSize);
         strBuffer.append(", rowCount=");
@@ -468,15 +576,17 @@ public class Replica implements Writable {
         strBuffer.append(", lastFailedVersion=");
         strBuffer.append(lastFailedVersion);
         strBuffer.append(", lastFailedVersionHash=");
-        strBuffer.append(lastFailedVersionHash);
+        strBuffer.append(0);
         strBuffer.append(", lastSuccessVersion=");
         strBuffer.append(lastSuccessVersion);
         strBuffer.append(", lastSuccessVersionHash=");
-        strBuffer.append(lastSuccessVersionHash);
+        strBuffer.append(0);
         strBuffer.append(", lastFailedTimestamp=");
         strBuffer.append(lastFailedTimestamp);
         strBuffer.append(", schemaHash=");
         strBuffer.append(schemaHash);
+        strBuffer.append(", minReadableVersion=");
+        strBuffer.append(minReadableVersion);
         strBuffer.append(", state=");
         strBuffer.append(state.name());
         strBuffer.append("]");
@@ -488,37 +598,40 @@ public class Replica implements Writable {
         out.writeLong(id);
         out.writeLong(backendId);
         out.writeLong(version);
-        out.writeLong(versionHash);
+        out.writeLong(0); // write a version_hash for compatibility
         out.writeLong(dataSize);
         out.writeLong(rowCount);
         Text.writeString(out, state.name());
 
         out.writeLong(lastFailedVersion);
-        out.writeLong(lastFailedVersionHash);
+        out.writeLong(minReadableVersion); // originally used as version_hash, now reused as minReadableVersion
         out.writeLong(lastSuccessVersion);
-        out.writeLong(lastSuccessVersionHash);
+        out.writeLong(0); // write a version_hash for compatibility
     }
 
     public void readFields(DataInput in) throws IOException {
         id = in.readLong();
         backendId = in.readLong();
         version = in.readLong();
-        versionHash = in.readLong();
+        in.readLong(); // read a version_hash for compatibility
         dataSize = in.readLong();
         rowCount = in.readLong();
         state = ReplicaState.valueOf(Text.readString(in));
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_45) {
-            lastFailedVersion = in.readLong();
-            lastFailedVersionHash = in.readLong();
-            lastSuccessVersion = in.readLong();
-            lastSuccessVersionHash = in.readLong();
-        }
+        lastFailedVersion = in.readLong();
+        minReadableVersion = in.readLong(); // originally used as version_hash, now reused as minReadableVersion
+        lastSuccessVersion = in.readLong();
+        in.readLong(); // read a version_hash for compatibility
     }
 
     public static Replica read(DataInput in) throws IOException {
         Replica replica = new Replica();
         replica.readFields(in);
         return replica;
+    }
+
+    @Override
+    public int hashCode() {
+        return Long.hashCode(id);
     }
 
     @Override
@@ -534,14 +647,12 @@ public class Replica implements Writable {
         return (id == replica.id)
                 && (backendId == replica.backendId)
                 && (version == replica.version)
-                && (versionHash == replica.versionHash)
                 && (dataSize == replica.dataSize)
                 && (rowCount == replica.rowCount)
                 && (state.equals(replica.state))
                 && (lastFailedVersion == replica.lastFailedVersion)
-                && (lastFailedVersionHash == replica.lastFailedVersionHash)
                 && (lastSuccessVersion == replica.lastSuccessVersion)
-                && (lastSuccessVersionHash == replica.lastSuccessVersionHash);
+                && (minReadableVersion == replica.minReadableVersion);
     }
 
     private static class VersionComparator<T extends Replica> implements Comparator<T> {
@@ -566,5 +677,13 @@ public class Replica implements Writable {
 
     public long getWatermarkTxnId() {
         return watermarkTxnId;
+    }
+
+    public void setLastReportVersion(long lastReportVersion) {
+        this.lastReportVersion = lastReportVersion;
+    }
+
+    public long getLastReportVersion() {
+        return this.lastReportVersion;
     }
 }

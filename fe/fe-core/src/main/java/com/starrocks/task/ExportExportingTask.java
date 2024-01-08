@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/task/ExportExportingTask.java
 
@@ -23,8 +36,6 @@ package com.starrocks.task;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
-import com.starrocks.catalog.Catalog;
-import com.starrocks.common.MarkedCountDownLatch;
 import com.starrocks.common.Status;
 import com.starrocks.common.UserException;
 import com.starrocks.common.Version;
@@ -33,11 +44,14 @@ import com.starrocks.common.util.DebugUtil;
 import com.starrocks.common.util.ProfileManager;
 import com.starrocks.common.util.RuntimeProfile;
 import com.starrocks.common.util.TimeUtils;
+import com.starrocks.common.util.concurrent.MarkedCountDownLatch;
+import com.starrocks.fs.HdfsUtil;
 import com.starrocks.load.ExportChecker;
 import com.starrocks.load.ExportFailMsg;
 import com.starrocks.load.ExportJob;
-import com.starrocks.qe.Coordinator;
 import com.starrocks.qe.QeProcessorImpl;
+import com.starrocks.qe.scheduler.Coordinator;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.thrift.TStatusCode;
 import com.starrocks.thrift.TUniqueId;
 import org.apache.logging.log4j.LogManager;
@@ -48,22 +62,22 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
-public class ExportExportingTask extends MasterTask {
+public class ExportExportingTask extends PriorityLeaderTask {
     private static final Logger LOG = LogManager.getLogger(ExportExportingTask.class);
     private static final int RETRY_NUM = 2;
 
     protected final ExportJob job;
 
     private RuntimeProfile profile = new RuntimeProfile("Export");
-    private List<RuntimeProfile> fragmentProfiles = Lists.newArrayList();
+    private final List<RuntimeProfile> fragmentProfiles = Lists.newArrayList();
 
     // task index -> dummy value
-    private MarkedCountDownLatch<Integer, Integer> subTasksDoneSignal;
+    private final MarkedCountDownLatch<Integer, Integer> subTasksDoneSignal;
 
     public ExportExportingTask(ExportJob job) {
         this.job = job;
         this.signature = job.getId();
-        this.subTasksDoneSignal = new MarkedCountDownLatch<Integer, Integer>(job.getCoordList().size());
+        this.subTasksDoneSignal = new MarkedCountDownLatch<>(job.getCoordList().size());
     }
 
     @Override
@@ -90,7 +104,7 @@ public class ExportExportingTask extends MasterTask {
         if (job.isReplayed()) {
             // If the job is created from replay thread, all plan info will be lost.
             // so the job has to be cancelled.
-            String failMsg = "FE restarted or Master changed during exporting. Job must be cancelled";
+            String failMsg = "FE restarted or Leader changed during exporting. Job must be cancelled";
             job.cancelInternal(ExportFailMsg.CancelType.RUN_FAIL, failMsg);
             return;
         }
@@ -101,7 +115,7 @@ public class ExportExportingTask extends MasterTask {
         List<ExportExportingSubTask> subTasks = Lists.newArrayList();
         for (int i = 0; i < coordSize; i++) {
             Coordinator coord = coords.get(i);
-            ExportExportingSubTask subTask = new ExportExportingSubTask(coord, i, coordSize);
+            ExportExportingSubTask subTask = new ExportExportingSubTask(coord, i, coordSize, job);
             subTasks.add(subTask);
             subTasksDoneSignal.addMark(i, -1);
         }
@@ -135,7 +149,7 @@ public class ExportExportingTask extends MasterTask {
         // move tmp file to final destination
         Status mvStatus = moveTmpFiles();
         if (!mvStatus.ok()) {
-            String failMsg = "move tmp file to final destination fail";
+            String failMsg = "move tmp file to final destination fail, ";
             failMsg += mvStatus.getErrorMsg();
             job.cancelInternal(ExportFailMsg.CancelType.RUN_FAIL, failMsg);
             LOG.warn("move tmp file to final destination fail. job:{}", job);
@@ -187,7 +201,8 @@ public class ExportExportingTask extends MasterTask {
 
         summaryProfile.addInfoString(ProfileManager.QUERY_TYPE, "Query");
         summaryProfile.addInfoString(ProfileManager.QUERY_STATE, job.getState().toString());
-        summaryProfile.addInfoString("StarRocks Version", Version.STARROCKS_VERSION);
+        summaryProfile.addInfoString("StarRocks Version",
+                String.format("%s-%s", Version.STARROCKS_VERSION, Version.STARROCKS_COMMIT_HASH));
         summaryProfile.addInfoString(ProfileManager.USER, "xxx");
         summaryProfile.addInfoString(ProfileManager.DEFAULT_DB, String.valueOf(job.getDbId()));
         summaryProfile.addInfoString(ProfileManager.SQL_STATEMENT, job.getSql());
@@ -201,7 +216,7 @@ public class ExportExportingTask extends MasterTask {
                 profile.addChild(p);
             }
         }
-        ProfileManager.getInstance().pushProfile(profile);
+        ProfileManager.getInstance().pushProfile(null, profile);
     }
 
     private Status moveTmpFiles() {
@@ -214,23 +229,48 @@ public class ExportExportingTask extends MasterTask {
             // remove timestamp suffix
             // data_f8d0f324-83b3-11eb-9e09-02425ee98b69_0_0_0.csv
             exportedFile = exportedFile.substring(0, exportedFile.lastIndexOf("."));
-            exportedFile = exportPath + "/" + exportedFile;
+            exportedFile = exportPath + exportedFile;
             boolean success = false;
             String failMsg = null;
 
             for (int i = 0; i < RETRY_NUM; ++i) {
                 try {
                     // check export file exist
-                    if (BrokerUtil.checkPathExist(exportedFile, job.getBrokerDesc())) {
-                        failMsg = exportedFile + " already exist";
-                        LOG.warn("move {} to {} fail. job id: {}, retry: {}, msg: {}",
-                                exportedTempFile, exportedFile, job.getId(), i, failMsg);
-                        break;
+                    if (!job.getBrokerDesc().hasBroker()) {
+                        if (HdfsUtil.checkPathExist(exportedFile, job.getBrokerDesc())) {
+                            failMsg = exportedFile + " already exist";
+                            LOG.warn("move {} to {} fail. job id: {}, retry: {}, msg: {}",
+                                    exportedTempFile, exportedFile, job.getId(), i, failMsg);
+                            break;
+                        }
+                        if (!HdfsUtil.checkPathExist(exportedTempFile, job.getBrokerDesc())) {
+                            failMsg = exportedFile + " temp file not exist";
+                            LOG.warn("move {} to {} fail. job id: {}, retry: {}, msg: {}",
+                                    exportedTempFile, exportedFile, job.getId(), i, failMsg);
+                            break;
+                        }
+                    } else {
+                        if (BrokerUtil.checkPathExist(exportedFile, job.getBrokerDesc())) {
+                            failMsg = exportedFile + " already exist";
+                            LOG.warn("move {} to {} fail. job id: {}, retry: {}, msg: {}",
+                                    exportedTempFile, exportedFile, job.getId(), i, failMsg);
+                            break;
+                        }
+                        if (!BrokerUtil.checkPathExist(exportedTempFile, job.getBrokerDesc())) {
+                            failMsg = exportedFile + " temp file not exist";
+                            LOG.warn("move {} to {} fail. job id: {}, retry: {}, msg: {}",
+                                    exportedTempFile, exportedFile, job.getId(), i, failMsg);
+                            break;
+                        }
                     }
 
                     // move
                     int timeoutMs = Math.min(Math.max(1, getLeftTimeSecond()), 3600) * 1000;
-                    BrokerUtil.rename(exportedTempFile, exportedFile, job.getBrokerDesc(), timeoutMs);
+                    if (!job.getBrokerDesc().hasBroker()) {
+                        HdfsUtil.rename(exportedTempFile, exportedFile, job.getBrokerDesc(), timeoutMs);
+                    } else {
+                        BrokerUtil.rename(exportedTempFile, exportedFile, job.getBrokerDesc(), timeoutMs);
+                    }
                     job.addExportedFile(exportedFile);
                     success = true;
                     LOG.info("move {} to {} success. job id: {}", exportedTempFile, exportedFile, job.getId());
@@ -251,16 +291,18 @@ public class ExportExportingTask extends MasterTask {
         return Status.OK;
     }
 
-    private class ExportExportingSubTask extends MasterTask {
-        private final Coordinator coord;
+    private class ExportExportingSubTask extends PriorityLeaderTask {
+        private Coordinator coord;
         private final int taskIdx;
         private final int coordSize;
+        private final ExportJob exportJob;
 
-        public ExportExportingSubTask(Coordinator coord, int taskIdx, int coordSize) {
+        public ExportExportingSubTask(Coordinator coord, int taskIdx, int coordSize, ExportJob exportJob) {
             this.coord = coord;
             this.taskIdx = taskIdx;
             this.coordSize = coordSize;
-            this.signature = Catalog.getCurrentCatalog().getNextId();
+            this.exportJob = exportJob;
+            this.signature = GlobalStateMgr.getCurrentState().getNextId();
         }
 
         public int getTaskIdx() {
@@ -294,23 +336,35 @@ public class ExportExportingTask extends MasterTask {
                     failMsg = e.getMessage();
                     TUniqueId queryId = coord.getQueryId();
                     LOG.warn("export sub task internal error. task idx: {}, task query id: {}",
-                            taskIdx, getQueryId(), e);
+                            taskIdx, queryId, e);
                 }
 
                 if (i < RETRY_NUM - 1) {
-                    TUniqueId queryId = coord.getQueryId();
-                    coord.clearExportStatus();
-
+                    TUniqueId oldQueryId = coord.getQueryId();
+                    UUID uuid = UUID.randomUUID();
                     // generate one new queryId here, to avoid being rejected by BE,
                     // because the request is considered as a repeat request.
                     // we make the high part of query id unchanged to facilitate tracing problem by log.
-                    UUID uuid = UUID.randomUUID();
-                    TUniqueId newQueryId = new TUniqueId(queryId.hi, uuid.getLeastSignificantBits());
+                    TUniqueId newQueryId = new TUniqueId(oldQueryId.hi, uuid.getLeastSignificantBits());
+                    String errorMsg = coord.getExecStatus().getErrorMsg();
+                    if (exportJob.needResetCoord()) {
+                        try {
+                            Coordinator newCoord = exportJob.resetCoord(taskIdx, newQueryId);
+                            coord = newCoord;
+                        } catch (UserException e) {
+                            // still use old coord if there are any problems when reseting Coord
+                            LOG.warn("fail to reset coord for task idx: {}, task query id: {}, reason: {}", taskIdx,
+                                    getQueryId(), e.getMessage());
+                            coord.clearExportStatus();
+                        }
+                    } else {
+                        coord.clearExportStatus();
+                    }
                     coord.setQueryId(newQueryId);
                     LOG.warn(
                             "export sub task fail. err: {}. task idx: {}, task query id: {}. retry: {}, new query id: {}",
-                            coord.getExecStatus().getErrorMsg(), taskIdx, DebugUtil.printId(queryId), i,
-                            DebugUtil.printId(newQueryId));
+                            errorMsg, taskIdx, DebugUtil.printId(oldQueryId), i,
+                            DebugUtil.printId(coord.getQueryId()));
                 }
             }
 
@@ -319,7 +373,7 @@ public class ExportExportingTask extends MasterTask {
             }
 
             coord.getQueryProfile().getCounterTotalTime().setValue(TimeUtils.getEstimatedTime(job.getStartTimeMs()));
-            coord.endProfile();
+            coord.collectProfileSync();
             synchronized (fragmentProfiles) {
                 fragmentProfiles.add(coord.getQueryProfile());
             }
@@ -341,7 +395,7 @@ public class ExportExportingTask extends MasterTask {
                 throw new UserException("timeout");
             }
 
-            coord.setTimeout(leftTimeSecond);
+            coord.setTimeoutSecond(leftTimeSecond);
             coord.exec();
 
             if (coord.join(leftTimeSecond)) {

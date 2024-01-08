@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/util/ParseUtil.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -24,11 +20,16 @@ package com.starrocks.common.util;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableMap;
 import com.starrocks.common.AnalysisException;
+import org.apache.commons.lang3.StringUtils;
 
+import java.nio.charset.StandardCharsets;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class ParseUtil {
+    public static final String HEX_STRING = "0123456789ABCDEF";
+    private static final byte[] HEX_ARRAY = "0123456789ABCDEF".getBytes(StandardCharsets.US_ASCII);
+
     private static ImmutableMap<String, Long> validDataVolumnUnitMultiplier =
             ImmutableMap.<String, Long>builder().put("B", 1L)
                     .put("K", 1024L)
@@ -44,17 +45,25 @@ public class ParseUtil {
 
     private static Pattern dataVolumnPattern = Pattern.compile("(\\d+)(\\D*)");
 
-    public static long analyzeDataVolumn(String dataVolumnStr) throws AnalysisException {
+    public static long parseDataVolumeStr(String dataVolumeStr) {
+        try {
+            return analyzeDataVolume(dataVolumeStr);
+        } catch (AnalysisException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static long analyzeDataVolume(String dataVolumeStr) throws AnalysisException {
         long dataVolumn = 0;
-        Matcher m = dataVolumnPattern.matcher(dataVolumnStr);
+        Matcher m = dataVolumnPattern.matcher(dataVolumeStr);
         if (m.matches()) {
             try {
                 dataVolumn = Long.parseLong(m.group(1));
             } catch (NumberFormatException nfe) {
-                throw new AnalysisException("invalid data volumn:" + m.group(1));
+                throw new AnalysisException("invalid data volume:" + m.group(1));
             }
             if (dataVolumn <= 0L) {
-                throw new AnalysisException("Data volumn must larger than 0");
+                throw new AnalysisException("Data volume must larger than 0");
             }
 
             String unit = "B";
@@ -68,7 +77,7 @@ public class ParseUtil {
                 throw new AnalysisException("invalid unit:" + tmpUnit);
             }
         } else {
-            throw new AnalysisException("invalid data volumn expression:" + dataVolumnStr);
+            throw new AnalysisException("invalid data volume expression:" + dataVolumeStr);
         }
         return dataVolumn;
     }
@@ -86,4 +95,37 @@ public class ParseUtil {
         return replicaNumber;
     }
 
+
+    private static byte charToByte(char c) {
+        return (byte) HEX_STRING.indexOf(c);
+    }
+
+    public static byte[] hexStrToBytes(String hexStr) {
+        String upperHexStr = hexStr.toUpperCase();
+        int length = upperHexStr.length() / 2;
+        char[] hexChars = upperHexStr.toCharArray();
+        byte[] bytes = new byte[length];
+        for (int i = 0; i < length; i++) {
+            int pos = i * 2;
+            bytes[i] = (byte) (charToByte(hexChars[pos]) << 4 | (0xff & charToByte(hexChars[pos + 1])));
+        }
+        return bytes;
+    }
+
+    public static String bytesToHexStr(byte[] bytes) {
+        byte[] hexChars = new byte[bytes.length * 2];
+        for (int j = 0; j < bytes.length; j++) {
+            int v = bytes[j] & 0xFF;
+            hexChars[j * 2] = HEX_ARRAY[v >>> 4];
+            hexChars[j * 2 + 1] = HEX_ARRAY[v & 0x0F];
+        }
+        return new String(hexChars, StandardCharsets.UTF_8);
+    }
+
+    public static String backquote(String str) {
+        if (StringUtils.isEmpty(str)) {
+            return str;
+        }
+        return "`" + str + "`";
+    }
 }

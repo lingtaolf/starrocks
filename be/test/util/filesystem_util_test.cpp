@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/test/util/filesystem_util_test.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -37,7 +33,7 @@ TEST(FileSystemUtilTest, rlimit) {
 
 TEST(FileSystemUtilTest, CreateDirectory) {
     // Setup a temporary directory with one subdir
-    std::filesystem::path dir(std::tmpnam(nullptr));
+    std::filesystem::path dir("/tmp/FileSystemUtilTestCreateDirectory");
     std::filesystem::path subdir1 = dir / "path1";
     std::filesystem::path subdir2 = dir / "path2";
     std::filesystem::path subdir3 = dir / "a" / "longer" / "path";

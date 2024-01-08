@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/test/util/json_util_test.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -29,8 +25,8 @@ namespace starrocks {
 
 class JsonUtilTest : public testing::Test {
 public:
-    JsonUtilTest() {}
-    virtual ~JsonUtilTest() {}
+    JsonUtilTest() = default;
+    ~JsonUtilTest() override = default;
 };
 
 TEST_F(JsonUtilTest, success) {
@@ -69,6 +65,29 @@ TEST_F(JsonUtilTest, normal_fail_str) {
             "    \"msg\": \"\\\"so bad\\\"\"\n}";
     LOG(INFO) << "str: " << str;
     ASSERT_STREQ(result, str.c_str());
+}
+
+TEST_F(JsonUtilTest, properties_test) {
+    std::map<std::string, std::map<std::string, std::string>> map;
+    std::map<std::string, std::string> common;
+    std::map<std::string, std::string> index;
+    std::map<std::string, std::string> search;
+    std::map<std::string, std::string> extra;
+    common.emplace("mk1", "v1");
+    index.emplace("ik1", "v2");
+    search.emplace("sk1", "v3");
+    map.emplace("common_properties", common);
+    map.emplace("index_properties", index);
+    map.emplace("search_properties", search);
+    map.emplace("extra_properties", extra);
+    auto str = to_json(map);
+
+    LOG(INFO) << "str: " << str;
+
+    std::map<std::string, std::map<std::string, std::string>> map_result;
+    from_json(str, &map_result);
+
+    ASSERT_TRUE(map == map_result);
 }
 
 } // namespace starrocks

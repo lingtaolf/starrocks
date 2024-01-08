@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/Status.java
 
@@ -21,14 +34,17 @@
 
 package com.starrocks.common;
 
-import com.starrocks.proto.PStatus;
+import com.starrocks.proto.StatusPB;
 import com.starrocks.thrift.TStatus;
 import com.starrocks.thrift.TStatusCode;
+import org.apache.commons.lang3.StringUtils;
+
+import java.util.Collections;
+import java.util.Optional;
 
 public class Status {
     public static final Status OK = new Status();
     public static final Status CANCELLED = new Status(TStatusCode.CANCELLED, "Cancelled");
-    public static final Status THRIFT_RPC_ERROR = new Status(TStatusCode.THRIFT_RPC_ERROR, "Thrift RPC failed");
 
     public TStatusCode getErrorCode() {
         return errorCode;
@@ -40,6 +56,14 @@ public class Status {
 
     private TStatusCode errorCode; // anything other than OK
     private String errorMsg;
+
+    public static Status internalError(String errorMsg) {
+        return new Status(TStatusCode.INTERNAL_ERROR, errorMsg);
+    }
+
+    public static Status thriftRPCError(String errorMsg) {
+        return new Status(TStatusCode.THRIFT_RPC_ERROR, errorMsg);
+    }
 
     public Status() {
         this.errorCode = TStatusCode.OK;
@@ -62,6 +86,14 @@ public class Status {
         }
     }
 
+    public TStatus toThrift() {
+        TStatus tstatus = new TStatus(errorCode);
+        if (!StringUtils.isEmpty(errorMsg)) {
+            tstatus.setError_msgs(Collections.singletonList(errorMsg));
+        }
+        return tstatus;
+    }
+
     public boolean ok() {
         return this.errorCode == TStatusCode.OK;
     }
@@ -70,8 +102,24 @@ public class Status {
         return this.errorCode == TStatusCode.CANCELLED;
     }
 
+    public boolean isTimeout() {
+        return this.errorCode == TStatusCode.TIMEOUT;
+    }
+
     public boolean isRpcError() {
         return this.errorCode == TStatusCode.THRIFT_RPC_ERROR;
+    }
+
+    public boolean isRemoteFileNotFound() {
+        return this.errorCode == TStatusCode.REMOTE_FILE_NOT_FOUND;
+    }
+
+    public boolean isGlobalDictError() {
+        return this.errorCode == TStatusCode.GLOBAL_DICT_ERROR;
+    }
+
+    public void setErrorMsg(String errorMsg) {
+        this.errorMsg = errorMsg;
     }
 
     public void setStatus(Status status) {
@@ -79,15 +127,15 @@ public class Status {
         this.errorMsg = status.getErrorMsg();
     }
 
-    public void setStatus(String msg) {
+    public void setInternalErrorStatus(String msg) {
         this.errorCode = TStatusCode.INTERNAL_ERROR;
         this.errorMsg = msg;
     }
 
-    public void setPstatus(PStatus status) {
-        this.errorCode = TStatusCode.findByValue(status.status_code);
-        if (status.error_msgs != null && !status.error_msgs.isEmpty()) {
-            this.errorMsg = status.error_msgs.get(0);
+    public void setPstatus(StatusPB status) {
+        this.errorCode = TStatusCode.findByValue(status.statusCode);
+        if (status.errorMsgs != null && !status.errorMsgs.isEmpty()) {
+            this.errorMsg = status.errorMsgs.get(0);
         }
     }
 
@@ -139,6 +187,10 @@ public class Status {
                 break;
             }
         }
+    }
+
+    public String getErrorCodeString() {
+        return Optional.ofNullable(getErrorCode()).map(Enum::toString).orElse("UNKNOWN");
     }
 
     @Override

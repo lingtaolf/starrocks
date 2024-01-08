@@ -109,17 +109,16 @@
 // (3) A null StringPiece is empty.
 //     An empty StringPiece may or may not be a null StringPiece.
 
-#ifndef STRINGS_STRINGPIECE_H_
-#define STRINGS_STRINGPIECE_H_
+#pragma once
 
-#include <assert.h>
-#include <stddef.h>
-#include <string.h>
-
+#include <cassert>
+#include <cstddef>
+#include <cstring>
 #include <functional>
 #include <iosfwd>
 #include <limits>
 #include <string>
+#include <string_view>
 
 #include "gutil/hash/hash.h"
 #include "gutil/integral_types.h"
@@ -129,8 +128,8 @@
 
 class StringPiece {
 private:
-    const char* ptr_;
-    int length_;
+    const char* ptr_{nullptr};
+    int length_{0};
 
 public:
     // We provide non-explicit singleton constructors so users can pass
@@ -139,16 +138,22 @@ public:
     //
     // Style guide exception granted:
     // http://goto/style-guide-exception-20978288
-    StringPiece() : ptr_(NULL), length_(0) {}
+    StringPiece() {}
     StringPiece(const char* str) // NOLINT(runtime/explicit)
             : ptr_(str), length_(0) {
-        if (str != NULL) {
+        if (str != nullptr) {
             size_t length = strlen(str);
             assert(length <= static_cast<size_t>(std::numeric_limits<int>::max()));
             length_ = static_cast<int>(length);
         }
     }
     StringPiece(const std::string& str) // NOLINT(runtime/explicit)
+            : ptr_(str.data()), length_(0) {
+        size_t length = str.size();
+        assert(length <= static_cast<size_t>(std::numeric_limits<int>::max()));
+        length_ = static_cast<int>(length);
+    }
+    StringPiece(std::string_view str) // NOLINT(runtime/explicit)
             : ptr_(str.data()), length_(0) {
         size_t length = str.size();
         assert(length <= static_cast<size_t>(std::numeric_limits<int>::max()));
@@ -174,7 +179,7 @@ public:
     bool empty() const { return length_ == 0; }
 
     void clear() {
-        ptr_ = NULL;
+        ptr_ = nullptr;
         length_ = 0;
     }
 
@@ -186,7 +191,7 @@ public:
 
     void set(const char* str) {
         ptr_ = str;
-        if (str != NULL)
+        if (str != nullptr)
             length_ = static_cast<int>(strlen(str));
         else
             length_ = 0;
@@ -231,7 +236,7 @@ public:
     // for a StringPiece be called "as_string()".  We also leave the
     // "as_string()" method defined here for existing code.
     std::string ToString() const {
-        if (ptr_ == NULL) return std::string();
+        if (ptr_ == nullptr) return std::string();
         return std::string(data(), size());
     }
 
@@ -358,5 +363,3 @@ struct GoodFastHash<StringPiece> {
 
 // allow StringPiece to be logged
 extern ostream& operator<<(ostream& o, StringPiece piece);
-
-#endif // STRINGS_STRINGPIECE_H__

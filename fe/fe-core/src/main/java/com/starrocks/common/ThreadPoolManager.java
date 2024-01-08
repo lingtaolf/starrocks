@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/ThreadPoolManager.java
 
@@ -33,6 +46,7 @@ import org.apache.logging.log4j.Logger;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -107,11 +121,30 @@ public class ThreadPoolManager {
                 new LogDiscardPolicy(poolName), poolName, needRegisterMetric);
     }
 
+    public static ThreadPoolExecutor newDaemonCacheThreadPool(int maxNumThread, int queueSize, String poolName,
+            boolean needRegisterMetric) {
+        return newDaemonThreadPool(0, maxNumThread, KEEP_ALIVE_TIME, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(queueSize),
+                new BlockedPolicy(poolName, 5), poolName, needRegisterMetric);
+    }
+
     public static ThreadPoolExecutor newDaemonFixedThreadPool(int numThread, int queueSize, String poolName,
                                                               boolean needRegisterMetric) {
         return newDaemonThreadPool(numThread, numThread, KEEP_ALIVE_TIME, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(queueSize),
                 new BlockedPolicy(poolName, 60), poolName, needRegisterMetric);
+    }
+
+    public static PriorityThreadPoolExecutor newDaemonFixedPriorityThreadPool(int numThread, int queueSize,
+            String poolName, boolean needRegisterMetric) {
+        ThreadFactory threadFactory = namedThreadFactory(poolName);
+        PriorityThreadPoolExecutor threadPool = new PriorityThreadPoolExecutor(numThread, numThread, 0,
+                TimeUnit.SECONDS, new PriorityBlockingQueue<>(queueSize), threadFactory,
+                new BlockedPolicy(poolName, 60));
+        if (needRegisterMetric) {
+            nameToThreadPoolMap.put(poolName, threadPool);
+        }
+        return threadPool;
     }
 
     public static ThreadPoolExecutor newDaemonThreadPool(int corePoolSize,
@@ -173,12 +206,12 @@ public class ThreadPoolManager {
     }
 
     /**
-     * A handler for rejected task that try to be blocked until the pool enqueue task succeed or timeout, used for fixed thread pool
-     * throw RejectedExecutionException if timeout or catch InterruptedException
+     * A handler for rejected task that try to be blocked until the pool enqueue task succeed or timeout,
+     * used for fixed thread pool throw RejectedExecutionException if timeout or catch InterruptedException
      */
     static class BlockedPolicy implements RejectedExecutionHandler {
 
-        private static final Logger LOG = LogManager.getLogger(LogDiscardPolicy.class);
+        private static final Logger LOG = LogManager.getLogger(BlockedPolicy.class);
 
         private String threadPoolName;
 

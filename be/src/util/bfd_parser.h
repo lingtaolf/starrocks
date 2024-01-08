@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/util/bfd_parser.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_UTIL_BFD_PARSER_H
-#define STARROCKS_BE_SRC_UTIL_BFD_PARSER_H
+#pragma once
 
 #ifndef PACKAGE
 #define PACKAGE
@@ -30,7 +25,8 @@
 #define PACKAGE_VERSION
 #endif
 
-#include <bfd.h>
+class bfd;
+class bfd_symbol;
 
 #include <mutex>
 #include <string>
@@ -44,7 +40,7 @@ public:
     static BfdParser* create();
     static BfdParser* create(const std::string& file_name);
 
-    BfdParser(const std::string& file_name);
+    BfdParser(std::string file_name);
     ~BfdParser();
     int parse();
 
@@ -78,5 +74,3 @@ private:
 };
 
 } // namespace starrocks
-
-#endif

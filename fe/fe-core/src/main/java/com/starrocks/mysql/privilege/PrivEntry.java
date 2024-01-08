@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/mysql/privilege/PrivEntry.java
 
@@ -21,14 +34,16 @@
 
 package com.starrocks.mysql.privilege;
 
-import com.starrocks.analysis.UserIdentity;
-import com.starrocks.catalog.Catalog;
+import com.google.gson.annotations.SerializedName;
+import com.starrocks.cluster.ClusterNamespace;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.CaseSensibility;
-import com.starrocks.common.FeMetaVersion;
 import com.starrocks.common.PatternMatcher;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
+import com.starrocks.persist.gson.GsonPostProcessable;
+import com.starrocks.persist.gson.GsonPreProcessable;
+import com.starrocks.sql.ast.UserIdentity;
 import org.apache.commons.lang.NotImplementedException;
 
 import java.io.DataInput;
@@ -37,52 +52,62 @@ import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
-public abstract class PrivEntry implements Comparable<PrivEntry>, Writable {
+public abstract class PrivEntry implements Comparable<PrivEntry>, Writable, GsonPostProcessable, GsonPreProcessable {
     protected static final String ANY_HOST = "%";
     protected static final String ANY_USER = "%";
 
     // host is not case sensitive
-    protected PatternMatcher hostPattern;
+    protected transient PatternMatcher hostPattern;
+    @SerializedName("origHost")
     protected String origHost;
     protected boolean isAnyHost = false;
     // user name is case sensitive
-    protected PatternMatcher userPattern;
-    protected String origUser;
+    protected transient PatternMatcher userPattern;
+    @SerializedName("origUser")
+    protected String origUserForJsonPersist;
+
+    protected String realOrigUser;
     protected boolean isAnyUser = false;
+    @SerializedName("privSet")
     protected PrivBitSet privSet;
     // true if this entry is set by domain resolver
+    @SerializedName("isSetByDomainResolver")
     protected boolean isSetByDomainResolver = false;
     // true if origHost is a domain name.
     // For global priv entry, if isDomain is true, it should only be used for priv checking, not password checking
+    @SerializedName("isDomain")
     protected boolean isDomain = false;
 
     // isClassNameWrote to guarantee the class name can only be written once when persisting.
     // see PrivEntry.read() for more details.
     protected boolean isClassNameWrote = false;
 
-    private UserIdentity userIdentity;
+    private transient UserIdentity userIdentity;
 
     protected PrivEntry() {
     }
 
-    protected PrivEntry(PatternMatcher hostPattern, String origHost, PatternMatcher userPattern, String origUser,
-                        boolean isDomain, PrivBitSet privSet) {
-        this.hostPattern = hostPattern;
+    protected PrivEntry(String origHost, String origUser, boolean isDomain, PrivBitSet privSet) {
         this.origHost = origHost;
+        this.realOrigUser = origUser;
+        this.isDomain = isDomain;
+        this.privSet = privSet;
+    }
+
+    protected void analyse() throws AnalysisException {
         if (origHost.equals(ANY_HOST)) {
             isAnyHost = true;
         }
-        this.userPattern = userPattern;
-        this.origUser = origUser;
-        if (origUser.equals(ANY_USER)) {
+        this.hostPattern = PatternMatcher.createMysqlPattern(origHost, CaseSensibility.HOST.getCaseSensibility());
+
+        if (realOrigUser.equals(ANY_USER)) {
             isAnyUser = true;
         }
-        this.isDomain = isDomain;
-        this.privSet = privSet;
+        this.userPattern = PatternMatcher.createMysqlPattern(realOrigUser, CaseSensibility.USER.getCaseSensibility());
         if (isDomain) {
-            userIdentity = UserIdentity.createAnalyzedUserIdentWithDomain(origUser, origHost);
+            userIdentity = UserIdentity.createAnalyzedUserIdentWithDomain(realOrigUser, origHost);
         } else {
-            userIdentity = UserIdentity.createAnalyzedUserIdentWithIp(origUser, origHost);
+            userIdentity = UserIdentity.createAnalyzedUserIdentWithIp(realOrigUser, origHost);
         }
     }
 
@@ -103,7 +128,7 @@ public abstract class PrivEntry implements Comparable<PrivEntry>, Writable {
     }
 
     public String getOrigUser() {
-        return origUser;
+        return realOrigUser;
     }
 
     public boolean isAnyUser() {
@@ -128,14 +153,6 @@ public abstract class PrivEntry implements Comparable<PrivEntry>, Writable {
 
     public UserIdentity getUserIdent() {
         return userIdentity;
-    }
-
-    public boolean match(UserIdentity userIdent, boolean exactMatch) {
-        if (exactMatch) {
-            return origUser.equals(userIdent.getQualifiedUser()) && origHost.equals(userIdent.getHost());
-        } else {
-            return origUser.equals(userIdent.getQualifiedUser()) && hostPattern.match(userIdent.getHost());
-        }
     }
 
     public abstract boolean keyMatch(PrivEntry other);
@@ -204,7 +221,7 @@ public abstract class PrivEntry implements Comparable<PrivEntry>, Writable {
 
             return privEntry;
         } catch (ClassNotFoundException | InstantiationException | IllegalAccessException | NoSuchMethodException
-                | SecurityException | IllegalArgumentException | InvocationTargetException e) {
+                 | SecurityException | IllegalArgumentException | InvocationTargetException e) {
             throw new IOException("failed read PrivEntry", e);
         }
     }
@@ -217,7 +234,7 @@ public abstract class PrivEntry implements Comparable<PrivEntry>, Writable {
             isClassNameWrote = true;
         }
         Text.writeString(out, origHost);
-        Text.writeString(out, origUser);
+        Text.writeString(out, ClusterNamespace.getFullName(realOrigUser));
         privSet.write(out);
 
         out.writeBoolean(isSetByDomainResolver);
@@ -228,37 +245,31 @@ public abstract class PrivEntry implements Comparable<PrivEntry>, Writable {
 
     public void readFields(DataInput in) throws IOException {
         origHost = Text.readString(in);
-        try {
-            hostPattern = PatternMatcher.createMysqlPattern(origHost, CaseSensibility.HOST.getCaseSensibility());
-        } catch (AnalysisException e) {
-            throw new IOException(e);
-        }
-        isAnyHost = origHost.equals(ANY_HOST);
-
-        origUser = Text.readString(in);
-        try {
-            userPattern = PatternMatcher.createMysqlPattern(origUser, CaseSensibility.USER.getCaseSensibility());
-        } catch (AnalysisException e) {
-            throw new IOException(e);
-        }
-        isAnyUser = origUser.equals(ANY_USER);
-
+        realOrigUser = ClusterNamespace.getNameFromFullName(Text.readString(in));
         privSet = PrivBitSet.read(in);
-
         isSetByDomainResolver = in.readBoolean();
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_69) {
-            isDomain = in.readBoolean();
-        }
+        isDomain = in.readBoolean();
+    }
 
-        if (isDomain) {
-            userIdentity = UserIdentity.createAnalyzedUserIdentWithDomain(origUser, origHost);
-        } else {
-            userIdentity = UserIdentity.createAnalyzedUserIdentWithIp(origUser, origHost);
-        }
+    @Override
+    public void gsonPostProcess() throws IOException {
+        realOrigUser = ClusterNamespace.getNameFromFullName(origUserForJsonPersist);
+    }
+
+    @Override
+    public void gsonPreProcess() throws IOException {
+        origUserForJsonPersist = ClusterNamespace.getFullName(realOrigUser);
     }
 
     @Override
     public int compareTo(PrivEntry o) {
+        throw new NotImplementedException();
+    }
+
+    /**
+     * used for `SHOW GRANTS FOR`
+     */
+    public String toGrantSQL() {
         throw new NotImplementedException();
     }
 }

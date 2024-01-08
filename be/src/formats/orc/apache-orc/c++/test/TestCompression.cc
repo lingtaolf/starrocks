@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/test/TestCompression.cc
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -50,7 +46,7 @@ void decompressAndVerify(const MemoryOutputStream& memStream, CompressionKind ki
             new SeekableArrayInputStream(memStream.getData(), memStream.getLength()));
 
     std::unique_ptr<SeekableInputStream> decompressStream =
-            createDecompressor(kind, std::move(inputStream), 1024, pool);
+            createDecompressor(kind, std::move(inputStream), 1024, pool, nullptr);
 
     const char* decompressedBuffer;
     int decompressedSize;
@@ -209,7 +205,7 @@ void protobuff_compression(orc::CompressionKind kind, proto::CompressionKind pro
             new SeekableArrayInputStream(memStream.getData(), memStream.getLength()));
 
     std::unique_ptr<SeekableInputStream> decompressStream =
-            createDecompressor(kind, std::move(inputStream), 1024, *pool);
+            createDecompressor(kind, std::move(inputStream), 1024, *pool, nullptr);
 
     proto::PostScript ps2;
     ps2.ParseFromZeroCopyStream(decompressStream.get());
@@ -306,7 +302,7 @@ void testSeekDecompressionStream(CompressionKind kind) {
     std::unique_ptr<SeekableInputStream> inputStream(
             new SeekableArrayInputStream(memStream.getData(), memStream.getLength()));
     std::unique_ptr<SeekableInputStream> decompressStream =
-            createDecompressor(kind, std::move(inputStream), blockSize, *pool);
+            createDecompressor(kind, std::move(inputStream), blockSize, *pool, nullptr);
 
     // prepare positions to seek to
     EXPECT_EQ(rowIndexEntry1.positions_size(), rowIndexEntry2.positions_size());

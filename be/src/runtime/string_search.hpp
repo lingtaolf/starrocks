@@ -51,12 +51,11 @@
 // agrees to be bound by the terms and conditions of this License
 // Agreement.
 
-#ifndef STARROCKS_BE_SRC_QUERY_BE_RUNTIME_STRING_SEARCH_H
-#define STARROCKS_BE_SRC_QUERY_BE_RUNTIME_STRING_SEARCH_H
+#pragma once
 
-#include <vector>
-#include <cstring>
 #include <boost/cstdint.hpp>
+#include <cstring>
+#include <vector>
 
 #include "common/logging.h"
 #include "runtime/string_value.h"
@@ -66,13 +65,12 @@ namespace starrocks {
 // TODO: This can be sped up with SIDD_CMP_EQUAL_ORDERED or at the very least rewritten
 // from published algorithms.
 class StringSearch {
-
 public:
-    virtual ~StringSearch() {}
-    StringSearch() : _pattern(NULL), _mask(0) {}
+    virtual ~StringSearch() = default;
+    StringSearch() {}
 
     // Initialize/Precompute a StringSearch object from the pattern
-    StringSearch(const StringValue* pattern) : _pattern(pattern), _mask(0), _skip(0) {
+    StringSearch(const StringValue* pattern) : _pattern(pattern), _mask(0) {
         // Special cases
         if (_pattern->len <= 1) {
             return;
@@ -113,7 +111,7 @@ public:
         if (m == 1) {
             const char* result = reinterpret_cast<const char*>(memchr(s, p[0], n));
 
-            if (result != NULL) {
+            if (result != nullptr) {
                 return result - s;
             }
 
@@ -158,19 +156,13 @@ public:
 private:
     static const int BLOOM_WIDTH = 64;
 
-    void bloom_add(char c) {
-        _mask |= (1UL << (c & (BLOOM_WIDTH - 1)));
-    }
+    void bloom_add(char c) { _mask |= (1UL << (c & (BLOOM_WIDTH - 1))); }
 
-    bool bloom_query(char c) const {
-        return _mask & (1UL << (c & (BLOOM_WIDTH - 1)));
-    }
+    bool bloom_query(char c) const { return _mask & (1UL << (c & (BLOOM_WIDTH - 1))); }
 
-    const StringValue* _pattern;
-    int64_t _mask;
+    const StringValue* _pattern{nullptr};
+    int64_t _mask{0};
     int64_t _skip = 0;
 };
 
-}
-
-#endif
+} // namespace starrocks

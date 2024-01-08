@@ -1,10 +1,23 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "storage/tablet_meta_manager.h"
 
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <thread>
 
 #include "storage/del_vector.h"
 
@@ -17,6 +30,7 @@ protected:
     void SetUp() override {
         fs::path tmp = fs::temp_directory_path();
         fs::path dir = tmp / "tablet_meta_manager_test";
+        fs::remove_all(dir);
         CHECK(fs::create_directory(dir));
         _data_dir = std::make_unique<DataDir>(dir.string());
         Status st = _data_dir->init();
@@ -46,21 +60,23 @@ TEST_F(TabletMetaManagerTest, test_save_load_tablet_meta) {
     meta_pb.set_tablet_type(TabletTypePB::TABLET_TYPE_DISK);
     meta_pb.set_tablet_state(PB_RUNNING);
     meta_pb.mutable_schema()->set_keys_type(DUP_KEYS);
-    meta_pb.mutable_schema()->set_is_in_memory(false);
     auto c0 = meta_pb.mutable_schema()->add_column();
     c0->set_name("c0");
     c0->set_is_key(true);
     c0->set_type("INT");
     c0->set_index_length(4);
 
-    MemTracker tracker;
-    auto meta = std::make_shared<TabletMeta>(&tracker);
+    auto meta = std::make_shared<TabletMeta>();
     meta->init_from_pb(&meta_pb);
+    // generate necessary field
+    TabletMetaPB new_meta_pb;
+    meta->to_meta_pb(&new_meta_pb);
 
-    ASSERT_TRUE(TabletMetaManager::save(_data_dir.get(), meta->tablet_id(), meta->schema_hash(), meta).ok());
-    auto load_meta = std::make_shared<TabletMeta>(&tracker);
-    ASSERT_TRUE(TabletMetaManager::get_tablet_meta(_data_dir.get(), meta->tablet_id(), meta->schema_hash(), load_meta)
-                        .ok());
+    ASSERT_TRUE(TabletMetaManager::save(_data_dir.get(), new_meta_pb).ok());
+    auto load_meta = std::make_shared<TabletMeta>();
+    ASSERT_TRUE(
+            TabletMetaManager::get_tablet_meta(_data_dir.get(), meta->tablet_id(), meta->schema_hash(), load_meta.get())
+                    .ok());
     ASSERT_EQ(1, load_meta->table_id());
     ASSERT_EQ(2, load_meta->tablet_id());
     ASSERT_EQ(3, load_meta->schema_hash());
@@ -72,14 +88,14 @@ TEST_F(TabletMetaManagerTest, test_save_load_tablet_meta) {
     ASSERT_EQ(DUP_KEYS, load_meta->tablet_schema().keys_type());
     ASSERT_EQ("c0", load_meta->tablet_schema().column(0).name());
     ASSERT_EQ(true, load_meta->tablet_schema().column(0).is_key());
-    ASSERT_EQ(OLAP_FIELD_TYPE_INT, load_meta->tablet_schema().column(0).type());
+    ASSERT_EQ(TYPE_INT, load_meta->tablet_schema().column(0).type());
 
-    load_meta.reset(new TabletMeta(&tracker));
-    auto visit_func = [&](long tablet_id, long schema_hash, const std::string& meta) -> bool {
-        CHECK_EQ(OLAP_SUCCESS, load_meta->deserialize(meta));
+    load_meta.reset(new TabletMeta());
+    auto visit_func = [&](long tablet_id, long schema_hash, std::string_view meta) -> bool {
+        CHECK(load_meta->deserialize(meta).ok());
         return true;
     };
-    ASSERT_TRUE(TabletMetaManager::traverse_headers(_data_dir->get_meta(), visit_func).ok());
+    ASSERT_TRUE(TabletMetaManager::walk(_data_dir->get_meta(), visit_func).ok());
     ASSERT_EQ(1, load_meta->table_id());
     ASSERT_EQ(2, load_meta->tablet_id());
     ASSERT_EQ(3, load_meta->schema_hash());
@@ -91,7 +107,7 @@ TEST_F(TabletMetaManagerTest, test_save_load_tablet_meta) {
     ASSERT_EQ(DUP_KEYS, load_meta->tablet_schema().keys_type());
     ASSERT_EQ("c0", load_meta->tablet_schema().column(0).name());
     ASSERT_EQ(true, load_meta->tablet_schema().column(0).is_key());
-    ASSERT_EQ(OLAP_FIELD_TYPE_INT, load_meta->tablet_schema().column(0).type());
+    ASSERT_EQ(TYPE_INT, load_meta->tablet_schema().column(0).type());
 }
 
 // NOLINTNEXTLINE
@@ -318,24 +334,24 @@ protected:
                 auto t0 = std::chrono::steady_clock::now();
                 for (int i = 0; i < kMaxRowset; i++) {
                     RowsetMetaPB rowset_meta_pb;
-                    rowset_meta_pb.set_creation_time(time(NULL));
+                    rowset_meta_pb.set_creation_time(time(nullptr));
                     rowset_meta_pb.set_start_version(i);
                     rowset_meta_pb.set_end_version(i);
                     rowset_meta_pb.set_num_rows(10000);
                     rowset_meta_pb.set_num_segments(1);
                     rowset_meta_pb.set_data_disk_size(1024 * 1024);
                     rowset_meta_pb.set_empty(false);
-                    rowset_meta_pb.set_rowset_id(i /*unused*/);
+                    rowset_meta_pb.set_deprecated_rowset_id(0);
                     rowset_meta_pb.set_rowset_seg_id(i);
                     RowsetId id;
                     id.init(2, i, 0, 0);
-                    rowset_meta_pb.set_rowset_id_v2(id.to_string());
+                    rowset_meta_pb.set_rowset_id(id.to_string());
 
                     EditVersionMetaPB edit;
                     auto v = edit.mutable_version();
-                    v->set_major(i + 1);
-                    v->set_minor(0);
-                    edit.set_creation_time(time(NULL));
+                    v->set_major_number(i + 1);
+                    v->set_minor_number(0);
+                    edit.set_creation_time(time(nullptr));
                     edit.add_rowsets_add(rowset_meta_pb.rowset_seg_id());
                     edit.add_deltas(rowset_meta_pb.rowset_seg_id());
                     edit.set_rowsetid_add(1);
@@ -351,8 +367,8 @@ protected:
         };
 
         auto t0 = std::chrono::steady_clock::now();
-        std::vector<std::thread> threads(std::thread::hardware_concurrency());
-        for (int i = 0; i < std::thread::hardware_concurrency(); i++) {
+        std::vector<std::thread> threads(CpuInfo::num_cores());
+        for (int i = 0; i < CpuInfo::num_cores(); i++) {
             threads[i] = std::thread(rowset_commit_thread);
         }
         for (auto& t : threads) {
@@ -373,6 +389,60 @@ protected:
 
     inline static std::unique_ptr<DataDir> _s_data_dir;
 };
+
+TEST_F(TabletMetaManagerTest, delta_column_group_operations) {
+    // insert 20 delta_column_group with 20 version
+    auto meta = _data_dir->get_meta();
+    const int64_t tablet_id = 1001;
+    for (int segid = 1; segid <= 20; segid++) {
+        DeltaColumnGroupList dcgs;
+        for (int v = 1; v <= 20; v++) {
+            auto dcg = std::make_shared<DeltaColumnGroup>();
+            dcg->init(v, {{1, 10, 100}}, {"1110.cols"});
+            dcgs.push_back(std::move(dcg));
+        }
+        WriteBatch wb;
+        CHECK(TabletMetaManager::put_delta_column_group(_data_dir.get(), &wb, tablet_id, segid, dcgs).ok());
+        CHECK(meta->write_batch(&wb).ok());
+    }
+    // get delta column group
+    for (int i = 1; i <= 10; i++) {
+        DeltaColumnGroupList dcgs;
+        int segid = (rand() % 20) + 1;
+        CHECK(TabletMetaManager::get_delta_column_group(meta, tablet_id, segid, i, &dcgs).ok());
+        ASSERT_EQ(dcgs.size(), i);
+        ASSERT_EQ(dcgs[0]->column_files("111").front(), "111/1110.cols");
+        ASSERT_EQ(dcgs[0]->get_column_idx(10).first, 0);
+        ASSERT_EQ(dcgs[0]->get_column_idx(10).second, 1);
+        ASSERT_EQ(dcgs[0]->get_column_idx(11).first, -1);
+        ASSERT_EQ(dcgs[0]->get_column_idx(11).second, -1);
+        ASSERT_EQ(dcgs[0]->version(), i);
+    }
+    // scan delta column group
+    for (int i = 1; i <= 5; i++) {
+        DeltaColumnGroupList dcgs;
+        int len = (rand() % 5) + 1;
+        int segid = (rand() % 20) + 1;
+        CHECK(TabletMetaManager::scan_delta_column_group(meta, tablet_id, segid, i, i + len, &dcgs).ok());
+        ASSERT_EQ(dcgs.size(), len);
+        ASSERT_EQ(dcgs[0]->column_files("111").front(), "111/1110.cols");
+        ASSERT_EQ(dcgs[0]->get_column_idx(10).first, 0);
+        ASSERT_EQ(dcgs[0]->get_column_idx(10).second, 1);
+        ASSERT_EQ(dcgs[0]->get_column_idx(11).first, -1);
+        ASSERT_EQ(dcgs[0]->get_column_idx(11).second, -1);
+        ASSERT_EQ(dcgs[0]->version(), i + len);
+    }
+    // delete delta column group
+    for (int segid = 1; segid < 10; segid++) {
+        CHECK(TabletMetaManager::delete_delta_column_group(meta, tablet_id, 1, 20).ok());
+    }
+    // check empty
+    for (int segid = 1; segid <= 20; segid++) {
+        DeltaColumnGroupList dcgs;
+        CHECK(TabletMetaManager::scan_delta_column_group(meta, tablet_id, segid, 1, 20, &dcgs).ok());
+        ASSERT_EQ(dcgs.size(), 0);
+    }
+}
 
 /*
 // NOLINTNEXTLINE
@@ -474,6 +544,83 @@ TEST_F(DeleteVectorPerformanceTest, get_del_vector) {
     auto cost = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0);
     LOG(INFO) << "Fetched " << num_delvec << " delete vectors in " << cost.count() << "ms "
               << "avg=" << (double)cost.count() / num_delvec << "ms";
+}
+*/
+
+/*
+TEST(DeleteVectorTest, delete_del_vector) {
+    fs::path dir = fs::temp_directory_path() / "delete_del_vector";
+    fs::remove_all(dir);
+    CHECK(fs::create_directory(dir));
+    auto data_dir = std::make_unique<DataDir>(dir.string());
+    Status st = data_dir->init();
+    CHECK(st.ok()) << st.to_string();
+
+    bool use_del_range = false;
+    size_t tablet_size = 200;
+    size_t rssid_size = 10;
+    size_t delvec_size = 10000;
+    std::vector<uint32_t> dels;
+    dels.resize(delvec_size);
+    for (int i = 0; i < delvec_size; i++) {
+        dels[i] = (i == 0 ? 0 : dels[i - 1]) + rand() % 10 + 1;
+    }
+    {
+        DelVector empty_delvec;
+        auto t0 = std::chrono::steady_clock::now();
+        for (int tablet_id = 1; tablet_id <= tablet_size; tablet_id++) {
+            for (int rssid = 0; rssid < rssid_size; rssid++) {
+                DelVectorPtr delvec;
+                empty_delvec.add_dels_as_new_version(dels, 50, &delvec);
+                st = TabletMetaManager::set_del_vector(data_dir->get_meta(), tablet_id, rssid, *delvec);
+                CHECK(st.ok()) << st.to_string();
+                DelVectorPtr delvec2;
+                delvec->add_dels_as_new_version({dels.back() + 3}, 60, &delvec2);
+                st = TabletMetaManager::set_del_vector(data_dir->get_meta(), tablet_id, rssid, *delvec2);
+                CHECK(st.ok()) << st.to_string();
+            }
+        }
+        auto t1 = std::chrono::steady_clock::now();
+        auto cost = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0);
+        data_dir->get_meta()->flush();
+        LOG(INFO) << "creating " << rssid_size * tablet_size << " delvecs " << cost.count() << "ms";
+    }
+    {
+        size_t n_del_range = 0;
+        auto t0 = std::chrono::steady_clock::now();
+        for (int j = 0; j < 10; j++) {
+            for (int tablet_id = 1; tablet_id <= tablet_size; tablet_id++) {
+                if (use_del_range) {
+                    for (int rssid = 0; rssid < rssid_size; rssid++) {
+                        TabletMetaManager::delete_del_vector_range(data_dir->get_meta(), tablet_id, rssid, 0, 59);
+                        n_del_range++;
+                    }
+                } else {
+                    auto st = TabletMetaManager::delete_del_vector_before_version(data_dir->get_meta(), tablet_id, 60);
+                    CHECK(st.ok());
+                    n_del_range += st.value();
+                }
+            }
+        }
+        auto t1 = std::chrono::steady_clock::now();
+        auto cost = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0);
+        data_dir->get_meta()->flush();
+        LOG(INFO) << "perform " << n_del_range << " del_ranges " << cost.count() << "ms";
+    }
+    {
+        auto t0 = std::chrono::steady_clock::now();
+        for (int tablet_id = 1; tablet_id <= tablet_size; tablet_id++) {
+            for (int rssid = 0; rssid < rssid_size; rssid++) {
+                DelVector delvec;
+                int64_t latest_version;
+                TabletMetaManager::get_del_vector(data_dir->get_meta(), tablet_id, rssid, 99, &delvec, &latest_version);
+            }
+        }
+        auto t1 = std::chrono::steady_clock::now();
+        auto cost = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0);
+        LOG(INFO) << "perform " << rssid_size * tablet_size << " get_del_vector " << cost.count() << "ms";
+    }
+    fs::remove_all(dir);
 }
 */
 

@@ -4,13 +4,11 @@
 
 #include "gutil/cpu.h"
 
-#include <stdlib.h>
-#include <string.h>
-
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <sstream>
-#include <streambuf>
 #include <string>
 
 #if defined(__x86_64__)
@@ -52,28 +50,7 @@ std::tuple<int, int, int, int> ComputeX86FamilyAndModel(const std::string& vendo
 }
 } // namespace internal
 #endif // defined(ARCH_CPU_X86_FAMILY)
-CPU::CPU()
-        : signature_(0),
-          type_(0),
-          family_(0),
-          model_(0),
-          stepping_(0),
-          ext_model_(0),
-          ext_family_(0),
-          has_mmx_(false),
-          has_sse_(false),
-          has_sse2_(false),
-          has_sse3_(false),
-          has_ssse3_(false),
-          has_sse41_(false),
-          has_sse42_(false),
-          has_popcnt_(false),
-          has_avx_(false),
-          has_avx2_(false),
-          has_aesni_(false),
-          has_non_stop_time_stamp_counter_(false),
-          is_running_in_vm_(false),
-          cpu_vendor_("unknown") {
+CPU::CPU() : cpu_vendor_("unknown") {
     Initialize();
 }
 namespace {
@@ -176,7 +153,9 @@ void CPU::Initialize() {
         has_sse3_ = (cpu_info[2] & 0x00000001) != 0;
         has_ssse3_ = (cpu_info[2] & 0x00000200) != 0;
         has_sse41_ = (cpu_info[2] & 0x00080000) != 0;
+#if defined(__x86_64__) && defined(__SSE4_2__)
         has_sse42_ = (cpu_info[2] & 0x00100000) != 0;
+#endif
         has_popcnt_ = (cpu_info[2] & 0x00800000) != 0;
         // "Hypervisor Present Bit: Bit 31 of ECX of CPUID leaf 0x1."
         // See https://lwn.net/Articles/301888/
@@ -197,7 +176,15 @@ void CPU::Initialize() {
         has_avx_ = (cpu_info[2] & 0x10000000) != 0 && (cpu_info[2] & 0x04000000) != 0 /* XSAVE */ &&
                    (cpu_info[2] & 0x08000000) != 0 /* OSXSAVE */ && (xgetbv(0) & 6) == 6 /* XSAVE enabled by kernel */;
         has_aesni_ = (cpu_info[2] & 0x02000000) != 0;
+#if defined(__x86_64__) && defined(__AVX2__)
         has_avx2_ = has_avx_ && (cpu_info7[1] & 0x00000020) != 0;
+#endif
+#if defined(__x86_64__) && defined(__AVX512F__)
+        has_avx512f_ = has_avx2_ && (cpu_info7[1] & 0x00010000) != 0;
+#endif
+#if defined(__x86_64__) && defined(__AVX512BW__)
+        has_avx512bw_ = has_avx2_ && (cpu_info7[1] & 0x40000000) != 0;
+#endif
     }
     // Get the brand string of the cpu.
     __cpuid(cpu_info, 0x80000000);
@@ -259,4 +246,40 @@ CPU::IntelMicroArchitecture CPU::GetIntelMicroArchitecture() const {
     if (has_sse()) return SSE;
     return PENTIUM;
 }
+
+std::string CPU::debug_string() const {
+    std::stringstream ss;
+    // clang-format off
+    ss << "CPU Info:"
+       << "\n  Type: " << type_
+       << "\n  Family: " << family_
+       << "\n  Model: " << model_
+       << "\n  Stepping: " << stepping_
+       << "\n  ExtendModel: " << ext_model_
+       << "\n  ExtendFamily: " << ext_family_
+       << "\n  RunningInVM: " << is_running_in_vm_
+       << "\n  Vendor: " << cpu_vendor_
+       << "\n  Brand: " << cpu_brand_
+       << "\n  HardwareSupport:"
+       << (has_mmx_ ? " mmx" : "")
+       << (has_sse_ ? " sse" : "")
+       << (has_sse2_ ? " sse2" : "")
+       << (has_sse3_ ? " sse3" : "")
+       << (has_ssse3_ ? " ssse3" : "")
+       << (has_sse41_ ? " sse41" : "")
+       << (has_sse42_ ? " sse42" : "")
+       << (has_avx_ ? " avx" : "")
+       << (has_avx2_ ? " avx2" : "")
+       << (has_avx512f_ ? " avx512f" : "")
+       << (has_avx512bw_ ? " avx512bw" : "")
+       << (has_popcnt_ ? " popcnt" : "");
+    // clang-format on
+    return ss.str();
+}
+
+CPU _cpu_global_instance;
+const CPU* CPU::instance() {
+    return &_cpu_global_instance;
+}
+
 } // namespace base

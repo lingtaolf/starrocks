@@ -2,8 +2,7 @@
 // Use of this source code is governed by a BSD-style license.
 // (https://developers.google.com/open-source/licenses/bsd)
 
-#ifndef BASE_THREADING_THREAD_COLLISION_WARNER_H_
-#define BASE_THREADING_THREAD_COLLISION_WARNER_H_
+#pragma once
 
 #include <cstdint>
 
@@ -130,20 +129,19 @@ namespace base {
 // used. During the unit tests is used another class that doesn't "DCHECK"
 // in case of collision (check thread_collision_warner_unittests.cc)
 struct BASE_EXPORT AsserterBase {
-    virtual ~AsserterBase() {}
+    virtual ~AsserterBase() = default;
     virtual void warn(int64_t previous_thread_id, int64_t current_thread_id) = 0;
 };
 
 struct BASE_EXPORT DCheckAsserter : public AsserterBase {
-    virtual ~DCheckAsserter() {}
+    ~DCheckAsserter() override = default;
     void warn(int64_t previous_thread_id, int64_t current_thread_id) override;
 };
 
 class BASE_EXPORT ThreadCollisionWarner {
 public:
     // The parameter asserter is there only for test purpose
-    explicit ThreadCollisionWarner(AsserterBase* asserter = new DCheckAsserter())
-            : valid_thread_id_(0), counter_(0), asserter_(asserter) {}
+    explicit ThreadCollisionWarner(AsserterBase* asserter = new DCheckAsserter()) : asserter_(asserter) {}
 
     ~ThreadCollisionWarner() { delete asserter_; }
 
@@ -156,12 +154,13 @@ public:
     public:
         explicit Check(ThreadCollisionWarner* warner) : warner_(warner) { warner_->EnterSelf(); }
 
-        ~Check() {}
+        ~Check() = default;
 
     private:
         ThreadCollisionWarner* warner_;
 
-        DISALLOW_COPY_AND_ASSIGN(Check);
+        Check(const Check&) = delete;
+        const Check& operator=(const Check&) = delete;
     };
 
     // This class is meant to be used through the macro
@@ -175,7 +174,8 @@ public:
     private:
         ThreadCollisionWarner* warner_;
 
-        DISALLOW_COPY_AND_ASSIGN(ScopedCheck);
+        ScopedCheck(const ScopedCheck&) = delete;
+        const ScopedCheck& operator=(const ScopedCheck&) = delete;
     };
 
     // This class is meant to be used through the macro
@@ -189,7 +189,8 @@ public:
     private:
         ThreadCollisionWarner* warner_;
 
-        DISALLOW_COPY_AND_ASSIGN(ScopedRecursiveCheck);
+        ScopedRecursiveCheck(const ScopedRecursiveCheck&) = delete;
+        const ScopedRecursiveCheck& operator=(const ScopedRecursiveCheck&) = delete;
     };
 
 private:
@@ -207,19 +208,18 @@ private:
 
     // This stores the thread id that is inside the critical section, if the
     // value is 0 then no thread is inside.
-    volatile subtle::Atomic64 valid_thread_id_;
+    volatile subtle::Atomic64 valid_thread_id_{0};
 
     // Counter to trace how many time a critical section was "pinned"
     // (when allowed) in order to unpin it when counter_ reaches 0.
-    volatile subtle::Atomic64 counter_;
+    volatile subtle::Atomic64 counter_{0};
 
     // Here only for class unit tests purpose, during the test I need to not
     // DCHECK but notify the collision with something else.
     AsserterBase* asserter_;
 
-    DISALLOW_COPY_AND_ASSIGN(ThreadCollisionWarner);
+    ThreadCollisionWarner(const ThreadCollisionWarner&) = delete;
+    const ThreadCollisionWarner& operator=(const ThreadCollisionWarner&) = delete;
 };
 
 } // namespace base
-
-#endif // BASE_THREADING_THREAD_COLLISION_WARNER_H_

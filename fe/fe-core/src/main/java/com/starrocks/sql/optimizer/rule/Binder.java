@@ -1,4 +1,16 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package com.starrocks.sql.optimizer.rule;
 
@@ -6,6 +18,7 @@ import com.google.common.collect.Lists;
 import com.starrocks.sql.optimizer.Group;
 import com.starrocks.sql.optimizer.GroupExpression;
 import com.starrocks.sql.optimizer.OptExpression;
+import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 
 import java.util.List;
@@ -76,6 +89,9 @@ public class Binder {
      * Pattern tree match groupExpression tree
      */
     private OptExpression match(Pattern pattern, GroupExpression groupExpression) {
+        if (pattern.isPatternMultiJoin()) {
+            return new MultiJoinBinder().match(groupExpression);
+        }
         if (!pattern.matchWithoutChild(groupExpression)) {
             return null;
         }
@@ -98,18 +114,16 @@ public class Binder {
                 resultInputs.add(opt);
             }
 
-            if (!(childPattern.isPatternMultiLeaf()
-                    && (groupExpression.getInputs().size() - groupExpressionIndex) >
-                    (pattern.children().size() - patternIndex))) {
+            if (!(childPattern.isPatternMultiLeaf() &&
+                    groupExpression.getInputs().size() - groupExpressionIndex >
+                            pattern.children().size() - patternIndex)) {
                 patternIndex++;
             }
 
             groupExpressionIndex++;
         }
 
-        OptExpression result = new OptExpression(groupExpression);
-        result.getInputs().addAll(resultInputs);
-        return result;
+        return new OptExpression(groupExpression, resultInputs);
     }
 
     private void trace() {
@@ -136,6 +150,104 @@ public class Binder {
                 return null;
             }
             return group.getLogicalExpressions().get(valueIndex);
+        }
+    }
+
+    /**
+     * Expression binding for MULTI_JOIN, which contains only JOIN/SCAN nodes
+     * <p>
+     * NOTE: Why not match using regular pattern ?
+     * 1. Regular matching cannot bind the tree but only the partial expression. But MULTI_JOIN needs to extract
+     * the entire tree
+     * 2. Regular matching is extremely slow in this case since it needs to recursive descent the tree, build the
+     * binding state and check the expression at the same time. But MULTI_JOIN could enumerate the GE without any check
+     */
+    class MultiJoinBinder {
+
+        public OptExpression match(GroupExpression ge) {
+            // 1. Check if the entire tree is MULTI_JOIN
+            // 2. Enumerate GE
+            if (ge == null || !isMultiJoin(ge)) {
+                return null;
+            }
+
+            return enumerate(ge);
+        }
+
+        private OptExpression enumerate(GroupExpression ge) {
+            if (ge == null || !isMultiJoinGE(ge)) {
+                return null;
+            }
+            List<OptExpression> resultInputs = Lists.newArrayList();
+
+            int groupExpressionIndex = 0;
+            while (groupExpressionIndex < ge.getInputs().size()) {
+                trace();
+                Group group = ge.getInputs().get(groupExpressionIndex);
+                OptExpression opt = enumerate(extractGroupExpression(group));
+
+                if (opt == null) {
+                    return null;
+                } else {
+                    resultInputs.add(opt);
+                }
+
+                groupExpressionIndex++;
+            }
+
+            return new OptExpression(ge, resultInputs);
+        }
+
+        private GroupExpression extractGroupExpression(Group group) {
+            int valueIndex = groupExpressionIndex.get(groupTraceKey);
+            if (valueIndex >= group.getLogicalExpressions().size()) {
+                groupExpressionIndex.remove(groupTraceKey);
+                return null;
+            }
+            return group.getLogicalExpressions().get(valueIndex);
+        }
+
+        private boolean isMultiJoin(GroupExpression ge) {
+            return ge.getOp().getOpType() == OperatorType.LOGICAL_JOIN && isMultiJoinRecursive(ge);
+        }
+
+        /**
+         * Recursive check whether the GE is a MULTI_JOIN
+         * For nested-mv, the original GE may be a AGG, after rewriting this group could be put an SCAN, so
+         * we also need to consider this kind of GE as MULTI_JOIN
+         */
+        private boolean isMultiJoinRecursive(GroupExpression ge) {
+            if (!isMultiJoinOp(ge.getOp().getOpType())) {
+                return false;
+            }
+
+            for (int i = 0; i < ge.getInputs().size(); i++) {
+                Group child = ge.inputAt(i);
+                if (isMultiJoinRecursive(child.getFirstLogicalExpression())) {
+                    continue;
+                }
+                if (!hasRewrittenMvScan(child)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private boolean hasRewrittenMvScan(Group g) {
+            for (GroupExpression ge : g.getLogicalExpressions()) {
+                if ((ge.getOp().getOpType() == OperatorType.LOGICAL_OLAP_SCAN)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private boolean isMultiJoinGE(GroupExpression ge) {
+            return isMultiJoinOp(ge.getOp().getOpType());
+        }
+
+        private boolean isMultiJoinOp(OperatorType operatorType) {
+            return Pattern.ALL_SCAN_TYPES.contains(operatorType) || operatorType.equals(OperatorType.LOGICAL_JOIN);
         }
     }
 

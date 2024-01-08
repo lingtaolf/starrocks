@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/Timezone.hh
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -20,13 +16,11 @@
  * limitations under the License.
  */
 
-#ifndef TIMEZONE_HH
-#define TIMEZONE_HH
+#pragma once
 
 // This file is for timezone routines.
 
-#include <stdint.h>
-
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -113,7 +107,7 @@ class TimezoneError : public std::runtime_error {
 public:
     TimezoneError(const std::string& what);
     TimezoneError(const TimezoneError&);
-    virtual ~TimezoneError() ORC_NOEXCEPT;
+    ~TimezoneError() ORC_NOEXCEPT override;
 };
 
 /**
@@ -134,5 +128,3 @@ public:
    */
 std::shared_ptr<FutureRule> parseFutureRule(const std::string& ruleString);
 } // namespace orc
-
-#endif

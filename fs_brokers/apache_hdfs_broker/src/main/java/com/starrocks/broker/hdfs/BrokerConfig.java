@@ -1,9 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master
-//                     /fs_brokers/apache_hdfs_broker/src/main/java
-//                     /org/apache/doris/broker/hdfs/BrokerConfig.java 
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -39,6 +33,24 @@ public class BrokerConfig extends ConfigBase {
     
     @ConfField
     public static int broker_ipc_port = 8000;
+
+    /**
+     * As is shown https://github.com/StarRocks/starrocks/pull/16648, broker may stuck in OSS close in some cases,
+     * this will lead to all following open/write request to broker stuck.
+     * To avoid this problem, we can set disable_broker_client_expiration_checking=true in apache_hdfs_broker.conf,
+     * and restart broker.
+     */
+    @ConfField
+    public static boolean disable_broker_client_expiration_checking = false;
+
+    /**
+     * If the kerberos HDFS client is alive beyond this time,
+     * client checker will destroy it to avoid kerberos token expire.
+     * Set this value a little smaller than the actual token expire seconds,
+     * to make sure the client is destroyed before the timeout reaches.
+     */
+    @ConfField
+    public static int kerberos_token_expire_seconds = 86000;
     
     @ConfField
     public static String sys_log_dir = System.getenv("BROKER_HOME") + "/log";

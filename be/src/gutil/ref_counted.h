@@ -2,8 +2,7 @@
 // Use of this source code is governed by a BSD-style license.
 // (https://developers.google.com/open-source/licenses/bsd)
 
-#ifndef BASE_MEMORY_REF_COUNTED_H_
-#define BASE_MEMORY_REF_COUNTED_H_
+#pragma once
 
 #include <cassert>
 #include <cstddef>
@@ -32,14 +31,15 @@ protected:
     bool Release() const;
 
 private:
-    mutable int ref_count_;
+    mutable int ref_count_{0};
 #ifndef NDEBUG
     mutable bool in_dtor_;
 #endif
 
     DFAKE_MUTEX(add_release_);
 
-    DISALLOW_COPY_AND_ASSIGN(RefCountedBase);
+    RefCountedBase(const RefCountedBase&) = delete;
+    const RefCountedBase& operator=(const RefCountedBase&) = delete;
 };
 
 class RefCountedThreadSafeBase {
@@ -56,12 +56,13 @@ protected:
     bool Release() const;
 
 private:
-    mutable AtomicRefCount ref_count_;
+    mutable AtomicRefCount ref_count_{0};
 #ifndef NDEBUG
     mutable bool in_dtor_;
 #endif
 
-    DISALLOW_COPY_AND_ASSIGN(RefCountedThreadSafeBase);
+    RefCountedThreadSafeBase(const RefCountedThreadSafeBase&) = delete;
+    const RefCountedThreadSafeBase& operator=(const RefCountedThreadSafeBase&) = delete;
 };
 
 } // namespace subtle
@@ -83,7 +84,7 @@ private:
 template <class T>
 class RefCounted : public subtle::RefCountedBase {
 public:
-    RefCounted() {}
+    RefCounted() = default;
 
     void AddRef() const { subtle::RefCountedBase::AddRef(); }
 
@@ -94,10 +95,11 @@ public:
     }
 
 protected:
-    ~RefCounted() {}
+    ~RefCounted() = default;
 
 private:
-    DISALLOW_COPY_AND_ASSIGN(RefCounted<T>);
+    RefCounted(const RefCounted&) = delete;
+    const RefCounted& operator=(const RefCounted&) = delete;
 };
 
 // Forward declaration.
@@ -131,7 +133,7 @@ struct DefaultRefCountedThreadSafeTraits {
 template <class T, typename Traits = DefaultRefCountedThreadSafeTraits<T> >
 class RefCountedThreadSafe : public subtle::RefCountedThreadSafeBase {
 public:
-    RefCountedThreadSafe() {}
+    RefCountedThreadSafe() = default;
 
     void AddRef() const { subtle::RefCountedThreadSafeBase::AddRef(); }
 
@@ -142,13 +144,14 @@ public:
     }
 
 protected:
-    ~RefCountedThreadSafe() {}
+    ~RefCountedThreadSafe() = default;
 
 private:
     friend struct DefaultRefCountedThreadSafeTraits<T>;
     static void DeleteInternal(const T* x) { delete x; }
 
-    DISALLOW_COPY_AND_ASSIGN(RefCountedThreadSafe);
+    RefCountedThreadSafe(const RefCountedThreadSafe&) = delete;
+    const RefCountedThreadSafe& operator=(const RefCountedThreadSafe&) = delete;
 };
 
 //
@@ -165,7 +168,7 @@ public:
 
 private:
     friend class starrocks::RefCountedThreadSafe<starrocks::RefCountedData<T> >;
-    ~RefCountedData() {}
+    ~RefCountedData() = default;
 };
 
 } // namespace starrocks
@@ -223,7 +226,7 @@ class scoped_refptr {
 public:
     typedef T element_type;
 
-    scoped_refptr() : ptr_(NULL) {}
+    scoped_refptr() : ptr_(nullptr) {}
 
     scoped_refptr(T* p) : ptr_(p) {
         if (ptr_) ptr_->AddRef();
@@ -267,7 +270,7 @@ public:
     operator T*() const { return ptr_; }
 #else
     typedef T* scoped_refptr::*Testable;
-    operator Testable() const { return ptr_ ? &scoped_refptr::ptr_ : NULL; }
+    operator Testable() const { return ptr_ ? &scoped_refptr::ptr_ : nullptr; }
 #endif
 
     T* operator->() const {
@@ -291,7 +294,7 @@ public:
         return *this = r.get();
     }
 
-    scoped_refptr<T>& operator=(scoped_refptr<T>&& r) {
+    scoped_refptr<T>& operator=(scoped_refptr<T>&& r) noexcept {
         scoped_refptr<T>(std::move(r)).swap(*this);
         return *this;
     }
@@ -312,7 +315,7 @@ public:
 
     // Like gscoped_ptr::reset(), drops a reference on the currently held object
     // (if any), and adds a reference to the passed-in object (if not NULL).
-    void reset(T* p = NULL) { *this = p; }
+    void reset(T* p = nullptr) { *this = p; }
 
 protected:
     T* ptr_;
@@ -340,5 +343,3 @@ template <class T>
 struct ScopedRefPtrHashFunctor {
     size_t operator()(const scoped_refptr<T>& p) const { return reinterpret_cast<size_t>(p.get()); }
 };
-
-#endif // BASE_MEMORY_REF_COUNTED_H_

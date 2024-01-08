@@ -1,4 +1,16 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #pragma once
 
@@ -8,6 +20,8 @@
 #include "storage/olap_common.h"
 
 namespace starrocks {
+
+using Roaring = roaring::Roaring;
 
 // A bitmap(uint32_t set) to store all the deleted rows' ids of a segment.
 // Each DelVector is associated with a version, which is EditVersion's majar version.
@@ -39,11 +53,15 @@ public:
 
     std::string save() const;
 
+    void save_to(std::string* str);
+
     std::string to_string() const;
 
     bool empty() const { return !_roaring; }
 
     Roaring* roaring() { return _roaring.get(); }
+
+    void copy_from(const DelVector& delvec);
 
 private:
     void _add_dels(const std::vector<uint32_t>& dels);
@@ -58,5 +76,12 @@ private:
 };
 
 typedef std::shared_ptr<DelVector> DelVectorPtr;
+
+class DelvecLoader {
+public:
+    DelvecLoader() = default;
+    virtual ~DelvecLoader() = default;
+    virtual Status load(const TabletSegmentId& tsid, int64_t version, DelVectorPtr* pdelvec) = 0;
+};
 
 } // namespace starrocks

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/metrics.h
 
@@ -22,12 +35,7 @@
 #pragma once
 
 #include <gperftools/malloc_extension.h>
-
-#include "common/compiler_util.h"
-DIAGNOSTIC_PUSH
-DIAGNOSTIC_IGNORE("-Wclass-memaccess")
 #include <rapidjson/document.h>
-DIAGNOSTIC_POP
 #include <rapidjson/rapidjson.h>
 
 #include <atomic>
@@ -36,9 +44,12 @@ DIAGNOSTIC_POP
 #include <mutex>
 #include <ostream>
 #include <set>
+#include <shared_mutex>
 #include <sstream>
 #include <string>
+#include <utility>
 
+#include "common/compiler_util.h"
 #include "common/config.h"
 #include "util/core_local.h"
 #include "util/spinlock.h"
@@ -73,8 +84,8 @@ const char* unit_name(MetricUnit unit);
 
 class Metric {
 public:
-    Metric(MetricType type, MetricUnit unit) : _type(type), _unit(unit), _registry(nullptr) {}
-    virtual ~Metric() { hide(); }
+    Metric(MetricType type, MetricUnit unit) : _type(type), _unit(unit) {}
+    virtual ~Metric() noexcept { hide(); }
     virtual std::string to_string() const = 0;
     MetricType type() const { return _type; }
     MetricUnit unit() const { return _unit; }
@@ -86,7 +97,7 @@ private:
 
     MetricType _type = MetricType::UNTYPED;
     MetricUnit _unit = MetricUnit::NOUNIT;
-    MetricRegistry* _registry;
+    MetricRegistry* _registry{nullptr};
 };
 
 // Metric that only can increment
@@ -94,7 +105,7 @@ template <typename T>
 class AtomicMetric : public Metric {
 public:
     AtomicMetric(MetricType type, MetricUnit unit) : Metric(type, unit), _value(T()) {}
-    virtual ~AtomicMetric() {}
+    ~AtomicMetric() override = default;
 
     std::string to_string() const override { return std::to_string(value()); }
 
@@ -116,7 +127,7 @@ template <typename T>
 class LockSimpleMetric : public Metric {
 public:
     LockSimpleMetric(MetricType type, MetricUnit unit) : Metric(type, unit), _value(T()) {}
-    virtual ~LockSimpleMetric() {}
+    ~LockSimpleMetric() override = default;
 
     std::string to_string() const override { return std::to_string(value()); }
 
@@ -155,7 +166,7 @@ class CoreLocalCounter : public Metric {
 public:
     CoreLocalCounter(MetricUnit unit) : Metric(MetricType::COUNTER, unit), _value() {}
 
-    virtual ~CoreLocalCounter() {}
+    ~CoreLocalCounter() override = default;
 
     std::string to_string() const override {
         std::stringstream ss;
@@ -185,21 +196,21 @@ template <typename T>
 class AtomicCounter : public AtomicMetric<T> {
 public:
     AtomicCounter(MetricUnit unit) : AtomicMetric<T>(MetricType::COUNTER, unit) {}
-    virtual ~AtomicCounter() {}
+    ~AtomicCounter() override = default;
 };
 
 template <typename T>
 class AtomicGauge : public AtomicMetric<T> {
 public:
     AtomicGauge(MetricUnit unit) : AtomicMetric<T>(MetricType::GAUGE, unit) {}
-    virtual ~AtomicGauge() {}
+    ~AtomicGauge() override = default;
 };
 
 template <typename T>
 class LockCounter : public LockSimpleMetric<T> {
 public:
     LockCounter(MetricUnit unit) : LockSimpleMetric<T>(MetricType::COUNTER, unit) {}
-    virtual ~LockCounter() {}
+    virtual ~LockCounter() = default;
 };
 
 // This can only used for trival type
@@ -207,7 +218,7 @@ template <typename T>
 class LockGauge : public LockSimpleMetric<T> {
 public:
     LockGauge(MetricUnit unit) : LockSimpleMetric<T>(MetricType::GAUGE, unit) {}
-    virtual ~LockGauge() {}
+    virtual ~LockGauge() = default;
 };
 
 // one key-value pair used to
@@ -215,8 +226,8 @@ struct MetricLabel {
     std::string name;
     std::string value;
 
-    MetricLabel() {}
-    MetricLabel(const std::string& name_, const std::string& value_) : name(name_), value(value_) {}
+    MetricLabel() = default;
+    MetricLabel(std::string name_, std::string value_) : name(std::move(name_)), value(std::move(value_)) {}
 
     bool operator==(const MetricLabel& other) const { return name == other.name && value == other.value; }
     bool operator!=(const MetricLabel& other) const { return !(*this == other); }
@@ -303,7 +314,7 @@ class MetricCollector;
 
 class MetricsVisitor {
 public:
-    virtual ~MetricsVisitor() {}
+    virtual ~MetricsVisitor() = default;
 
     // visit a collector, you can implement collector visitor, or only implement
     // metric visitor
@@ -332,15 +343,15 @@ private:
 
 class MetricRegistry {
 public:
-    MetricRegistry(const std::string& name) : _name(name) {}
-    ~MetricRegistry();
+    MetricRegistry(std::string name) : _name(std::move(name)) {}
+    ~MetricRegistry() noexcept;
     bool register_metric(const std::string& name, Metric* metric) {
         return register_metric(name, MetricLabels::EmptyLabels, metric);
     }
     bool register_metric(const std::string& name, const MetricLabels& labels, Metric* metric);
     // Now this function is not used frequently, so this is a little time consuming
     void deregister_metric(Metric* metric) {
-        std::lock_guard<SpinLock> l(_lock);
+        std::shared_lock lock(_collector_mutex);
         _deregister_locked(metric);
     }
     Metric* get_metric(const std::string& name) const { return get_metric(name, MetricLabels::EmptyLabels); }
@@ -351,19 +362,20 @@ public:
     void deregister_hook(const std::string& name);
 
     void collect(MetricsVisitor* visitor) {
-        std::lock_guard<SpinLock> l(_lock);
         if (!config::enable_metric_calculator) {
             // Before we collect, need to call hooks
+            std::shared_lock lock(_hooks_mutex);
             unprotected_trigger_hook();
         }
 
+        std::shared_lock lock(_collector_mutex);
         for (auto& it : _collectors) {
             it.second->collect(_name, it.first, visitor);
         }
     }
 
     void trigger_hook() {
-        std::lock_guard<SpinLock> l(_lock);
+        std::shared_lock lock(_hooks_mutex);
         unprotected_trigger_hook();
     }
 
@@ -379,7 +391,9 @@ private:
 
     const std::string _name;
 
-    mutable SpinLock _lock;
+    // mutable SpinLock _lock;
+    mutable std::shared_mutex _collector_mutex;
+    mutable std::shared_mutex _hooks_mutex;
     std::map<std::string, MetricCollector*> _collectors;
     std::map<std::string, std::function<void()>> _hooks;
 };
@@ -391,22 +405,6 @@ using DoubleCounter = LockCounter<double>;
 using IntGauge = AtomicGauge<int64_t>;
 using UIntGauge = AtomicGauge<uint64_t>;
 using DoubleGauge = LockGauge<double>;
-
-class TcmallocMetric final : public UIntGauge {
-public:
-    TcmallocMetric(const std::string& tcmalloc_var) : UIntGauge(MetricUnit::BYTES), _tcmalloc_var(tcmalloc_var) {}
-
-    virtual uint64_t value() const override {
-        uint64_t val = 0;
-#if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER) && !defined(LEAK_SANITIZER)
-        MallocExtension::instance()->GetNumericProperty(_tcmalloc_var.c_str(), reinterpret_cast<size_t*>(&val));
-#endif
-        return val;
-    }
-
-private:
-    const std::string _tcmalloc_var;
-};
 
 } // namespace starrocks
 
@@ -431,6 +429,3 @@ private:
 
 #define METRIC_DEFINE_DOUBLE_GAUGE(metric_name, unit) \
     starrocks::DoubleGauge metric_name { unit }
-
-#define METRIC_DEFINE_TCMALLOC_GAUGE(metric_name, tcmalloc_var) \
-    starrocks::TcmallocMetric metric_name { tcmalloc_var }

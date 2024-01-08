@@ -1,184 +1,156 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/hash_join_node.h
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-#ifndef STARROCKS_BE_SRC_QUERY_EXEC_HASH_JOIN_NODE_H
-#define STARROCKS_BE_SRC_QUERY_EXEC_HASH_JOIN_NODE_H
+#pragma once
 
-#include <boost/thread.hpp>
-#include <boost/unordered_set.hpp>
-#include <string>
-
+#include "column/chunk.h"
+#include "column/fixed_length_column.h"
+#include "column/vectorized_fwd.h"
 #include "exec/exec_node.h"
-#include "exec/hash_table.h"
-#include "gen_cpp/PlanNodes_types.h"
+#include "exec/join_hash_map.h"
+#include "util/phmap/phmap.h"
 
 namespace starrocks {
 
-class MemPool;
-class RowBatch;
-class TupleRow;
+class ObjectPool;
+class TPlanNode;
+class DescriptorTbl;
+class RuntimeState;
+class ExprContext;
 
-// Node for in-memory hash joins:
-// - builds up a hash table with the rows produced by our right input
-//   (child(1)); build exprs are the rhs exprs of our equi-join predicates
-// - for each row from our left input, probes the hash table to retrieve
-//   matching entries; the probe exprs are the lhs exprs of our equi-join predicates
-//
-// Row batches:
-// - In general, we are not able to pass our output row batch on to our left child (when
-//   we're fetching the probe rows): if we have a 1xn join, our output will contain
-//   multiple rows per left input row
-// - TODO: fix this, so in the case of 1x1/nx1 joins (for instance, fact to dimension tbl)
-//   we don't do these extra copies
-class HashJoinNode : public ExecNode {
+class ColumnRef;
+class RuntimeFilterBuildDescriptor;
+
+static constexpr size_t kHashJoinKeyColumnOffset = 1;
+class HashJoinNode final : public ExecNode {
 public:
     HashJoinNode(ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl& descs);
+    ~HashJoinNode() override {
+        if (runtime_state() != nullptr) {
+            close(runtime_state());
+        }
+    }
 
-    ~HashJoinNode();
-
-    // set up _build- and _probe_exprs
-    virtual Status init(const TPlanNode& tnode, RuntimeState* state = nullptr);
-    virtual Status prepare(RuntimeState* state);
-    virtual Status open(RuntimeState* state);
-    virtual Status get_next(RuntimeState* state, RowBatch* row_batch, bool* eos);
-    virtual Status close(RuntimeState* state);
-
-protected:
-    void debug_string(int indentation_level, std::stringstream* out) const;
+    Status init(const TPlanNode& tnode, RuntimeState* state) override;
+    Status prepare(RuntimeState* state) override;
+    Status open(RuntimeState* state) override;
+    Status get_next(RuntimeState* state, ChunkPtr* chunk, bool* eos) override;
+    void close(RuntimeState* state) override;
+    pipeline::OpFactories decompose_to_pipeline(pipeline::PipelineBuilderContext* context) override;
 
 private:
-    std::unique_ptr<HashTable> _hash_tbl;
-    HashTable::Iterator _hash_tbl_iterator;
-    bool _is_push_down;
+    template <class HashJoinerFactory, class HashJoinBuilderFactory, class HashJoinProbeFactory>
+    pipeline::OpFactories _decompose_to_pipeline(pipeline::PipelineBuilderContext* context);
 
-    // for right outer joins, keep track of what's been joined
-    typedef boost::unordered_set<TupleRow*> BuildTupleRowSet;
-    BuildTupleRowSet _joined_build_rows;
+    static bool _has_null(const ColumnPtr& column);
 
-    TJoinOp::type _join_op;
+    void _init_hash_table_param(HashTableParam* param);
+    // local join includes: broadcast join and colocate join.
+    Status _create_implicit_local_join_runtime_filters(RuntimeState* state);
+    void _final_update_profile() {
+        if (_probe_chunk_count > 0) {
+            COUNTER_SET(_avg_input_probe_chunk_size, int64_t(_probe_rows_counter->value() / _probe_chunk_count));
+        } else {
+            COUNTER_SET(_avg_input_probe_chunk_size, int64_t(0));
+        }
+        if (_output_chunk_count > 0) {
+            COUNTER_SET(_avg_output_chunk_size, int64_t(_num_rows_returned / _output_chunk_count));
+        } else {
+            COUNTER_SET(_avg_output_chunk_size, int64_t(0));
+        }
+    }
+    Status _build(RuntimeState* state);
+    Status _probe(RuntimeState* state, ScopedTimer<MonotonicStopWatch>& probe_timer, ChunkPtr* chunk, bool& eos);
+    Status _probe_remain(ChunkPtr* chunk, bool& eos);
 
-    // our equi-join predicates "<lhs> = <rhs>" are separated into
-    // _build_exprs (over child(1)) and _probe_exprs (over child(0))
+    Status _evaluate_build_keys(const ChunkPtr& chunk);
+
+    Status _calc_filter_for_other_conjunct(ChunkPtr* chunk, Filter& filter, bool& filter_all, bool& hit_all);
+    static void _process_row_for_other_conjunct(ChunkPtr* chunk, size_t start_column, size_t column_count,
+                                                bool filter_all, bool hit_all, const Filter& filter);
+
+    Status _process_outer_join_with_other_conjunct(ChunkPtr* chunk, size_t start_column, size_t column_count);
+    Status _process_semi_join_with_other_conjunct(ChunkPtr* chunk);
+    Status _process_right_anti_join_with_other_conjunct(ChunkPtr* chunk);
+    Status _process_other_conjunct(ChunkPtr* chunk);
+
+    Status _do_publish_runtime_filters(RuntimeState* state, int64_t limit);
+    Status _push_down_in_filter(RuntimeState* state);
+
+    friend ExecNode;
+    // _hash_join_node is used to construct HashJoiner, the reference is sound since
+    // it's only used in FragmentExecutor::prepare function.
+    const THashJoinNode& _hash_join_node;
     std::vector<ExprContext*> _probe_expr_ctxs;
     std::vector<ExprContext*> _build_expr_ctxs;
-    // true: the operator of eq join predicate is null safe equal => '<=>'
-    // false: the operator of eq join predicate is equal => '='
-    std::vector<bool> _is_null_safe_eq_join;
-    std::list<ExprContext*> _push_down_expr_ctxs;
-
-    // non-equi-join conjuncts from the JOIN clause
     std::vector<ExprContext*> _other_join_conjunct_ctxs;
+    std::vector<bool> _is_null_safes;
 
-    // derived from _join_op
-    bool _match_all_probe; // output all rows coming from the probe input
-    bool _match_one_build; // match at most one build row to each probe row
-    bool _match_all_build; // output all rows coming from the build input
-    bool _build_unique;    // build a hash table without duplicated rows
+    // If distribution type is SHUFFLE_HASH_BUCKET, local shuffle can use the
+    // equivalence of ExchagneNode's partition colums
+    std::vector<ExprContext*> _probe_equivalence_partition_expr_ctxs;
+    std::vector<ExprContext*> _build_equivalence_partition_expr_ctxs;
 
-    bool _matched_probe = false;          // if true, we have matched the current probe row
-    bool _eos = false;                    // if true, nothing left to return in get_next()
-    std::unique_ptr<MemPool> _build_pool; // holds everything referenced in _hash_tbl
+    std::list<ExprContext*> _runtime_in_filters;
+    std::list<RuntimeFilterBuildDescriptor*> _build_runtime_filters;
+    bool _build_runtime_filters_from_planner;
 
-    // Size of the TupleRow (just the Tuple ptrs) from the build (right) and probe (left)
-    // sides. Set to zero if the build/probe tuples are not returned, e.g., for semi joins.
-    // Cached because it is used in the hot path.
-    int _probe_tuple_row_size = 0;
-    int _build_tuple_row_size = 0;
+    TJoinOp::type _join_type = TJoinOp::INNER_JOIN;
+    TJoinDistributionMode::type _distribution_mode = TJoinDistributionMode::NONE;
+    std::set<SlotId> _output_slots;
 
-    // _probe_batch must be cleared before calling get_next().  The child node
-    // does not initialize all tuple ptrs in the row, only the ones that it
-    // is responsible for.
-    std::unique_ptr<RowBatch> _probe_batch;
-    int _probe_batch_pos = 0; // current scan pos in _probe_batch
-    bool _probe_eos = false;  // if true, probe child has no more rows to process
-    TupleRow* _current_probe_row = nullptr;
+    bool _is_push_down = false;
 
-    // _build_tuple_idx[i] is the tuple index of child(1)'s tuple[i] in the output row
-    std::vector<int> _build_tuple_idx;
-    int _build_tuple_size = 0;
+    JoinHashTable _ht;
 
-    // byte size of result tuple row (sum of the tuple ptrs, not the tuple data).
-    // This should be the same size as the probe tuple row.
-    int _result_tuple_row_size = 0;
+    ChunkPtr _cur_left_input_chunk = nullptr;
+    ChunkPtr _pre_left_input_chunk = nullptr;
+    ChunkPtr _probing_chunk = nullptr;
 
-    // Function declaration for codegen'd function.  Signature must match
-    // HashJoinNode::ProcessBuildBatch
-    typedef void (*ProcessBuildBatchFn)(HashJoinNode*, RowBatch*);
-    ProcessBuildBatchFn _process_build_batch_fn;
+    Columns _key_columns;
+    size_t _probe_column_count = 0;
+    size_t _build_column_count = 0;
+    size_t _probe_chunk_count = 0;
+    size_t _output_chunk_count = 0;
 
-    // HashJoinNode::process_probe_batch() exactly
-    typedef int (*ProcessProbeBatchFn)(HashJoinNode*, RowBatch*, RowBatch*, int);
-    // Jitted ProcessProbeBatch function pointer.  Null if codegen is disabled.
-    ProcessProbeBatchFn _process_probe_batch_fn;
+    bool _eos = false;
+    // hash table doesn't have reserved data
+    bool _ht_has_remain = false;
+    // right table have not output data for right outer join/right semi join/right anti join/full outer join
+    bool _right_table_has_remain = true;
+    bool _probe_eos = false; // probe table scan finished;
+    size_t _runtime_join_filter_pushdown_limit = 1024000;
 
-    // record anti join pos in get_next()
-    HashTable::Iterator* _anti_join_last_pos;
-
-    RuntimeProfile::Counter* _build_timer = nullptr;     // time to build hash table
-    RuntimeProfile::Counter* _push_down_timer = nullptr; // time to build hash table
-    RuntimeProfile::Counter* _push_compute_timer = nullptr;
-    RuntimeProfile::Counter* _probe_timer = nullptr;           // time to probe
-    RuntimeProfile::Counter* _build_rows_counter = nullptr;    // num build rows
-    RuntimeProfile::Counter* _probe_rows_counter = nullptr;    // num probe rows
-    RuntimeProfile::Counter* _build_buckets_counter = nullptr; // num buckets in hash table
-    RuntimeProfile::Counter* _hash_tbl_load_factor_counter = nullptr;
-
-    // Supervises ConstructHashTable in a separate thread, and
-    // returns its status in the promise parameter.
-    void build_side_thread(RuntimeState* state, boost::promise<Status>* status);
-
-    // We parallelise building the build-side with Open'ing the
-    // probe-side. If, for example, the probe-side child is another
-    // hash-join node, it can start to build its own build-side at the
-    // same time.
-    Status construct_hash_table(RuntimeState* state);
-
-    // GetNext helper function for the common join cases: Inner join, left semi and left
-    // outer
-    Status left_join_get_next(RuntimeState* state, RowBatch* row_batch, bool* eos);
-
-    // Processes a probe batch for the common (non right-outer join) cases.
-    //  out_batch: the batch for resulting tuple rows
-    //  probe_batch: the probe batch to process.  This function can be called to
-    //    continue processing a batch in the middle
-    //  max_added_rows: maximum rows that can be added to out_batch
-    // return the number of rows added to out_batch
-    int process_probe_batch(RowBatch* out_batch, RowBatch* probe_batch, int max_added_rows);
-
-    // Construct the build hash table, adding all the rows in 'build_batch'
-    void process_build_batch(RowBatch* build_batch);
-
-    // Write combined row, consisting of probe_row and build_row, to out_row.
-    // This is replaced by codegen.
-    void create_output_row(TupleRow* out_row, TupleRow* probe_row, TupleRow* build_row);
-
-    // Returns a debug string for probe_rows.  Probe rows have tuple ptrs that are
-    // uninitialized; the left hand child only populates the tuple ptrs it is responsible
-    // for.  This function outputs just the probe row values and leaves the build
-    // side values as NULL.
-    // This is only used for debugging and outputting the left child rows before
-    // doing the join.
-    std::string get_probe_row_output_string(TupleRow* probe_row);
+    RuntimeProfile::Counter* _build_timer = nullptr;
+    RuntimeProfile::Counter* _build_ht_timer = nullptr;
+    RuntimeProfile::Counter* _copy_right_table_chunk_timer = nullptr;
+    RuntimeProfile::Counter* _build_push_down_expr_timer = nullptr;
+    RuntimeProfile::Counter* _merge_input_chunk_timer = nullptr;
+    RuntimeProfile::Counter* _probe_timer = nullptr;
+    RuntimeProfile::Counter* _search_ht_timer = nullptr;
+    RuntimeProfile::Counter* _output_build_column_timer = nullptr;
+    RuntimeProfile::Counter* _output_probe_column_timer = nullptr;
+    RuntimeProfile::Counter* _build_rows_counter = nullptr;
+    RuntimeProfile::Counter* _probe_rows_counter = nullptr;
+    RuntimeProfile::Counter* _build_buckets_counter = nullptr;
+    RuntimeProfile::Counter* _push_down_expr_num = nullptr;
+    RuntimeProfile::Counter* _avg_input_probe_chunk_size = nullptr;
+    RuntimeProfile::Counter* _avg_output_chunk_size = nullptr;
+    RuntimeProfile::Counter* _build_conjunct_evaluate_timer = nullptr;
+    RuntimeProfile::Counter* _probe_conjunct_evaluate_timer = nullptr;
+    RuntimeProfile::Counter* _other_join_conjunct_evaluate_timer = nullptr;
+    RuntimeProfile::Counter* _where_conjunct_evaluate_timer = nullptr;
 };
 
 } // namespace starrocks
-
-#endif

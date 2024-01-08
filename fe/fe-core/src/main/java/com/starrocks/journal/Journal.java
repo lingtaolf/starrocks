@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/journal/Journal.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,36 +17,28 @@
 
 package com.starrocks.journal;
 
-import com.starrocks.common.io.Writable;
+import com.starrocks.common.io.DataOutputBuffer;
 
 import java.util.List;
 
 public interface Journal {
 
     // Open the journal environment
-    public void open();
+    public void open() throws InterruptedException, JournalException;
 
     // Roll Edit file or database
-    public void rollJournal();
+    public void rollJournal(long journalId) throws JournalException;
 
     // Get the newest journal id 
     public long getMaxJournalId();
 
-    // Get the oldest journal id
-    public long getMinJournalId();
-
     // Close the environment
     public void close();
 
-    // Get the journal which id = journalId
-    public JournalEntity read(long journalId);
-
     // Get all the journals whose id: fromKey <= id <= toKey
     // toKey = -1 means toKey = Long.Max_Value
-    public JournalCursor read(long fromKey, long toKey);
-
-    // Write a journal and sync to disk
-    public void write(short op, Writable writable);
+    public JournalCursor read(long fromKey, long toKey)
+            throws JournalException, JournalInconsistentException, InterruptedException;
 
     // Delete journals whose max id is less than deleteToJournalId
     public void deleteJournals(long deleteJournalToId);
@@ -61,4 +49,18 @@ public interface Journal {
     // Get all the dbs' name
     public List<Long> getDatabaseNames();
 
+    // only support batch write
+    // start batch write
+    public void batchWriteBegin() throws InterruptedException, JournalException;
+
+    // append buffer to current batch
+    public void batchWriteAppend(long journalId, DataOutputBuffer buffer) throws InterruptedException, JournalException;
+
+    // persist current batch
+    public void batchWriteCommit() throws InterruptedException, JournalException;
+
+    // abort current batch
+    public void batchWriteAbort() throws InterruptedException, JournalException;
+
+    public String getPrefix();
 }

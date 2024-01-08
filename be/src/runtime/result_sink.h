@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/runtime/result_sink.h
 
@@ -19,18 +32,17 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_RUNTIME_RESULT_SINK_H
-#define STARROCKS_BE_RUNTIME_RESULT_SINK_H
+#pragma once
 
 #include "common/status.h"
 #include "exec/data_sink.h"
 #include "gen_cpp/InternalService_types.h"
 #include "gen_cpp/PlanNodes_types.h"
+#include "runtime/file_result_writer.h"
 
 namespace starrocks {
 
 class ObjectPool;
-class RowBatch;
 class ObjectPool;
 class RuntimeState;
 class RuntimeProfile;
@@ -38,7 +50,6 @@ class BufferControlBlock;
 class ExprContext;
 class ResultWriter;
 class MemTracker;
-class ResultFileOptions;
 
 class ResultSink final : public DataSink {
 public:
@@ -51,11 +62,7 @@ public:
     Status prepare(RuntimeState* state) override;
     Status open(RuntimeState* state) override;
 
-    // send data in 'batch' to this backend stream mgr
-    // Blocks until all rows in batch are placed in the buffer
-    Status send(RuntimeState* state, RowBatch* batch) override;
-
-    Status send_chunk(RuntimeState* state, vectorized::Chunk* chunk) override;
+    Status send_chunk(RuntimeState* state, Chunk* chunk) override;
 
     // Flush all buffered data and close all existing channels to destination
     // hosts. Further send() calls are illegal after calling close().
@@ -66,17 +73,22 @@ public:
 
     TResultSinkType::type get_sink_type() const { return _sink_type; }
 
+    TResultSinkFormatType::type get_format_type() const { return _format_type; }
+
     const std::vector<TExpr>& get_output_exprs() const { return _t_output_expr; }
+
+    std::shared_ptr<ResultFileOptions> get_file_opts() const { return _file_opts; }
+
+    bool isBinaryFormat() const { return _is_binary_format; }
 
 private:
     Status prepare_exprs(RuntimeState* state);
     TResultSinkType::type _sink_type;
+    bool _is_binary_format;
+    // set format_type when sink type is HTTP
+    TResultSinkFormatType::type _format_type;
     // set file options when sink type is FILE
-    std::unique_ptr<ResultFileOptions> _file_opts;
-
-    ObjectPool* _obj_pool = nullptr;
-    // Owned by the RuntimeState.
-    const RowDescriptor& _row_desc;
+    std::shared_ptr<ResultFileOptions> _file_opts;
 
     // Owned by the RuntimeState.
     const std::vector<TExpr>& _t_output_expr;
@@ -89,4 +101,3 @@ private:
 };
 
 } // namespace starrocks
-#endif

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/planner/ResultSink.java
 
@@ -22,9 +35,10 @@
 package com.starrocks.planner;
 
 import com.google.common.base.Preconditions;
-import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.starrocks.analysis.OutFileClause;
+import com.starrocks.http.HttpConnectContext;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.thrift.TDataSink;
 import com.starrocks.thrift.TDataSinkType;
 import com.starrocks.thrift.TExplainLevel;
@@ -32,6 +46,8 @@ import com.starrocks.thrift.TNetworkAddress;
 import com.starrocks.thrift.TResultFileSinkOptions;
 import com.starrocks.thrift.TResultSink;
 import com.starrocks.thrift.TResultSinkType;
+
+import java.util.List;
 
 /**
  * Result sink that forwards data to
@@ -43,6 +59,7 @@ public class ResultSink extends DataSink {
     private TResultSinkType sinkType;
     private String brokerName;
     private TResultFileSinkOptions fileSinkOptions;
+    private boolean isBinaryRow;
 
     public ResultSink(PlanNodeId exchNodeId, TResultSinkType sinkType) {
         this.exchNodeId = exchNodeId;
@@ -64,6 +81,10 @@ public class ResultSink extends DataSink {
         if (fileSinkOptions != null) {
             tResultSink.setFile_options(fileSinkOptions);
         }
+        if (ConnectContext.get() instanceof HttpConnectContext) {
+            tResultSink.setFormat(((HttpConnectContext) ConnectContext.get()).getResultSinkFormatType());
+        }
+        tResultSink.setIs_binary_row(isBinaryRow);
         result.setResult_sink(tResultSink);
         return result;
     }
@@ -82,22 +103,44 @@ public class ResultSink extends DataSink {
         return sinkType == TResultSinkType.FILE;
     }
 
+    public boolean isQuerySink() {
+        return sinkType == TResultSinkType.MYSQL_PROTOCAL;
+    }
+
+    public boolean isStatisticSink() {
+        return sinkType == TResultSinkType.STATISTIC;
+    }
+
     public boolean needBroker() {
-        return !Strings.isNullOrEmpty(brokerName);
+        return fileSinkOptions.isSetUse_broker() && fileSinkOptions.use_broker;
     }
 
     public String getBrokerName() {
         return brokerName;
     }
 
-    public void setOutfileInfo(OutFileClause outFileClause) {
+    public TResultSinkType getSinkType() {
+        return sinkType;
+    }
+
+    public void setOutfileInfo(OutFileClause outFileClause, List<String> columnOutputNames) {
         sinkType = TResultSinkType.FILE;
-        fileSinkOptions = outFileClause.toSinkOptions();
+        fileSinkOptions = outFileClause.toSinkOptions(columnOutputNames);
         brokerName = outFileClause.getBrokerDesc() == null ? null : outFileClause.getBrokerDesc().getName();
     }
 
     public void setBrokerAddr(String ip, int port) {
         Preconditions.checkNotNull(fileSinkOptions);
         fileSinkOptions.setBroker_addresses(Lists.newArrayList(new TNetworkAddress(ip, port)));
+    }
+
+    @Override
+    public boolean canUseRuntimeAdaptiveDop() {
+        return sinkType == TResultSinkType.MYSQL_PROTOCAL || sinkType == TResultSinkType.STATISTIC ||
+                sinkType == TResultSinkType.VARIABLE;
+    }
+
+    public void setBinaryRow(boolean isBinaryRow) {
+        this.isBinaryRow = isBinaryRow;
     }
 }

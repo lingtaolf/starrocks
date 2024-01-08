@@ -1,13 +1,25 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #pragma once
 
+#include <cstring>
 #include <vector>
 
 #include "util/slice.h"
 
 namespace starrocks {
-namespace vectorized {
 
 // SIZE: 256 * uint8_t
 static const uint8_t UTF8_BYTE_LENGTH_TABLE[256] = {
@@ -104,11 +116,11 @@ static inline const char* skip_trailing_utf8(const char* p, const char* begin, s
 // is to say, counting bytes which do not match 10xx_xxxx pattern.
 // All 0xxx_xxxx, 110x_xxxx, 1110_xxxx and 1111_0xxx are greater than 1011_1111 when use int8_t arithmetic,
 // so just count bytes greater than 1011_1111 in a byte string as the result of utf8_length.
-static int utf8_len(const char* begin, const char* end) {
+inline static int utf8_len(const char* begin, const char* end) {
     int len = 0;
     const char* p = begin;
-    size_t str_size = end - begin;
 #if defined(__AVX2__)
+    size_t str_size = end - begin;
     constexpr auto bytes_avx2 = sizeof(__m256i);
     // Bytes processed by SIMD operations must be mutiples of bytes_avx2, so:
     // src_end_avx2 = p + str_size / bytes_avx2 * bytes_avx2;
@@ -124,6 +136,7 @@ static int utf8_len(const char* begin, const char* end) {
         len += __builtin_popcount(_mm256_movemask_epi8(
                 _mm256_cmpgt_epi8(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(p)), threshold)));
 #elif defined(__SSE2__)
+    size_t str_size = end - begin;
     constexpr auto bytes_sse2 = sizeof(__m128i);
     const auto src_end_sse2 = p + (str_size & ~(bytes_sse2 - 1));
     const auto threshold = _mm_set1_epi8(0xBF);
@@ -140,5 +153,74 @@ static int utf8_len(const char* begin, const char* end) {
     return len;
 }
 
-} // namespace vectorized
+// Check if the string contains a utf-8 character
+static inline bool utf8_contains(const std::string& str, const std::vector<size_t>& utf8_index, Slice utf8_char) {
+    for (int i = 0; i < utf8_index.size(); i++) {
+        size_t char_idx = utf8_index[i];
+        // TODO: optimize the utf8-index, add a length guard at the tail
+        size_t char_len = i < utf8_index.size() - 1 ? utf8_index[i + 1] - char_idx : str.length() - char_idx;
+        if (memcmp(str.data() + char_idx, utf8_char.data, char_len) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Find the start of utf8 character
+// NOTE: it must be a valid utf-8 string
+static inline Slice utf8_char_start(const char* end) {
+    const char* p = end;
+    size_t count = 1;
+    for (; (*p & 0xC0) == 0x80; p--, count++) {
+    }
+    return {p, count};
+}
+
+// Modify from https://github.com/lemire/fastvalidate-utf-8/blob/master/include/simdasciicheck.h
+static inline bool validate_ascii_fast(const char* src, size_t len) {
+#ifdef __AVX2__
+    size_t i = 0;
+    __m256i has_error = _mm256_setzero_si256();
+    if (len >= 32) {
+        for (; i <= len - 32; i += 32) {
+            __m256i current_bytes = _mm256_loadu_si256((const __m256i*)(src + i));
+            has_error = _mm256_or_si256(has_error, current_bytes);
+        }
+    }
+    int error_mask = _mm256_movemask_epi8(has_error);
+
+    char tail_has_error = 0;
+    for (; i < len; i++) {
+        tail_has_error |= src[i];
+    }
+    error_mask |= (tail_has_error & 0x80);
+
+    return !error_mask;
+#elif defined(__SSE2__)
+    size_t i = 0;
+    __m128i has_error = _mm_setzero_si128();
+    if (len >= 16) {
+        for (; i <= len - 16; i += 16) {
+            __m128i current_bytes = _mm_loadu_si128((const __m128i*)(src + i));
+            has_error = _mm_or_si128(has_error, current_bytes);
+        }
+    }
+    int error_mask = _mm_movemask_epi8(has_error);
+
+    char tail_has_error = 0;
+    for (; i < len; i++) {
+        tail_has_error |= src[i];
+    }
+    error_mask |= (tail_has_error & 0x80);
+
+    return !error_mask;
+#else
+    char tail_has_error = 0;
+    for (size_t i = 0; i < len; i++) {
+        tail_has_error |= src[i];
+    }
+    return !(tail_has_error & 0x80);
+#endif
+}
+
 } // namespace starrocks

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/orc/tree/main/c++/src/sargs/PredicateLeaf.hh
 
@@ -20,8 +33,7 @@
  * limitations under the License.
  */
 
-#ifndef ORC_PREDICATELEAF_HH
-#define ORC_PREDICATELEAF_HH
+#pragma once
 
 #include <string>
 #include <vector>
@@ -61,13 +73,17 @@ public:
 
     PredicateLeaf() = default;
 
-    PredicateLeaf(Operator op, PredicateDataType type, const std::string& colName, Literal literal);
+    PredicateLeaf(Operator op, PredicateDataType type, std::string colName, const Literal& literal);
 
-    PredicateLeaf(Operator op, PredicateDataType type, const std::string& colName,
+    PredicateLeaf(Operator op, PredicateDataType type, uint64_t columnId, const Literal& literal);
+
+    PredicateLeaf(Operator op, PredicateDataType type, std::string colName,
                   const std::initializer_list<Literal>& literalList);
 
-    PredicateLeaf(Operator op, PredicateDataType type, const std::string& colName,
-                  const std::vector<Literal>& literalList);
+    PredicateLeaf(Operator op, PredicateDataType type, uint64_t columnId,
+                  const std::initializer_list<Literal>& literalList);
+
+    PredicateLeaf(Operator op, PredicateDataType type, std::string colName, const std::vector<Literal>& literalList);
 
     /**
      * Get the operator for the leaf.
@@ -80,9 +96,19 @@ public:
     PredicateDataType getType() const;
 
     /**
+     * Get whether the predicate is created using column name.
+     */
+    bool hasColumnName() const;
+
+    /**
      * Get the simple column name.
      */
     const std::string& getColumnName() const;
+
+    /**
+     * Get the column id.
+     */
+    uint64_t getColumnId() const;
 
     /**
      * Get the literal half of the predicate leaf.
@@ -110,6 +136,9 @@ private:
     size_t hashCode() const;
 
     void validate() const;
+    void validateColumn() const;
+
+    std::string columnDebugString() const;
 
     TruthValue evaluatePredicateMinMax(const proto::ColumnStatistics& colStats) const;
 
@@ -119,6 +148,7 @@ private:
     Operator mOperator;
     PredicateDataType mType;
     std::string mColumnName;
+    bool mHasColumnName;
     uint64_t mColumnId;
     std::vector<Literal> mLiterals;
     size_t mHashCode;
@@ -133,5 +163,3 @@ struct PredicateLeafComparator {
 };
 
 } // namespace orc
-
-#endif //ORC_PREDICATELEAF_HH

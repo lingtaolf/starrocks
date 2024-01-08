@@ -1,9 +1,21 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/greg7mdp/parallel-hashmap/blob/master/parallel_hashmap/phmap_base.h
 
-#if !defined(phmap_base_h_guard_)
-#define phmap_base_h_guard_
+#pragma once
 
 // ---------------------------------------------------------------------------
 // Copyright (c) 2019, Gregory Popovitch - greg7mdp@gmail.com
@@ -12,7 +24,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      https://www.apache.org/licenses/LICENSE-2.0
+//     https://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,7 +41,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      https://www.apache.org/licenses/LICENSE-2.0
+//     https://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -1837,16 +1849,16 @@ template <typename T>
 constexpr copy_traits get_ctor_copy_traits() {
     return std::is_copy_constructible<T>::value
                    ? copy_traits::copyable
-                   : std::is_move_constructible<T>::value ? copy_traits::movable : copy_traits::non_movable;
+                   : (std::is_move_constructible<T>::value ? copy_traits::movable : copy_traits::non_movable);
 }
 
 template <typename T>
 constexpr copy_traits get_assign_copy_traits() {
     return phmap::is_copy_assignable<T>::value && std::is_copy_constructible<T>::value
                    ? copy_traits::copyable
-                   : phmap::is_move_assignable<T>::value && std::is_move_constructible<T>::value
-                             ? copy_traits::movable
-                             : copy_traits::non_movable;
+                   : (phmap::is_move_assignable<T>::value && std::is_move_constructible<T>::value
+                              ? copy_traits::movable
+                              : copy_traits::non_movable);
 }
 
 // Whether T is constructible or convertible from optional<U>.
@@ -2333,7 +2345,7 @@ constexpr auto operator==(const optional<T>& x, const optional<U>& y)
         -> decltype(optional_internal::convertible_to_bool(*x == *y)) {
     return static_cast<bool>(x) != static_cast<bool>(y)
                    ? false
-                   : static_cast<bool>(x) == false ? true : static_cast<bool>(*x == *y);
+                   : (static_cast<bool>(x) == false ? true : static_cast<bool>(*x == *y));
 }
 
 // Returns: If bool(x) != bool(y), true; otherwise, if bool(x) == false, false;
@@ -2343,7 +2355,7 @@ constexpr auto operator!=(const optional<T>& x, const optional<U>& y)
         -> decltype(optional_internal::convertible_to_bool(*x != *y)) {
     return static_cast<bool>(x) != static_cast<bool>(y)
                    ? true
-                   : static_cast<bool>(x) == false ? false : static_cast<bool>(*x != *y);
+                   : (static_cast<bool>(x) == false ? false : static_cast<bool>(*x != *y));
 }
 // Returns: If !y, false; otherwise, if !x, true; otherwise *x < *y.
 template <typename T, typename U>
@@ -2762,13 +2774,13 @@ using EnableIfMutable = typename std::enable_if<!std::is_const<T>::value, int>::
 
 template <typename T>
 bool EqualImpl(Span<T> a, Span<T> b) {
-    static_assert(std::is_const<T>::value, "");
+    static_assert(std::is_const<T>::value);
     return std::equal(a.begin(), a.end(), b.begin(), b.end());
 }
 
 template <typename T>
 bool LessThanImpl(Span<T> a, Span<T> b) {
-    static_assert(std::is_const<T>::value, "");
+    static_assert(std::is_const<T>::value);
     return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end());
 }
 
@@ -3857,7 +3869,7 @@ public:
 
     template <class... Sizes>
     static constexpr PartialType<sizeof...(Sizes)> Partial(Sizes&&... sizes) {
-        static_assert(sizeof...(Sizes) <= sizeof...(Ts), "");
+        static_assert(sizeof...(Sizes) <= sizeof...(Ts));
         return PartialType<sizeof...(Sizes)>(phmap::forward<Sizes>(sizes)...);
     }
 
@@ -4054,7 +4066,7 @@ namespace priv {
 // ----------------------------------------------------------------------------
 template <size_t Alignment, class Alloc>
 void* Allocate(Alloc* alloc, size_t n) {
-    static_assert(Alignment > 0, "");
+    static_assert(Alignment > 0);
     assert(n && "n must be positive");
     struct alignas(Alignment) M {};
     using A = typename phmap::allocator_traits<Alloc>::template rebind_alloc<M>;
@@ -4071,7 +4083,7 @@ void* Allocate(Alloc* alloc, size_t n) {
 // ----------------------------------------------------------------------------
 template <size_t Alignment, class Alloc>
 void Deallocate(Alloc* alloc, void* p, size_t n) {
-    static_assert(Alignment > 0, "");
+    static_assert(Alignment > 0);
     assert(n && "n must be positive");
     struct alignas(Alignment) M {};
     using A = typename phmap::allocator_traits<Alloc>::template rebind_alloc<M>;
@@ -4461,7 +4473,7 @@ public:
         template <class T>
         explicit DoNothing(T&&) {}
         DoNothing& operator=(const DoNothing&) { return *this; }
-        DoNothing& operator=(DoNothing&&) { return *this; }
+        DoNothing& operator=(DoNothing&&) noexcept { return *this; }
         void swap(DoNothing&) {}
         bool owns_lock() const noexcept { return true; }
     };
@@ -4471,7 +4483,7 @@ public:
     public:
         using mutex_type = MutexType;
 
-        WriteLock() : m_(nullptr), locked_(false) {}
+        WriteLock() : m_(nullptr) {}
 
         explicit WriteLock(mutex_type& m) : m_(&m) {
             m_->lock();
@@ -4484,12 +4496,12 @@ public:
 
         WriteLock(mutex_type& m, try_to_lock_t) : m_(&m), locked_(false) { m_->try_lock(); }
 
-        WriteLock(WriteLock&& o) : m_(std::move(o.m_)), locked_(std::move(o.locked_)) {
+        WriteLock(WriteLock&& o) noexcept : m_(std::move(o.m_)), locked_(std::move(o.locked_)) {
             o.locked_ = false;
             o.m_ = nullptr;
         }
 
-        WriteLock& operator=(WriteLock&& other) {
+        WriteLock& operator=(WriteLock&& other) noexcept {
             WriteLock temp(std::move(other));
             swap(temp);
             return *this;
@@ -4530,7 +4542,7 @@ public:
 
     private:
         mutex_type* m_;
-        bool locked_;
+        bool locked_{false};
     };
 
     // ----------------------------------------------------
@@ -4538,7 +4550,7 @@ public:
     public:
         using mutex_type = MutexType;
 
-        ReadLock() : m_(nullptr), locked_(false) {}
+        ReadLock() : m_(nullptr) {}
 
         explicit ReadLock(mutex_type& m) : m_(&m) {
             m_->lock_shared();
@@ -4551,12 +4563,12 @@ public:
 
         ReadLock(mutex_type& m, try_to_lock_t) : m_(&m), locked_(false) { m_->try_lock_shared(); }
 
-        ReadLock(ReadLock&& o) : m_(std::move(o.m_)), locked_(std::move(o.locked_)) {
+        ReadLock(ReadLock&& o) noexcept : m_(std::move(o.m_)), locked_(std::move(o.locked_)) {
             o.locked_ = false;
             o.m_ = nullptr;
         }
 
-        ReadLock& operator=(ReadLock&& other) {
+        ReadLock& operator=(ReadLock&& other) noexcept {
             ReadLock temp(std::move(other));
             swap(temp);
             return *this;
@@ -4597,7 +4609,7 @@ public:
 
     private:
         mutex_type* m_;
-        bool locked_;
+        bool locked_{false};
     };
 
     // ----------------------------------------------------
@@ -4788,5 +4800,3 @@ public:
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
-
-#endif // phmap_base_h_guard_

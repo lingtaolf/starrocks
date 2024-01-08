@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/orc/tree/main/c++/include/orc/OrcFile.hh
 
@@ -20,8 +33,7 @@
  * limitations under the License.
  */
 
-#ifndef ORC_FILE_HH
-#define ORC_FILE_HH
+#pragma once
 
 #include <string>
 
@@ -40,6 +52,12 @@ namespace orc {
    */
 class InputStream {
 public:
+    struct IORange {
+        uint64_t offset;
+        uint64_t size;
+    };
+    enum class PrepareCacheScope { READ_FULL_FILE, READ_FULL_STRIPE, READ_FULL_ROW_INDEX };
+
     virtual ~InputStream();
 
     /**
@@ -54,6 +72,12 @@ public:
     virtual uint64_t getNaturalReadSize() const = 0;
 
     /**
+     * Get the natural size for reads afrer seek.
+     * @return the number of bytes that should be read at once
+     */
+    virtual uint64_t getNaturalReadSizeAfterSeek() const;
+
+    /**
      * Read length bytes from the file starting at offset into
      * the buffer starting at buf.
      * @param buf the starting position of a buffer.
@@ -66,6 +90,12 @@ public:
      * Get the name of the stream for error messages.
      */
     virtual const std::string& getName() const = 0;
+
+    virtual void prepareCache(PrepareCacheScope scope, uint64_t offset, uint64_t length);
+
+    virtual bool isIORangesEnabled() const;
+    virtual void clearIORanges();
+    virtual void setIORanges(std::vector<InputStream::IORange>& io_ranges);
 };
 
 /**
@@ -107,20 +137,23 @@ public:
 /**
    * Create a stream to a local file or HDFS file if path begins with "hdfs://"
    * @param path the name of the file in the local file system or HDFS
+   * @param metrics the metrics of the reader
    */
-ORC_UNIQUE_PTR<InputStream> readFile(const std::string& path);
+ORC_UNIQUE_PTR<InputStream> readFile(const std::string& path, ReaderMetrics* metrics = nullptr);
 
 /**
    * Create a stream to a local file.
    * @param path the name of the file in the local file system
+   * @param metrics the metrics of the reader
    */
-ORC_UNIQUE_PTR<InputStream> readLocalFile(const std::string& path);
+ORC_UNIQUE_PTR<InputStream> readLocalFile(const std::string& path, ReaderMetrics* metrics = nullptr);
 
 /**
    * Create a stream to an HDFS file.
    * @param path the uri of the file in HDFS
+   * @param metrics the metrics of the reader
    */
-ORC_UNIQUE_PTR<InputStream> readHdfsFile(const std::string& path);
+ORC_UNIQUE_PTR<InputStream> readHdfsFile(const std::string& path, ReaderMetrics* metrics = nullptr);
 
 /**
    * Create a reader to read the ORC file.
@@ -142,5 +175,3 @@ ORC_UNIQUE_PTR<OutputStream> writeLocalFile(const std::string& path);
    */
 ORC_UNIQUE_PTR<Writer> createWriter(const Type& type, OutputStream* stream, const WriterOptions& options);
 } // namespace orc
-
-#endif

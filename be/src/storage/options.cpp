@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/olap/options.cpp
 
@@ -22,14 +35,14 @@
 #include "storage/options.h"
 
 #include <algorithm>
+#include <filesystem>
 
 #include "common/config.h"
 #include "common/logging.h"
 #include "common/status.h"
-#include "env/env.h"
+#include "fs/fs.h"
 #include "gutil/strings/split.h"
 #include "gutil/strings/substitute.h"
-#include "storage/utils.h"
 #include "util/path_util.h"
 
 namespace starrocks {
@@ -37,6 +50,7 @@ namespace starrocks {
 using std::string;
 using std::vector;
 
+// capacity config is deprecated
 static std::string CAPACITY_UC = "CAPACITY";
 static std::string MEDIUM_UC = "MEDIUM";
 static std::string SSD_UC = "SSD";
@@ -49,28 +63,34 @@ static std::string to_upper(const std::string& str) {
     return out;
 }
 
-// format: /data,medium:ssd,capacity:50 or /data,medium:ssd,50
-OLAPStatus parse_root_path(const string& root_path, StorePath* path) {
+// format: /data,medium:ssd
+// deprecated format: /data,capacity:50 or /data,50
+Status parse_root_path(const string& root_path, StorePath* path) {
     std::vector<string> tmp_vec = strings::Split(root_path, ",", strings::SkipWhitespace());
 
     // parse root path name
     StripWhiteSpace(&tmp_vec[0]);
-    tmp_vec[0].erase(tmp_vec[0].find_last_not_of("/") + 1);
+    tmp_vec[0].erase(tmp_vec[0].find_last_not_of('/') + 1);
     if (tmp_vec[0].empty() || tmp_vec[0][0] != '/') {
         LOG(WARNING) << "invalid store path. path=" << tmp_vec[0];
-        return OLAP_ERR_INPUT_PARAMETER_ERROR;
+        return Status::InvalidArgument("Invalid store path");
+    }
+
+    Status status = FileSystem::Default()->create_dir_if_missing(tmp_vec[0]);
+    if (!status.ok()) {
+        LOG(WARNING) << "path can not be created. path=" << tmp_vec[0];
+        return status;
     }
 
     string canonicalized_path;
-    Status status = Env::Default()->canonicalize(tmp_vec[0], &canonicalized_path);
+    status = FileSystem::Default()->canonicalize(tmp_vec[0], &canonicalized_path);
     if (!status.ok()) {
         LOG(WARNING) << "path can not be canonicalized. may be not exist. path=" << tmp_vec[0];
-        return OLAP_ERR_INPUT_PARAMETER_ERROR;
+        return status;
     }
     path->path = tmp_vec[0];
 
-    // parse root path capacity and storage medium
-    string capacity_str;
+    // parse root path storage medium
     string medium_str = HDD_UC;
 
     string extension = path_util::file_extension(canonicalized_path);
@@ -84,9 +104,8 @@ OLAPStatus parse_root_path(const string& root_path, StorePath* path) {
         string value;
         std::pair<string, string> pair = strings::Split(tmp_vec[i], strings::delimiter::Limit(":", 1));
         if (pair.second.empty()) {
-            // format_1: <value> only supports setting capacity
-            property = CAPACITY_UC;
-            value = tmp_vec[i];
+            LOG(WARNING) << "invalid property of store path, " << tmp_vec[i];
+            return Status::InvalidArgument(strings::Substitute("invalid property of store path, $0", tmp_vec[i]));
         } else {
             // format_2
             property = to_upper(pair.first);
@@ -96,24 +115,16 @@ OLAPStatus parse_root_path(const string& root_path, StorePath* path) {
         StripWhiteSpace(&property);
         StripWhiteSpace(&value);
         if (property == CAPACITY_UC) {
-            capacity_str = value;
+            // deprecated, do nothing
+            // keep this logic to prevent users who use the old config from failing to start after upgrading
         } else if (property == MEDIUM_UC) {
             // property 'medium' has a higher priority than the extension of
             // path, so it can override medium_str
             medium_str = to_upper(value);
         } else {
             LOG(WARNING) << "invalid property of store path, " << tmp_vec[i];
-            return OLAP_ERR_INPUT_PARAMETER_ERROR;
+            return Status::InvalidArgument("Invalid property of store path");
         }
-    }
-
-    path->capacity_bytes = -1;
-    if (!capacity_str.empty()) {
-        if (!valid_signed_number<int64_t>(capacity_str) || strtol(capacity_str.c_str(), NULL, 10) < 0) {
-            LOG(WARNING) << "invalid capacity of store path, capacity=" << capacity_str;
-            return OLAP_ERR_INPUT_PARAMETER_ERROR;
-        }
-        path->capacity_bytes = strtol(capacity_str.c_str(), NULL, 10) * GB_EXCHANGE_BYTE;
     }
 
     path->storage_medium = TStorageMedium::HDD;
@@ -124,19 +135,19 @@ OLAPStatus parse_root_path(const string& root_path, StorePath* path) {
             path->storage_medium = TStorageMedium::HDD;
         } else {
             LOG(WARNING) << "invalid storage medium. medium=" << medium_str;
-            return OLAP_ERR_INPUT_PARAMETER_ERROR;
+            return Status::InternalError("Invalid storage medium");
         }
     }
 
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
-OLAPStatus parse_conf_store_paths(const string& config_path, std::vector<StorePath>* paths) {
+Status parse_conf_store_paths(const string& config_path, std::vector<StorePath>* paths) {
     std::vector<string> path_vec = strings::Split(config_path, ";", strings::SkipWhitespace());
     for (auto& item : path_vec) {
         StorePath path;
         auto res = parse_root_path(item, &path);
-        if (res == OLAP_SUCCESS) {
+        if (res.ok()) {
             paths->emplace_back(std::move(path));
         } else {
             LOG(WARNING) << "failed to parse store path " << item << ", res=" << res;
@@ -144,9 +155,38 @@ OLAPStatus parse_conf_store_paths(const string& config_path, std::vector<StorePa
     }
     if (paths->empty() || (path_vec.size() != paths->size() && !config::ignore_broken_disk)) {
         LOG(WARNING) << "fail to parse storage_root_path config. value=[" << config_path << "]";
-        return OLAP_ERR_INPUT_PARAMETER_ERROR;
+        return Status::InvalidArgument("Fail to parse storage_root_path");
     }
-    return OLAP_SUCCESS;
+    return Status::OK();
+}
+
+Status parse_conf_datacache_paths(const std::string& config_path, std::vector<std::string>* paths) {
+    if (config_path.empty()) {
+        return Status::OK();
+    }
+    std::vector<string> path_vec = strings::Split(config_path, ";", strings::SkipWhitespace());
+    for (auto& item : path_vec) {
+        if (item.empty()) {
+            continue;
+        }
+        // Remove last slash if it exists$
+        auto it = item.end() - 1;
+        if (*it == '/') {
+            item.erase(it);
+        }
+        // Check the parent path
+        std::filesystem::path local_path(item);
+        if (local_path.has_parent_path() && !std::filesystem::exists(local_path.parent_path())) {
+            LOG(WARNING) << "invalid block cache path. path=" << item;
+            continue;
+        }
+        paths->emplace_back(local_path.string());
+    }
+    if ((path_vec.size() != paths->size() && !config::ignore_broken_disk)) {
+        LOG(WARNING) << "fail to parse datacache_disk_path config. value=[" << config_path << "]";
+        return Status::InvalidArgument("fail to parse datacache_disk_path");
+    }
+    return Status::OK();
 }
 
 } // end namespace starrocks

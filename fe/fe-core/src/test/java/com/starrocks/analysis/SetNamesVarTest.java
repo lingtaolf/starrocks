@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/analysis/SetNamesVarTest.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,42 +17,39 @@
 
 package com.starrocks.analysis;
 
+import com.google.common.collect.Lists;
 import com.starrocks.common.AnalysisException;
+import com.starrocks.sql.analyzer.SemanticException;
+import com.starrocks.sql.analyzer.SetStmtAnalyzer;
+import com.starrocks.sql.ast.SetNamesVar;
+import com.starrocks.sql.ast.SetStmt;
 import org.junit.Assert;
-import org.junit.Before;
 import org.junit.Test;
 
 public class SetNamesVarTest {
-    private Analyzer analyzer;
-
-    @Before
-    public void setUp() {
-        analyzer = AccessTestUtil.fetchAdminAnalyzer(false);
-    }
 
     @Test
     public void testNormal() throws AnalysisException {
         SetNamesVar var = new SetNamesVar(null, null);
-        var.analyze(analyzer);
+        SetStmtAnalyzer.analyze(new SetStmt(Lists.newArrayList(var)), null);
         Assert.assertEquals("utf8", var.getCharset().toLowerCase());
-
-        Assert.assertEquals("NAMES 'utf8' COLLATE DEFAULT", var.toString());
+        Assert.assertEquals("DEFAULT", var.getCollate());
 
         var = new SetNamesVar("UTf8", null);
-        var.analyze(analyzer);
+        SetStmtAnalyzer.analyze(new SetStmt(Lists.newArrayList(var)), null);
         Assert.assertEquals("utf8", var.getCharset().toLowerCase());
-        Assert.assertEquals("NAMES 'utf8' COLLATE DEFAULT", var.toString());
+        Assert.assertEquals("DEFAULT", var.getCollate());
 
         var = new SetNamesVar("UTf8", "aBc");
-        var.analyze(analyzer);
+        SetStmtAnalyzer.analyze(new SetStmt(Lists.newArrayList(var)), null);
         Assert.assertEquals("utf8", var.getCharset().toLowerCase());
-        Assert.assertEquals("NAMES 'utf8' COLLATE 'abc'", var.toString());
+        Assert.assertEquals("aBc", var.getCollate());
     }
 
-    @Test(expected = AnalysisException.class)
-    public void testUnsupported() throws AnalysisException {
+    @Test(expected = SemanticException.class)
+    public void testUnsupported()  {
         SetNamesVar var = new SetNamesVar("gbk");
-        var.analyze(analyzer);
+        SetStmtAnalyzer.analyze(new SetStmt(Lists.newArrayList(var)), null);
         Assert.fail("No exception throws.");
     }
 }

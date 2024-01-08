@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/gensrc/thrift/RuntimeProfile.thrift
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -24,11 +20,36 @@ namespace java com.starrocks.thrift
 
 include "Metrics.thrift"
 
+enum TCounterAggregateType {
+    SUM,
+    AVG,
+}
+
+enum TCounterMergeType {
+    MERGE_ALL, 
+    SKIP_ALL,
+    SKIP_FIRST_MERGE,
+    SKIP_SECOND_MERGE,
+}
+
+enum TCounterMinMaxType {
+  MIN_MAX_ALL = 0,
+  SKIP_ALL = 1
+}
+
+struct TCounterStrategy {
+    1: required TCounterAggregateType aggregate_type
+    2: required TCounterMergeType merge_type
+    3: required i64 display_threshold = 0
+    4: optional TCounterMinMaxType min_max_type = TCounterMinMaxType.MIN_MAX_ALL
+}
+
 // Counter data
 struct TCounter {
   1: required string name
   2: required Metrics.TUnit type
   3: required i64 value 
+  5: optional TCounterStrategy strategy 
 }
 
 // A single runtime profile

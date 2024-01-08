@@ -1,4 +1,17 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.sql.optimizer.rule.transformation;
 
@@ -26,12 +39,11 @@ public class PushDownPredicateAggRule extends TransformationRule {
 
     @Override
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
-        LogicalFilterOperator lfo = (LogicalFilterOperator) input.getOp();
-        List<ScalarOperator> filters = Utils.extractConjuncts(lfo.getPredicate());
+        LogicalFilterOperator logicalFilterOperator = (LogicalFilterOperator) input.getOp();
+        List<ScalarOperator> filters = Utils.extractConjuncts(logicalFilterOperator.getPredicate());
 
-        OptExpression aggOe = input.getInputs().get(0);
-        LogicalAggregationOperator lao = (LogicalAggregationOperator) aggOe.getOp();
-        List<ColumnRefOperator> groupColumns = lao.getGroupingKeys();
+        LogicalAggregationOperator logicalAggOperator = (LogicalAggregationOperator) input.inputAt(0).getOp();
+        List<ColumnRefOperator> groupColumns = logicalAggOperator.getGroupingKeys();
 
         List<ScalarOperator> pushDownPredicates = Lists.newArrayList();
 
@@ -43,26 +55,28 @@ public class PushDownPredicateAggRule extends TransformationRule {
             if (groupColumns.containsAll(columns) && !columns.isEmpty()) {
                 // remove from filter
                 iter.remove();
-                // and to predicates
+                // add to push down predicates
                 pushDownPredicates.add(scalar);
             }
         }
 
         // merge filter
-        filters.add(lao.getPredicate());
-        lao.setPredicate(Utils.compoundAnd(filters));
+        filters.add(logicalAggOperator.getPredicate());
+        input.setChild(0, OptExpression.create(new LogicalAggregationOperator.Builder().withOperator(logicalAggOperator)
+                        .setPredicate(Utils.compoundAnd(filters))
+                        .build(),
+                input.inputAt(0).getInputs()));
 
         // push down
         if (pushDownPredicates.size() > 0) {
             LogicalFilterOperator newFilter = new LogicalFilterOperator(Utils.compoundAnd(pushDownPredicates));
             OptExpression oe = new OptExpression(newFilter);
-            oe.getInputs().addAll(aggOe.getInputs());
+            oe.getInputs().addAll(input.inputAt(0).getInputs());
 
-            aggOe.getInputs().clear();
-            aggOe.getInputs().add(oe);
+            input.inputAt(0).getInputs().clear();
+            input.inputAt(0).getInputs().add(oe);
         }
 
-        return Lists.newArrayList(aggOe);
+        return Lists.newArrayList(input.inputAt(0));
     }
-
 }

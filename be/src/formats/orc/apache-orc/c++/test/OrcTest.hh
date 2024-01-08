@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/test/OrcTest.hh
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -20,10 +16,7 @@
  * limitations under the License.
  */
 
-#ifndef ORC_TEST_HH
-#define ORC_TEST_HH
+#pragma once
 
 // determine the size of an array
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof(*array))
-
-#endif

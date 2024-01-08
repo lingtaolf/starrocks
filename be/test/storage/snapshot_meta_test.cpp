@@ -1,4 +1,16 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "storage/snapshot_meta.h"
 
@@ -6,7 +18,7 @@
 
 #include <filesystem>
 
-#include "env/env.h"
+#include "fs/fs.h"
 #include "util/defer_op.h"
 
 namespace starrocks {
@@ -29,16 +41,16 @@ public:
         _snapshot_meta.tablet_meta().mutable_updates()->set_next_rowset_id(4);
 
         EditVersionMetaPB* v = _snapshot_meta.tablet_meta().mutable_updates()->add_versions();
-        v->set_creation_time(time(NULL));
+        v->set_creation_time(time(nullptr));
         v->add_rowsets(1);
         v->add_rowsets(2);
         v->add_rowsets(5);
 
         _snapshot_meta.rowset_metas().resize(3);
 
-        _snapshot_meta.rowset_metas()[0].set_creation_time(time(NULL));
+        _snapshot_meta.rowset_metas()[0].set_creation_time(time(nullptr));
         _snapshot_meta.rowset_metas()[0].set_tablet_id(_snapshot_meta.tablet_meta().tablet_id());
-        _snapshot_meta.rowset_metas()[0].set_rowset_id(1001);
+        _snapshot_meta.rowset_metas()[0].set_deprecated_rowset_id(0);
         _snapshot_meta.rowset_metas()[0].set_rowset_seg_id(1);
         _snapshot_meta.rowset_metas()[0].set_empty(false);
         _snapshot_meta.rowset_metas()[0].set_data_disk_size(1024);
@@ -50,9 +62,9 @@ public:
         _snapshot_meta.rowset_metas()[0].set_partition_id(1);
         _snapshot_meta.rowset_metas()[0].set_rowset_state(VISIBLE);
 
-        _snapshot_meta.rowset_metas()[1].set_creation_time(time(NULL));
+        _snapshot_meta.rowset_metas()[1].set_creation_time(time(nullptr));
         _snapshot_meta.rowset_metas()[1].set_tablet_id(_snapshot_meta.tablet_meta().tablet_id());
-        _snapshot_meta.rowset_metas()[1].set_rowset_id(1002);
+        _snapshot_meta.rowset_metas()[1].set_deprecated_rowset_id(0);
         _snapshot_meta.rowset_metas()[1].set_rowset_seg_id(2);
         _snapshot_meta.rowset_metas()[1].set_empty(false);
         _snapshot_meta.rowset_metas()[1].set_data_disk_size(2048);
@@ -64,9 +76,9 @@ public:
         _snapshot_meta.rowset_metas()[1].set_partition_id(1);
         _snapshot_meta.rowset_metas()[1].set_rowset_state(VISIBLE);
 
-        _snapshot_meta.rowset_metas()[2].set_creation_time(time(NULL));
+        _snapshot_meta.rowset_metas()[2].set_creation_time(time(nullptr));
         _snapshot_meta.rowset_metas()[2].set_tablet_id(_snapshot_meta.tablet_meta().tablet_id());
-        _snapshot_meta.rowset_metas()[2].set_rowset_id(1003);
+        _snapshot_meta.rowset_metas()[2].set_deprecated_rowset_id(0);
         _snapshot_meta.rowset_metas()[2].set_rowset_seg_id(5);
         _snapshot_meta.rowset_metas()[2].set_empty(false);
         _snapshot_meta.rowset_metas()[2].set_data_disk_size(2048);
@@ -92,14 +104,13 @@ protected:
 
 // NOLINTNEXTLINE
 TEST_F(SnapshotMetaTest, test_serialize_and_parse) {
-    std::unique_ptr<WritableFile> wf;
-    ASSERT_TRUE(Env::Default()->new_writable_file("test_serialize_and_parse.meta", &wf).ok());
+    WritableFileOptions opts{.sync_on_close = false, .mode = FileSystem::CREATE_OR_OPEN_WITH_TRUNCATE};
+    auto wf = *FileSystem::Default()->new_writable_file(opts, "test_serialize_and_parse.meta");
     ASSERT_TRUE(_snapshot_meta.serialize_to_file(wf.get()).ok());
     wf->close();
     DeferOp defer([&]() { std::filesystem::remove("test_serialize_and_parse.meta"); });
 
-    std::unique_ptr<RandomAccessFile> rf;
-    ASSERT_TRUE(Env::Default()->new_random_access_file("test_serialize_and_parse.meta", &rf).ok());
+    auto rf = *FileSystem::Default()->new_random_access_file("test_serialize_and_parse.meta");
     SnapshotMeta meta;
     auto st = meta.parse_from_file(rf.get());
     ASSERT_TRUE(st.ok()) << st;

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/blocking_priority_queue.hpp
 
@@ -37,6 +50,7 @@ template <typename T>
 class BlockingPriorityQueue {
 public:
     explicit BlockingPriorityQueue(size_t max_elements) : _max_element(max_elements) {}
+    ~BlockingPriorityQueue() { shutdown(); }
 
     // Return false iff has been shutdown.
     bool blocking_get(T* out) {
@@ -94,6 +108,17 @@ public:
         return false;
     }
 
+    // force push val
+    void force_put(T&& val) {
+        std::unique_lock<std::mutex> unique_lock(_lock);
+        if (!_shutdown) {
+            _heap.emplace_back(std::move(val));
+            std::push_heap(_heap.begin(), _heap.end());
+            unique_lock.unlock();
+            _get_cv.notify_one();
+        }
+    }
+
     // Return false iff has been shutdown.
     bool blocking_put(T&& val) {
         std::unique_lock<std::mutex> unique_lock(_lock);
@@ -139,6 +164,7 @@ public:
     void shutdown() {
         {
             std::lock_guard<std::mutex> guard(_lock);
+            if (_shutdown) return;
             _shutdown = true;
         }
 

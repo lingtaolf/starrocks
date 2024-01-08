@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/http/action/snapshot_action.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -28,12 +24,9 @@
 #include "common/logging.h"
 #include "gen_cpp/AgentService_types.h"
 #include "http/http_channel.h"
-#include "http/http_headers.h"
 #include "http/http_request.h"
-#include "http/http_response.h"
 #include "http/http_status.h"
 #include "runtime/exec_env.h"
-#include "storage/olap_define.h"
 #include "storage/snapshot_manager.h"
 #include "storage/storage_engine.h"
 

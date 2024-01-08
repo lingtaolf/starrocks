@@ -85,6 +85,16 @@ inline uint32_t decode_fixed32_le(const uint8_t* buf) {
 #endif
 }
 
+inline uint32_t decode_fixed32_be(const uint8_t* buf) {
+    uint32_t res;
+    memcpy(&res, buf, sizeof(res));
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+    return bswap_32(res);
+#else
+    return res;
+#endif
+}
+
 inline uint64_t decode_fixed64_le(const uint8_t* buf) {
     uint64_t res;
     memcpy(&res, buf, sizeof(res));
@@ -196,7 +206,7 @@ inline void put_varint64_varint32(T* dst, uint64_t v1, uint32_t v2) {
 // on success, return true and advance `input` past the parsed value.
 // on failure, return false and `input` is not modified.
 inline bool get_varint32(Slice* input, uint32_t* val) {
-    const uint8_t* p = (const uint8_t*)input->data;
+    const auto* p = (const uint8_t*)input->data;
     const uint8_t* limit = p + input->size;
     const uint8_t* q = decode_varint32_ptr(p, limit, val);
     if (q == nullptr) {
@@ -211,7 +221,7 @@ inline bool get_varint32(Slice* input, uint32_t* val) {
 // on success, return true and advance `input` past the parsed value.
 // on failure, return false and `input` is not modified.
 inline bool get_varint64(Slice* input, uint64_t* val) {
-    const uint8_t* p = (const uint8_t*)input->data;
+    const auto* p = (const uint8_t*)input->data;
     const uint8_t* limit = p + input->size;
     const uint8_t* q = decode_varint64_ptr(p, limit, val);
     if (q == nullptr) {

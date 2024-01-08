@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/backup/Status.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,6 +17,8 @@
 
 package com.starrocks.backup;
 
+import com.google.gson.annotations.SerializedName;
+
 public class Status {
     public enum ErrCode {
         OK,
@@ -32,11 +30,14 @@ public class Status {
         TIMEOUT,
         BAD_CONNECTION,
         COMMON_ERROR,
-        OLAP_VERSION_ALREADY_MERGED
+        OLAP_VERSION_ALREADY_MERGED,
+        UNSUPPORTED
     }
 
-    private ErrCode errCode;
-    private String errMsg;
+    @SerializedName("ec")
+    private final ErrCode errCode;
+    @SerializedName("em")
+    private final String errMsg;
 
     public static final Status OK = new Status(ErrCode.OK, "");
 

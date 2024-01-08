@@ -1,39 +1,34 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package com.starrocks.sql.optimizer.operator.physical;
 
-import com.google.common.base.Objects;
-import com.starrocks.catalog.Column;
-import com.starrocks.catalog.Table;
-import com.starrocks.external.elasticsearch.EsShardPartitions;
+import com.starrocks.connector.elasticsearch.EsShardPartitions;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.OperatorVisitor;
-import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalEsScanOperator;
 
 import java.util.List;
-import java.util.Map;
 
-public class PhysicalEsScanOperator extends PhysicalOperator {
-    private final Table table;
-    private final Map<ColumnRefOperator, Column> columnRefMap;
+public class PhysicalEsScanOperator extends PhysicalScanOperator {
     private final List<EsShardPartitions> selectedIndex;
 
-    public PhysicalEsScanOperator(Table table, Map<ColumnRefOperator, Column> columnRefMap,
-                                  List<EsShardPartitions> selectedIndex) {
-        super(OperatorType.PHYSICAL_ES_SCAN);
-        this.table = table;
-        this.columnRefMap = columnRefMap;
-        this.selectedIndex = selectedIndex;
-    }
-
-    public Table getTable() {
-        return table;
-    }
-
-    public Map<ColumnRefOperator, Column> getColumnRefMap() {
-        return columnRefMap;
+    public PhysicalEsScanOperator(LogicalEsScanOperator scanOperator) {
+        super(OperatorType.PHYSICAL_ES_SCAN, scanOperator);
+        this.selectedIndex = scanOperator.getSelectedIndex();
     }
 
     public List<EsShardPartitions> getSelectedIndex() {
@@ -48,23 +43,5 @@ public class PhysicalEsScanOperator extends PhysicalOperator {
     @Override
     public <R, C> R accept(OptExpressionVisitor<R, C> visitor, OptExpression optExpression, C context) {
         return visitor.visitPhysicalEsScan(optExpression, context);
-    }
-
-    @Override
-    public boolean equals(Object o) {
-        if (this == o) {
-            return true;
-        }
-        if (o == null || getClass() != o.getClass()) {
-            return false;
-        }
-        PhysicalEsScanOperator that = (PhysicalEsScanOperator) o;
-        return Objects.equal(table, that.table) && Objects.equal(columnRefMap, that.columnRefMap) &&
-                Objects.equal(selectedIndex, that.selectedIndex);
-    }
-
-    @Override
-    public int hashCode() {
-        return Objects.hashCode(table, columnRefMap, selectedIndex);
     }
 }

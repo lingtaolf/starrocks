@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/monotime.h
 
@@ -19,8 +32,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_UTIL_MONOTIME_H
-#define STARROCKS_BE_SRC_UTIL_MONOTIME_H
+#pragma once
 
 #include <cstdint>
 #include <string>
@@ -227,10 +239,10 @@ public:
     /// @return Reference to the modified object.
     MonoTime& operator+=(const MonoDelta& delta);
 
-    /// Substract a delta from the point in time represented by the object.
+    /// Subtract a delta from the point in time represented by the object.
     ///
     /// @param [in] delta
-    ///   The delta to substract.
+    ///   The delta to subtract.
     /// @return Reference to the modified object.
     MonoTime& operator-=(const MonoDelta& delta);
     ///@}
@@ -241,7 +253,7 @@ private:
     explicit MonoTime(const struct timespec& ts);
     explicit MonoTime(int64_t nanos);
     double ToSeconds() const;
-    int64_t nanos_;
+    int64_t nanos_{0};
 };
 
 /// Sleep for an interval specified by a MonoDelta instance.
@@ -406,5 +418,3 @@ MonoDelta operator-(const MonoTime& t_end, const MonoTime& t_begin);
 ///@}
 
 } // namespace starrocks
-
-#endif //STARROCKS_BE_SRC_UTIL_MONOTIME_H

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/gutil/endian.h
-
 // Copyright 2005 Google Inc.
 //
 // Licensed to the Apache Software Foundation (ASF) under one
@@ -31,10 +27,9 @@
 //
 // Buffer routines will copy to and from buffers without causing
 // a bus error when the architecture requires differnt byte alignments
-#ifndef UTIL_ENDIAN_ENDIAN_H_
-#define UTIL_ENDIAN_ENDIAN_H_
+#pragma once
 
-#include <assert.h>
+#include <cassert>
 
 #include "gutil/int128.h"
 #include "gutil/integral_types.h"
@@ -212,7 +207,7 @@ public:
                        ToHost64(UNALIGNED_LOAD64(p)));
     }
 
-    static void Store128(void* p, const uint128 v) {
+    static void Store128(void* p, const uint128& v) {
         UNALIGNED_STORE64(p, FromHost64(Uint128Low64(v)));
         UNALIGNED_STORE64(reinterpret_cast<uint64*>(p) + 1, FromHost64(Uint128High64(v)));
     }
@@ -336,7 +331,7 @@ public:
                        ToHost64(UNALIGNED_LOAD64(reinterpret_cast<const uint64*>(p) + 1)));
     }
 
-    static void Store128(void* p, const uint128 v) {
+    static void Store128(void* p, const uint128& v) {
         UNALIGNED_STORE64(p, FromHost64(Uint128High64(v)));
         UNALIGNED_STORE64(reinterpret_cast<uint64*>(p) + 1, FromHost64(Uint128Low64(v)));
     }
@@ -371,5 +366,3 @@ public:
 
 // Network byte order is big-endian
 typedef BigEndian NetworkByteOrder;
-
-#endif // UTIL_ENDIAN_ENDIAN_H_

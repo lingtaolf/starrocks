@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/url_parser.cpp
 
@@ -47,7 +60,7 @@ const StringSearch UrlParser::_s_question_search(&_s_question);
 const StringSearch UrlParser::_s_hash_search(&_s_hash);
 
 bool UrlParser::parse_url(const StringValue& url, UrlPart part, StringValue* result) {
-    result->ptr = NULL;
+    result->ptr = nullptr;
     result->len = 0;
     // Remove leading and trailing spaces.
     StringValue trimmed_url = url.trim();
@@ -176,71 +189,6 @@ bool UrlParser::parse_url(const StringValue& url, UrlPart part, StringValue* res
     }
 
     return true;
-}
-
-bool UrlParser::parse_url_key(const StringValue& url, UrlPart part, const StringValue& key, StringValue* result) {
-    // Part must be query to ask for a specific query key.
-    if (part != QUERY) {
-        return false;
-    }
-
-    // Remove leading and trailing spaces.
-    StringValue trimmed_url = url.trim();
-
-    // Search for the key in the url, ignoring malformed URLs for now.
-    StringSearch key_search(&key);
-
-    while (trimmed_url.len > 0) {
-        // Search for the key in the current substring.
-        int32_t key_pos = key_search.search(&trimmed_url);
-        bool match = true;
-
-        if (key_pos < 0) {
-            return false;
-        }
-
-        // Key pos must be != 0 because it must be preceded by a '?' or a '&'.
-        // Check that the char before key_pos is either '?' or '&'.
-        if (key_pos == 0 || (trimmed_url.ptr[key_pos - 1] != '?' && trimmed_url.ptr[key_pos - 1] != '&')) {
-            match = false;
-        }
-
-        // Advance substring beyond matching key.
-        trimmed_url = trimmed_url.substring(key_pos + key.len);
-
-        if (!match) {
-            continue;
-        }
-
-        if (trimmed_url.len <= 0) {
-            break;
-        }
-
-        // Next character must be '=', otherwise the match cannot be a key in the query part.
-        if (trimmed_url.ptr[0] != '=') {
-            continue;
-        }
-
-        int32_t pos = 1;
-
-        // Find ending position of key's value by matching '#' or '&'.
-        while (pos < trimmed_url.len) {
-            switch (trimmed_url.ptr[pos]) {
-            case '#':
-            case '&':
-                *result = trimmed_url.substring(1, pos - 1);
-                return true;
-            }
-
-            ++pos;
-        }
-
-        // Ending position is end of string.
-        *result = trimmed_url.substring(1);
-        return true;
-    }
-
-    return false;
 }
 
 UrlParser::UrlPart UrlParser::get_url_part(const StringValue& part) {

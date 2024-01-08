@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/http/ev_http_server.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,6 +17,8 @@
 
 #pragma once
 
+#include <event2/event.h>
+
 #include <string>
 #include <thread>
 #include <vector>
@@ -37,7 +35,7 @@ class HttpRequest;
 class EvHttpServer {
 public:
     EvHttpServer(int port, int num_workers = 1);
-    EvHttpServer(const std::string& host, int port, int num_workers = 1);
+    EvHttpServer(std::string host, int port, int num_workers = 1);
     ~EvHttpServer();
 
     // register handler for an a path-method pair
@@ -79,6 +77,8 @@ private:
     PathTrie<HttpHandler*> _delete_handlers;
     PathTrie<HttpHandler*> _head_handlers;
     PathTrie<HttpHandler*> _options_handlers;
+    std::vector<struct event_base*> _event_bases;
+    std::vector<struct evhttp*> _https;
 };
 
 } // namespace starrocks

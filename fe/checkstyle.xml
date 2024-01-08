@@ -1,6 +1,19 @@
 <?xml version="1.0"?>
 <!--
-This file is made available under Elastic License 2.0.
+Copyright 2021-present StarRocks, Inc. All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
 This file modify from here:
 https://github.com/checkstyle/checkstyle/blob/master/src/main/resources/google_checks.xml
 -->
@@ -33,14 +46,9 @@ https://github.com/checkstyle/checkstyle/blob/master/src/main/resources/google_c
     </module>
 
     <module name="SuppressWarningsFilter"/>
-    <module name="TreeWalker">
-        <module name="AvoidStarImport"/>
-        <module name="UnusedImports"/>
-    </module>
-
     <module name="BeforeExecutionExclusionFileFilter">
         <property name="fileNamePattern"
-                  value="HiveMetaClient.java|HiveMetaStoreThriftClient.java|FunctionSet.java|TableMetricsEntity.java|(.*[\\/]starrocks[\\/](analysis)|(planner)[\\/].*$)|AcceptListener.java|BackendTabletsInfo.java|BrokerLoadJob.java|ConfigBase.java|Config.java|CounterMetric.java|DatabaseTransactionMgr.java|DataOutputBuffer.java|DynamicPartitionScheduler.java|EtlStatus.java|FrontendOptions.java|GenericPool.java|GlobalTransactionMgr.java|HivePartitionsProcDir.java|IdGenerator.java|Id.java|IOUtils.java|LimitOutputStream.java|Log4jConfig.java|MarkDownParser.java|MasterImpl.java|MaterializedViewHandler.java|MysqlAuthPacket.java|MysqlPacket.java|MysqlPassword.java|NMysqlChannel.java|NMysqlServer.java|OutputBuffer.java|Pair.java|QueryDetailAction.java|QueryDumpAction.java|ReadListener.java|Reference.java|RoutineLoadJob.java|RoutineLoadTaskInfo.java|ScheduleRule.java|SchemaChangeHandler.java|SessionVariable.java|ShowExecutor.java|SmallFileMgr.java|SparkLauncherMonitor.java|SparkRepository.java|StmtExecutor.java|SubqueryUtils.java|TableMetricsRegistry.java|TableQueryPlanAction.java|TableSchemaAction.java|TabletScheduler.java|Text.java|ThreadPoolManager.java|TreeNode.java|Util.java|VariableMgr.java|WebUtils.java"/>
+                  value="(.*[\\/]starrocks[\\/](analysis)|(planner)[\\/].*$)|Log4jConfig.java|FunctionSet.java|HiveMetaStoreClient.java|Platform.java|.*[\\/]udf-extensions[\\/].*"/>
     </module>
 
     <module name="FileTabCharacter">
@@ -60,6 +68,7 @@ https://github.com/checkstyle/checkstyle/blob/master/src/main/resources/google_c
             <property name="allowByTailComment" value="true"/>
             <property name="allowNonPrintableEscapes" value="true"/>
         </module>
+        <module name="UnusedImports"/>
         <module name="AvoidStarImport"/>
         <!--        <module name="OneTopLevelClass"/>-->
         <module name="NoLineWrap">
@@ -115,7 +124,7 @@ https://github.com/checkstyle/checkstyle/blob/master/src/main/resources/google_c
             <property name="allowEmptyLoops" value="true"/>
             <property name="ignoreEnhancedForColon" value="false"/>
             <property name="tokens"
-                      value="ASSIGN, BAND, BAND_ASSIGN, BOR, BOR_ASSIGN, BSR, BSR_ASSIGN, BXOR,
+                      value="ASSIGN, ARRAY_INIT, BAND, BAND_ASSIGN, BOR, BOR_ASSIGN, BSR, BSR_ASSIGN, BXOR,
                     BXOR_ASSIGN, COLON, DIV, DIV_ASSIGN, DO_WHILE, EQUAL, GE, GT, LAMBDA, LAND,
                     LCURLY, LE, LITERAL_CATCH, LITERAL_DO, LITERAL_ELSE, LITERAL_FINALLY,
                     LITERAL_FOR, LITERAL_IF, LITERAL_RETURN, LITERAL_SWITCH, LITERAL_SYNCHRONIZED,
@@ -189,6 +198,7 @@ https://github.com/checkstyle/checkstyle/blob/master/src/main/resources/google_c
             <message key="name.invalidPattern"
                      value="Parameter name ''{0}'' must match pattern ''{1}''."/>
         </module>
+        <module name="ConstantName"/>
         <module name="LambdaParameterName">
             <property name="format" value="^[a-z]([a-zA-Z0-9]*)?$"/>
             <message key="name.invalidPattern"
@@ -210,7 +220,7 @@ https://github.com/checkstyle/checkstyle/blob/master/src/main/resources/google_c
                      value="Pattern variable name ''{0}'' must match pattern ''{1}''."/>
         </module>
         <module name="ClassTypeParameterName">
-            <property name="format" value="(^[A-Z][0-9]?)$|([A-Z][a-zA-Z0-9]*[T]$)"/>
+            <property name="format" value="(^[A-Z][0-9]?)$|([A-Z][a-zA-Z0-9]*$)"/>
             <message key="name.invalidPattern"
                      value="Class type name ''{0}'' must match pattern ''{1}''."/>
         </module>
@@ -304,6 +314,16 @@ https://github.com/checkstyle/checkstyle/blob/master/src/main/resources/google_c
         </module>
         <module name="CommentsIndentation">
             <property name="tokens" value="SINGLE_LINE_COMMENT, BLOCK_COMMENT_BEGIN"/>
+        </module>
+        <module name="UnnecessarySemicolonAfterOuterTypeDeclaration"/>
+        <module name="UnnecessarySemicolonAfterTypeMemberDeclaration"/>
+        <module name="UnnecessarySemicolonInEnumeration"/>
+        <module name="UnnecessarySemicolonInTryWithResources"/>
+        <module name="Regexp">
+            <property name="format" value=";{2,}[\r\n]+"/>
+            <property name="illegalPattern" value="true"/>
+            <property name="ignoreComments" value="true"/>
+            <property name="message" value="Two or more semicolons appear, which is a duplicate."/>
         </module>
     </module>
 </module>

@@ -1,119 +1,81 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/topn_node.h
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-#ifndef STARROCKS_BE_SRC_QUERY_EXEC_TOPN_NODE_H
-#define STARROCKS_BE_SRC_QUERY_EXEC_TOPN_NODE_H
-
-#include <queue>
+#pragma once
 
 #include "exec/exec_node.h"
-#include "runtime/descriptors.h"
-#include "util/tuple_row_compare.h"
+#include "exec/sort_exec_exprs.h"
 
 namespace starrocks {
 
-class MemPool;
-class RuntimeState;
-class Tuple;
+class ChunksSorter;
 
-// Node for in-memory TopN (ORDER BY ... LIMIT)
-// This handles the case where the result fits in memory.  This node will do a deep
-// copy of the tuples that are necessary for the output.
-// This is implemented by storing rows in a priority queue.
-class TopNNode : public ExecNode {
+// Node for in-memory TopN (ORDER BY ... LIMIT).
+//
+// It sorts rows in a batch of chunks in turn at the open stage,
+// and keeps LIMIT rows after each step for output.
+class TopNNode final : public ::starrocks::ExecNode {
 public:
     TopNNode(ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl& descs);
-    virtual ~TopNNode();
+    ~TopNNode() override;
 
-    virtual Status init(const TPlanNode& tnode, RuntimeState* state = nullptr);
+    // overridden methods defined in ::starrocks::ExecNode
+    Status init(const TPlanNode& tnode, RuntimeState* state = nullptr) override;
+    Status prepare(RuntimeState* state) override;
+    Status open(RuntimeState* state) override;
+    Status get_next(RuntimeState* state, ChunkPtr* chunk, bool* eos) override;
 
-    virtual Status prepare(RuntimeState* state);
-    virtual Status open(RuntimeState* state);
-    virtual Status get_next(RuntimeState* state, RowBatch* row_batch, bool* eos);
-    virtual Status close(RuntimeState* state);
-    virtual void push_down_predicate(RuntimeState* state, std::list<ExprContext*>* expr_ctxs, bool is_vectorized);
+    void close(RuntimeState* state) override;
 
-protected:
-    virtual void debug_string(int indentation_level, std::stringstream* out) const;
+    std::vector<std::shared_ptr<pipeline::OperatorFactory>> decompose_to_pipeline(
+            pipeline::PipelineBuilderContext* context) override;
 
 private:
-    friend class TupleLessThan;
+    template <class ContextFactory, class SinkFactory, class SourceFactory>
+    std::vector<std::shared_ptr<pipeline::OperatorFactory>> _decompose_to_pipeline(
+            pipeline::PipelineBuilderContext* context, bool is_partition_topn, bool is_partition_skewed,
+            bool is_merging, bool enable_parallel_merge);
 
-    // Inserts a tuple row into the priority queue if it's in the TopN.  Creates a deep
-    // copy of tuple_row, which it stores in _tuple_pool.
-    void insert_tuple_row(TupleRow* tuple_row);
+    Status _consume_chunks(RuntimeState* state, ExecNode* child);
+    const TPlanNode& _tnode;
 
-    // Flatten and reverse the priority queue.
-    void prepare_for_output();
-
-    // number rows to skipped
+    // Only used for profile
+    std::string _sort_keys;
     int64_t _offset;
 
-    // _sort_exec_exprs contains the ordering expressions used for tuple comparison and
-    // the materialization exprs for the output tuple.
+    // _sort_exec_exprs contains the ordering expressions
     SortExecExprs _sort_exec_exprs;
+    std::vector<SlotId> _early_materialized_slots{};
     std::vector<bool> _is_asc_order;
-    std::vector<bool> _nulls_first;
+    std::vector<bool> _is_null_first;
+    std::vector<OrderByType> _order_by_types;
+    // if TopNNode is followed by AnalyticNode with partition_exprs, this partition_exprs is
+    // also added to TopNNode to hint that local shuffle operator is prepended to TopNNode in
+    // order to eliminate merging operation in pipeline execution engine.
+    std::vector<ExprContext*> _analytic_partition_exprs;
 
     // Cached descriptor for the materialized tuple. Assigned in Prepare().
     TupleDescriptor* _materialized_tuple_desc;
 
-    // Comparator for _priority_queue.
-    std::unique_ptr<TupleRowComparator> _tuple_row_less_than;
-
-    // After computing the TopN in the priority_queue, pop them and put them in this vector
-    std::vector<Tuple*> _sorted_top_n;
-
-    // Tuple allocated once from _tuple_pool and reused in InsertTupleRow to
-    // materialize input tuples if necessary. After materialization, _tmp_tuple may be
-    // copied into the tuple pool and inserted into the priority queue.
-    Tuple* _tmp_tuple = nullptr;
-
-    // Stores everything referenced in _priority_queue
-    std::unique_ptr<MemPool> _tuple_pool;
-
-    // Iterator over elements in _sorted_top_n.
-    std::vector<Tuple*>::iterator _get_next_iter;
-    // std::vector<TupleRow*>::iterator _get_next_iter;
-
-    // True if the _limit comes from DEFAULT_ORDER_BY_LIMIT and the query option
+    // True if the _limit comes from DEFAULT_ORDER_BY_LIMIT and option
     // ABORT_ON_DEFAULT_LIMIT_EXCEEDED is set.
     bool _abort_on_default_limit_exceeded = false;
 
-    /////////////////////////////////////////
-    // BEGIN: Members that must be Reset()
+    std::unique_ptr<ChunksSorter> _chunks_sorter;
 
-    // Number of rows skipped. Used for adhering to _offset.
-    int64_t _num_rows_skipped;
-
-    // The priority queue will never have more elements in it than the LIMIT.  The stl
-    // priority queue doesn't support a max size, so to get that functionality, the order
-    // of the queue is the opposite of what the ORDER BY clause specifies, such that the top
-    // of the queue is the last sorted element.
-    std::unique_ptr<std::priority_queue<Tuple*, std::vector<Tuple*>, TupleRowComparator> > _priority_queue;
-
-    // END: Members that must be Reset()
-    /////////////////////////////////////////
+    RuntimeProfile::Counter* _sort_timer;
+    std::vector<RuntimeFilterBuildDescriptor*> _build_runtime_filters;
 };
 
-}; // namespace starrocks
-
-#endif
+} // namespace starrocks

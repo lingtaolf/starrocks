@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/common/configbase.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <strings.h>
+
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -26,7 +24,8 @@
 #include <iostream>
 #include <list>
 #include <map>
-#include <sstream>
+#include <regex>
+#include <string>
 
 #define __IN_CONFIGBASE_CPP__
 #include "common/config.h"
@@ -35,13 +34,20 @@
 #include "common/status.h"
 #include "gutil/strings/substitute.h"
 
-namespace starrocks {
-namespace config {
+namespace starrocks::config {
 
 std::map<std::string, Register::Field>* Register::_s_field_map = nullptr;
 std::map<std::string, std::string>* full_conf_map = nullptr;
 
 Properties props;
+
+// Because changes to the std::string type are not atomic,
+// we introduce a lock to protect mutable string type config item.
+std::mutex mstring_conf_lock;
+
+std::mutex* get_mstring_conf_lock() {
+    return &mstring_conf_lock;
+}
 
 // trim string
 std::string& trim(std::string& s) {
@@ -52,7 +58,7 @@ std::string& trim(std::string& s) {
     return s;
 }
 
-// split string by '='
+// Split string by '='.
 void splitkv(const std::string& s, std::string& k, std::string& v) {
     const char sep = '=';
     size_t start = 0;
@@ -66,12 +72,12 @@ void splitkv(const std::string& s, std::string& k, std::string& v) {
     }
 }
 
-// replace env variables
+// Replace env variables.
 bool replaceenv(std::string& s) {
     std::size_t pos = 0;
     std::size_t start = 0;
     while ((start = s.find("${", pos)) != std::string::npos) {
-        std::size_t end = s.find("}", start + 2);
+        std::size_t end = s.find('}', start + 2);
         if (end == std::string::npos) {
             return false;
         }
@@ -109,9 +115,9 @@ bool strtox(const std::string& valstr, std::vector<T>& retval) {
 }
 
 bool strtox(const std::string& valstr, bool& retval) {
-    if (valstr.compare("true") == 0) {
+    if (strcasecmp(valstr.c_str(), "true") == 0 || strcmp(valstr.c_str(), "1") == 0) {
         retval = true;
-    } else if (valstr.compare("false") == 0) {
+    } else if (strcasecmp(valstr.c_str(), "false") == 0 || strcmp(valstr.c_str(), "0") == 0) {
         retval = false;
     } else {
         return false;
@@ -171,14 +177,14 @@ bool strtox(const std::string& valstr, std::string& retval) {
     return true;
 }
 
-// load conf file
+// Load conf file.
 bool Properties::load(const char* filename) {
-    // if filename is null, use the empty props
+    // If 'filename' is null, use the empty props.
     if (filename == nullptr) {
         return true;
     }
 
-    // open the conf file
+    // Open the conf file
     std::ifstream input(filename);
     if (!input.is_open()) {
         std::cerr << "config::load() failed to open the file:" << filename << std::endl;
@@ -189,29 +195,42 @@ bool Properties::load(const char* filename) {
     std::string line;
     std::string key;
     std::string value;
+    std::regex doris_start("^doris_");
     line.reserve(512);
     while (input) {
-        // read one line at a time
+        // Read one line at a time.
         std::getline(input, line);
 
-        // remove left and right spaces
+        // Remove left and right spaces.
         trim(line);
 
-        // ignore comments
+        // Ignore comments.
         if (line.empty() || line[0] == '#') {
             continue;
         }
 
-        // read key and value
+        // Read key and value.
         splitkv(line, key, value);
         trim(key);
         trim(value);
 
-        // insert into file_conf_map
+        // compatible with doris_config
+        key = std::regex_replace(key, doris_start, "");
+
+        if (key.compare("webserver_port") == 0) {
+            // Avoid overwriting the existing config.
+            if (file_conf_map.find("be_http_port") != file_conf_map.end()) {
+                continue;
+            }
+
+            key = "be_http_port";
+        }
+
+        // Insert into 'file_conf_map'.
         file_conf_map[key] = value;
     }
 
-    // close the conf file
+    // Close the conf file.
     input.close();
 
     return true;
@@ -264,18 +283,18 @@ std::ostream& operator<<(std::ostream& out, const std::vector<T>& v) {
         continue;                                                                                  \
     }
 
-// init conf fields
+// Init conf fields.
 bool init(const char* filename, bool fillconfmap) {
-    // load properties file
+    // Load properties file.
     if (!props.load(filename)) {
         return false;
     }
-    // fill full_conf_map ?
+    // Fill 'full_conf_map'.
     if (fillconfmap && full_conf_map == nullptr) {
         full_conf_map = new std::map<std::string, std::string>();
     }
 
-    // set conf fields
+    // Set conf fields.
     for (const auto& it : *Register::_s_field_map) {
         SET_FIELD(it.second, bool, fillconfmap);
         SET_FIELD(it.second, int16_t, fillconfmap);
@@ -322,11 +341,59 @@ Status set_config(const std::string& field, const std::string& value) {
     UPDATE_FIELD(it->second, value, int32_t);
     UPDATE_FIELD(it->second, value, int64_t);
     UPDATE_FIELD(it->second, value, double);
+    {
+        std::lock_guard lock(mstring_conf_lock);
+        UPDATE_FIELD(it->second, value, std::string);
+    }
 
     // The other types are not thread safe to change dynamically.
     return Status::NotSupported(
             strings::Substitute("'$0' is type of '$1' which is not support to modify", field, it->second.type));
 }
 
-} // namespace config
-} // namespace starrocks
+std::string Register::Field::value() const {
+    if (strcmp(type, "bool") == 0) {
+        return std::to_string(*reinterpret_cast<bool*>(storage));
+    }
+    if (strcmp(type, "int16_t") == 0) {
+        return std::to_string(*reinterpret_cast<int16_t*>(storage));
+    }
+    if (strcmp(type, "int32_t") == 0) {
+        return std::to_string(*reinterpret_cast<int32_t*>(storage));
+    }
+    if (strcmp(type, "int64_t") == 0) {
+        return std::to_string(*reinterpret_cast<int64_t*>(storage));
+    }
+    if (strcmp(type, "double") == 0) {
+        return std::to_string(*reinterpret_cast<double*>(storage));
+    }
+    if (strcmp(type, "std::string") == 0) {
+        if (valmutable) {
+            std::lock_guard lock(mstring_conf_lock);
+            return *reinterpret_cast<std::string*>(storage);
+        } else {
+            return *reinterpret_cast<std::string*>(storage);
+        }
+    }
+    if (strcmp(type, "std::vector<std::string>") == 0) {
+        std::stringstream ss;
+        ss << *reinterpret_cast<std::vector<std::string>*>(storage);
+        return ss.str();
+    }
+    return strings::Substitute("unsupported config type: $0", type);
+}
+
+std::vector<ConfigInfo> list_configs() {
+    std::vector<ConfigInfo> infos;
+    for (const auto& [name, field] : *Register::_s_field_map) {
+        auto& info = infos.emplace_back();
+        info.name = field.name;
+        info.value = field.value();
+        info.type = field.type;
+        info.defval = field.defval;
+        info.valmutable = field.valmutable;
+    }
+    return infos;
+}
+
+} // namespace starrocks::config

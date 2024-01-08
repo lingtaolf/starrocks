@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/test/runtime/large_int_value_test.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -30,16 +26,17 @@
 
 #include "common/configbase.h"
 #include "common/logging.h"
+#include "types/constexpr.h"
 
 namespace starrocks {
 
 class LargeIntValueTest : public testing::Test {
 public:
-    LargeIntValueTest() {}
+    LargeIntValueTest() = default;
 
 protected:
-    virtual void SetUp() {}
-    virtual void TearDown() {}
+    void SetUp() override {}
+    void TearDown() override {}
 };
 
 TEST_F(LargeIntValueTest, string_to_largeint) {

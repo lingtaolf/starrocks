@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/runtime/broker_mgr.cpp
 
@@ -29,13 +42,15 @@
 #include "runtime/client_cache.h"
 #include "runtime/exec_env.h"
 #include "service/backend_options.h"
+#include "util/misc.h"
 #include "util/starrocks_metrics.h"
-#include "util/thrift_util.h"
+#include "util/thread.h"
 
 namespace starrocks {
 
 BrokerMgr::BrokerMgr(ExecEnv* exec_env)
         : _exec_env(exec_env), _thread_stop(false), _ping_thread(&BrokerMgr::ping_worker, this) {
+    Thread::set_thread_name(_ping_thread, "broker_hrtbeat"); // broker heart beat
     REGISTER_GAUGE_STARROCKS_METRIC(broker_count, [this]() {
         std::lock_guard<std::mutex> l(_mutex);
         return _broker_set.size();
@@ -71,7 +86,7 @@ void BrokerMgr::ping(const TNetworkAddress& addr) {
         // 500ms is enough
         BrokerServiceConnection client(_exec_env->broker_client_cache(), addr, 500, &status);
         if (!status.ok()) {
-            LOG(WARNING) << "Create broker client failed. broker=" << addr << ", status=" << status.get_error_msg();
+            LOG(WARNING) << "Create broker client failed. broker=" << addr << ", status=" << status.message();
             return;
         }
 
@@ -80,7 +95,7 @@ void BrokerMgr::ping(const TNetworkAddress& addr) {
         } catch (apache::thrift::transport::TTransportException& e) {
             status = client.reopen();
             if (!status.ok()) {
-                LOG(WARNING) << "Create broker client failed. broker=" << addr << ", status=" << status.get_error_msg();
+                LOG(WARNING) << "Create broker client failed. broker=" << addr << ", status=" << status.message();
                 return;
             }
             client->ping(response, request);
@@ -102,7 +117,7 @@ void BrokerMgr::ping_worker() {
         for (auto& addr : addresses) {
             ping(addr);
         }
-        sleep(5);
+        nap_sleep(5, [this] { return _thread_stop; });
     }
 }
 

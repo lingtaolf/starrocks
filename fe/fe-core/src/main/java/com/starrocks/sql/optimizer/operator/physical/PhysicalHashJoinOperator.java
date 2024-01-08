@@ -1,51 +1,37 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package com.starrocks.sql.optimizer.operator.physical;
 
-import com.google.common.base.Objects;
 import com.starrocks.analysis.JoinOperator;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
-import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.OperatorVisitor;
-import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.Projection;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 
-import java.util.List;
+import java.util.Objects;
 
-public class PhysicalHashJoinOperator extends PhysicalOperator {
-    private final JoinOperator joinType;
-    private final ScalarOperator joinPredicate;
-    private String joinHint;
-    private final List<ColumnRefOperator> pruneOutputColumns;
-
-    public PhysicalHashJoinOperator(JoinOperator joinType, ScalarOperator joinPredicate,
-                                    List<ColumnRefOperator> pruneOutputColumns) {
-        super(OperatorType.PHYSICAL_HASH_JOIN);
-        this.joinType = joinType;
-        this.joinPredicate = joinPredicate;
-        this.pruneOutputColumns = pruneOutputColumns;
-    }
-
-    public JoinOperator getJoinType() {
-        return joinType;
-    }
-
-    public ScalarOperator getJoinPredicate() {
-        return joinPredicate;
-    }
-
-    public void setJoinHint(String joinHint) {
-        this.joinHint = joinHint;
-    }
-
-    public String getJoinHint() {
-        return joinHint;
-    }
-
-    public List<ColumnRefOperator> getPruneOutputColumns() {
-        return pruneOutputColumns;
+public class PhysicalHashJoinOperator extends PhysicalJoinOperator {
+    public PhysicalHashJoinOperator(JoinOperator joinType,
+                                    ScalarOperator onPredicate,
+                                    String joinHint,
+                                    long limit,
+                                    ScalarOperator predicate,
+                                    Projection projection) {
+        super(OperatorType.PHYSICAL_HASH_JOIN, joinType, onPredicate, joinHint, limit, predicate, projection);
     }
 
     @Override
@@ -58,20 +44,19 @@ public class PhysicalHashJoinOperator extends PhysicalOperator {
         return visitor.visitPhysicalHashJoin(optExpression, context);
     }
 
+    @Override
     public String toString() {
-        return "PhysicalHashJoin" + " {" +
-                "joinType='" + joinType.toString() + '\'' +
-                ", onConjuncts='" + joinPredicate + '\'' +
+        return "PhysicalHashJoinOperator{" +
+                "joinType=" + joinType +
+                ", joinPredicate=" + onPredicate +
+                ", limit=" + limit +
+                ", predicate=" + predicate +
                 '}';
     }
 
     @Override
-    public ColumnRefSet getUsedColumns() {
-        ColumnRefSet refs = super.getUsedColumns();
-        if (joinPredicate != null) {
-            refs.union(joinPredicate.getUsedColumns());
-        }
-        return refs;
+    public String getJoinAlgo() {
+        return "HASH";
     }
 
     @Override
@@ -79,16 +64,18 @@ public class PhysicalHashJoinOperator extends PhysicalOperator {
         if (this == o) {
             return true;
         }
-        if (o == null || getClass() != o.getClass()) {
+
+        if (!super.equals(o)) {
             return false;
         }
+
         PhysicalHashJoinOperator that = (PhysicalHashJoinOperator) o;
-        return joinType == that.joinType && Objects.equal(joinPredicate, that.joinPredicate) &&
-                Objects.equal(joinHint, that.joinHint) && Objects.equal(pruneOutputColumns, that.pruneOutputColumns);
+        return joinType == that.joinType && Objects.equals(onPredicate, that.onPredicate);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hashCode(joinType, joinPredicate, joinHint);
+        return Objects.hash(super.hashCode(), joinType, onPredicate);
     }
+
 }

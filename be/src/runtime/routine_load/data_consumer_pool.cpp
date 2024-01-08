@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/runtime/routine_load/data_consumer_pool.cpp
 
@@ -22,7 +35,10 @@
 #include "runtime/routine_load/data_consumer_pool.h"
 
 #include "common/config.h"
+#include "data_consumer.h"
 #include "runtime/routine_load/data_consumer_group.h"
+#include "util/misc.h"
+#include "util/thread.h"
 
 namespace starrocks {
 
@@ -35,7 +51,7 @@ Status DataConsumerPool::get_consumer(StreamLoadContext* ctx, std::shared_ptr<Da
     while (iter != std::end(_pool)) {
         if ((*iter)->match(ctx)) {
             VLOG(3) << "get an available data consumer from pool: " << (*iter)->id();
-            (*iter)->reset();
+            (void)(*iter)->reset();
             *ret = *iter;
             iter = _pool.erase(iter);
             return Status::OK();
@@ -49,6 +65,9 @@ Status DataConsumerPool::get_consumer(StreamLoadContext* ctx, std::shared_ptr<Da
     switch (ctx->load_src_type) {
     case TLoadSourceType::KAFKA:
         consumer = std::make_shared<KafkaDataConsumer>(ctx);
+        break;
+    case TLoadSourceType::PULSAR:
+        consumer = std::make_shared<PulsarDataConsumer>(ctx);
         break;
     default:
         std::stringstream ss;
@@ -65,29 +84,60 @@ Status DataConsumerPool::get_consumer(StreamLoadContext* ctx, std::shared_ptr<Da
 }
 
 Status DataConsumerPool::get_consumer_grp(StreamLoadContext* ctx, std::shared_ptr<DataConsumerGroup>* ret) {
-    if (ctx->load_src_type != TLoadSourceType::KAFKA) {
-        return Status::InternalError("PAUSE: Currently only support consumer group for Kafka data source");
-    }
-    DCHECK(ctx->kafka_info);
-
-    std::shared_ptr<KafkaDataConsumerGroup> grp = std::make_shared<KafkaDataConsumerGroup>();
-
-    // one data consumer group contains at least one data consumers.
-    int max_consumer_num = config::max_consumer_num_per_group;
-    size_t consumer_num = std::min((size_t)max_consumer_num, ctx->kafka_info->begin_offset.size());
-    for (int i = 0; i < consumer_num; ++i) {
-        std::shared_ptr<DataConsumer> consumer;
-        RETURN_IF_ERROR(get_consumer(ctx, &consumer));
-        grp->add_consumer(consumer);
+    if (ctx->load_src_type != TLoadSourceType::KAFKA && ctx->load_src_type != TLoadSourceType::PULSAR) {
+        return Status::InternalError("PAUSE: Currently only support consumer group for Kafka or Palsur data source");
     }
 
-    LOG(INFO) << "get consumer group " << grp->grp_id() << " with " << consumer_num << " consumers";
-    *ret = grp;
-    return Status::OK();
+    if (ctx->load_src_type == TLoadSourceType::KAFKA) {
+        DCHECK(ctx->kafka_info);
+
+        // one data consumer group contains at least one data consumers.
+        int max_consumer_num = config::max_consumer_num_per_group;
+        size_t consumer_num = std::min((size_t)max_consumer_num, ctx->kafka_info->begin_offset.size());
+
+        std::shared_ptr<KafkaDataConsumerGroup> grp = std::make_shared<KafkaDataConsumerGroup>(consumer_num);
+
+        for (int i = 0; i < consumer_num; ++i) {
+            std::shared_ptr<DataConsumer> consumer;
+            RETURN_IF_ERROR(get_consumer(ctx, &consumer));
+            grp->add_consumer(consumer);
+        }
+
+        LOG(INFO) << "get consumer group " << grp->grp_id() << " with " << consumer_num << " consumers";
+        *ret = grp;
+        return Status::OK();
+    } else {
+        DCHECK(ctx->pulsar_info);
+        DCHECK_GE(ctx->pulsar_info->partitions.size(), 1);
+
+        // Cumulative acknowledge is not supported for multiple topic subscribtion,
+        // so one consumer can only subscribe one topic/partition
+        int max_consumer_num = config::max_pulsar_consumer_num_per_group;
+        if (max_consumer_num < ctx->pulsar_info->partitions.size()) {
+            return Status::InternalError(
+                    "PAUSE: Partition num is more than max consumer num in one data consumer group on some BEs, please "
+                    "increase max_pulsar_consumer_num_per_group from BE side or just add more BEs");
+        }
+        size_t consumer_num = ctx->pulsar_info->partitions.size();
+
+        std::shared_ptr<PulsarDataConsumerGroup> grp = std::make_shared<PulsarDataConsumerGroup>(consumer_num);
+
+        for (int i = 0; i < consumer_num; ++i) {
+            std::shared_ptr<DataConsumer> consumer;
+            RETURN_IF_ERROR(get_consumer(ctx, &consumer));
+            grp->add_consumer(consumer);
+        }
+
+        LOG(INFO) << "get consumer group " << grp->grp_id() << " with " << consumer_num << " consumers";
+        *ret = grp;
+        return Status::OK();
+    }
 }
 
-void DataConsumerPool::return_consumer(std::shared_ptr<DataConsumer> consumer) {
+void DataConsumerPool::return_consumer(const std::shared_ptr<DataConsumer>& consumer) {
     std::unique_lock<std::mutex> l(_lock);
+
+    (void)consumer->reset();
 
     if (_pool.size() == _max_pool_size) {
         VLOG(3) << "data consumer pool is full: " << _pool.size() << "-" << _max_pool_size
@@ -95,32 +145,42 @@ void DataConsumerPool::return_consumer(std::shared_ptr<DataConsumer> consumer) {
         return;
     }
 
-    consumer->reset();
     _pool.push_back(consumer);
     VLOG(3) << "return the data consumer: " << consumer->id() << ", current pool size: " << _pool.size();
-    return;
 }
 
 void DataConsumerPool::return_consumers(DataConsumerGroup* grp) {
-    for (std::shared_ptr<DataConsumer> consumer : grp->consumers()) {
+    for (const std::shared_ptr<DataConsumer>& consumer : grp->consumers()) {
         return_consumer(consumer);
     }
 }
 
-Status DataConsumerPool::start_bg_worker() {
-    _clean_idle_consumer_thread = std::thread([this] {
+void DataConsumerPool::stop() {
+    std::unique_lock<std::mutex> l(_lock);
+    *_is_closed = true;
+
+    if (_clean_idle_consumer_thread.joinable()) {
+        _clean_idle_consumer_thread.join();
+    }
+}
+
+void DataConsumerPool::start_bg_worker() {
+    std::shared_ptr<bool> is_closed = _is_closed;
+
+    _clean_idle_consumer_thread = std::thread([=] {
 #ifdef GOOGLE_PROFILER
         ProfilerRegisterThread();
 #endif
 
         uint32_t interval = 60;
         while (true) {
-            _clean_idle_consumer_bg();
-            sleep(interval);
+            if (*is_closed) {
+                return;
+            }
+            nap_sleep(interval, [&is_closed] { return *is_closed; });
         }
     });
-    _clean_idle_consumer_thread.detach();
-    return Status::OK();
+    Thread::set_thread_name(_clean_idle_consumer_thread, "clean_idle_cm");
 }
 
 void DataConsumerPool::_clean_idle_consumer_bg() {
@@ -128,6 +188,10 @@ void DataConsumerPool::_clean_idle_consumer_bg() {
 
     std::unique_lock<std::mutex> l(_lock);
     time_t now = time(nullptr);
+
+    if (*_is_closed) {
+        return;
+    }
 
     auto iter = std::begin(_pool);
     while (iter != std::end(_pool)) {

@@ -1,97 +1,129 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/olap/memtable.h
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-#ifndef STARROCKS_BE_SRC_OLAP_MEMTABLE_H
-#define STARROCKS_BE_SRC_OLAP_MEMTABLE_H
+#pragma once
 
 #include <ostream>
 
-#include "common/object_pool.h"
-#include "runtime/mem_tracker.h"
+#include "column/chunk.h"
+#include "exec/sorting/sort_permute.h"
+#include "gen_cpp/data.pb.h"
+#include "gen_cpp/olap_file.pb.h"
+#include "storage/chunk_aggregator.h"
 #include "storage/olap_define.h"
-#include "storage/skiplist.h"
 
 namespace starrocks {
 
-class ContiguousRow;
-class RowsetWriter;
-class Schema;
 class SlotDescriptor;
 class TabletSchema;
-class Tuple;
-class TupleDescriptor;
+
+class MemTableSink;
 
 class MemTable {
 public:
-    MemTable(int64_t tablet_id, Schema* schema, const TabletSchema* tablet_schema,
-             const std::vector<SlotDescriptor*>* slot_descs, TupleDescriptor* tuple_desc, KeysType keys_type,
-             RowsetWriter* rowset_writer, MemTracker* mem_tracker);
+    MemTable(int64_t tablet_id, const Schema* schema, const std::vector<SlotDescriptor*>* slot_descs,
+             MemTableSink* sink, MemTracker* mem_tracker);
+
+    MemTable(int64_t tablet_id, const Schema* schema, MemTableSink* sink, int64_t max_buffer_size,
+             MemTracker* mem_tracker);
+
+    MemTable(int64_t tablet_id, const Schema* schema, const std::vector<SlotDescriptor*>* slot_descs,
+             MemTableSink* sink, std::string merge_condition, MemTracker* mem_tracker);
+
     ~MemTable();
 
     int64_t tablet_id() const { return _tablet_id; }
-    size_t memory_usage() const { return _mem_tracker->consumption(); }
-    void insert(const Tuple* tuple);
-    OLAPStatus flush();
+
+    // the total memory used (contain tmp chunk and aggregator chunk)
+    size_t memory_usage() const;
+    MemTracker* mem_tracker() { return _mem_tracker; }
+
+    // buffer memory usage for write segment
+    size_t write_buffer_size() const;
+    size_t write_buffer_rows() const;
+
+    // return true suggests caller should flush this memory table
+    StatusOr<bool> insert(const Chunk& chunk, const uint32_t* indexes, uint32_t from, uint32_t size);
+
+    Status flush(SegmentPB* seg_info = nullptr);
+
+    Status finalize();
+
+    bool is_full() const;
+
+    void set_write_buffer_row(size_t max_buffer_row) { _max_buffer_row = max_buffer_row; }
+
+    static Schema convert_schema(const TabletSchemaCSPtr& tablet_schema,
+                                 const std::vector<SlotDescriptor*>* slot_descs);
+
+    ChunkPtr get_result_chunk() { return _result_chunk; }
+
+    bool check_supported_column_partial_update(const Chunk& chunk);
 
 private:
-    class RowCursorComparator {
-    public:
-        RowCursorComparator(const Schema* schema);
-        int operator()(const char* left, const char* right) const;
+    Status _merge();
 
-    private:
-        const Schema* _schema;
-    };
-    typedef SkipList<char*, RowCursorComparator> Table;
-    typedef Table::key_type TableKey;
+    Status _sort(bool is_final, bool by_sort_key = false);
+    Status _sort_column_inc(bool by_sort_key = false);
+    void _append_to_sorted_chunk(Chunk* src, Chunk* dest, bool is_final);
 
-    void _tuple_to_row(const Tuple* tuple, ContiguousRow* row, MemPool* mem_pool);
-    void _aggregate_two_row(const ContiguousRow& new_row, TableKey row_in_skiplist);
+    void _init_aggregator_if_needed();
+    void _aggregate(bool is_final);
+
+    Status _split_upserts_deletes(ChunkPtr& src, ChunkPtr* upserts, std::unique_ptr<Column>* deletes);
+
+    ChunkPtr _chunk;
+    ChunkPtr _result_chunk;
+
+    // for sort by columns
+    SmallPermutation _permutations;
+    std::vector<uint32_t> _selective_values;
 
     int64_t _tablet_id;
-    Schema* _schema;
-    const TabletSchema* _tablet_schema;
-    TupleDescriptor* _tuple_desc;
+
+    const Schema* _vectorized_schema;
     // the slot in _slot_descs are in order of tablet's schema
     const std::vector<SlotDescriptor*>* _slot_descs;
     KeysType _keys_type;
 
-    RowCursorComparator _row_comparator;
-    std::unique_ptr<MemTracker> _mem_tracker;
-    // This is a buffer, to hold the memory referenced by the rows that have not
-    // been inserted into the SkipList
-    std::unique_ptr<MemPool> _buffer_mem_pool;
-    // Only the rows will be inserted into SkipList can allocate memory from _table_mem_pool.
-    // In this way, we can make MemTable::memory_usage() to be more accurate, and eventually
-    // reduce the number of segment files that are generated by current load
-    std::unique_ptr<MemPool> _table_mem_pool;
-    ObjectPool _agg_object_pool;
+    MemTableSink* _sink;
 
-    size_t _schema_size;
-    Table* _skip_list;
-    Table::Hint _hint;
+    // aggregate
+    std::unique_ptr<ChunkAggregator> _aggregator;
 
-    RowsetWriter* _rowset_writer;
+    uint64_t _merge_count = 0;
 
-}; // class MemTable
+    bool _has_op_slot = false;
+    std::unique_ptr<Column> _deletes;
+
+    std::string _merge_condition;
+
+    int64_t _max_buffer_size = config::write_buffer_size;
+    // initial value is max size
+    size_t _max_buffer_row = std::numeric_limits<size_t>::max();
+    size_t _total_rows = 0;
+    size_t _merged_rows = 0;
+
+    // memory statistic
+    MemTracker* _mem_tracker = nullptr;
+    // memory usage and bytes usage calculation cost of object column is high,
+    // so cache calculated memory usage and bytes usage to avoid repeated calculation.
+    size_t _chunk_memory_usage = 0;
+    size_t _chunk_bytes_usage = 0;
+    size_t _aggregator_memory_usage = 0;
+    size_t _aggregator_bytes_usage = 0;
+};
 
 inline std::ostream& operator<<(std::ostream& os, const MemTable& table) {
     os << "MemTable(addr=" << &table << ", tablet=" << table.tablet_id() << ", mem=" << table.memory_usage();
@@ -99,5 +131,3 @@ inline std::ostream& operator<<(std::ostream& os, const MemTable& table) {
 }
 
 } // namespace starrocks
-
-#endif // STARROCKS_BE_SRC_OLAP_MEMTABLE_H

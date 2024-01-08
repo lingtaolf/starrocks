@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/util/PlatformName.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -23,15 +19,15 @@ package com.starrocks.common.util;
 
 public class PlatformName {
 
-    private static final String platformName = System.getProperty("os.name") + "-" +
+    private static final String PLATFORM_NAME = System.getProperty("os.name") + "-" +
             System.getProperty("os.arch") + "-" +
             System.getProperty("sun.arch.data.model");
 
     public static String getPlatformName() {
-        return platformName;
+        return PLATFORM_NAME;
     }
 
     public static void main(String[] args) {
-        System.out.println(platformName);
+        System.out.println(PLATFORM_NAME);
     }
 }

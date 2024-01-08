@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/load/loadv2/BrokerLoadPendingTask.java
 
@@ -27,6 +40,7 @@ import com.starrocks.common.UserException;
 import com.starrocks.common.util.BrokerUtil;
 import com.starrocks.common.util.LogBuilder;
 import com.starrocks.common.util.LogKey;
+import com.starrocks.fs.HdfsUtil;
 import com.starrocks.load.BrokerFileGroup;
 import com.starrocks.load.BrokerFileGroupAggInfo.FileGroupAggKey;
 import com.starrocks.load.FailMsg;
@@ -47,7 +61,7 @@ public class BrokerLoadPendingTask extends LoadTask {
     public BrokerLoadPendingTask(BrokerLoadJob loadTaskCallback,
                                  Map<FileGroupAggKey, List<BrokerFileGroup>> aggKeyToBrokerFileGroups,
                                  BrokerDesc brokerDesc) {
-        super(loadTaskCallback, TaskType.PENDING);
+        super(loadTaskCallback, TaskType.PENDING, 0);
         this.retryTime = 3;
         this.attachment = new BrokerPendingTaskAttachment(signature);
         this.aggKeyToBrokerFileGroups = aggKeyToBrokerFileGroups;
@@ -77,7 +91,11 @@ public class BrokerLoadPendingTask extends LoadTask {
                 long groupFileSize = 0;
                 List<TBrokerFileStatus> fileStatuses = Lists.newArrayList();
                 for (String path : fileGroup.getFilePaths()) {
-                    BrokerUtil.parseFile(path, brokerDesc, fileStatuses);
+                    if (brokerDesc.hasBroker()) {
+                        BrokerUtil.parseFile(path, brokerDesc, fileStatuses);
+                    } else {
+                        HdfsUtil.parseFile(path, brokerDesc, fileStatuses);
+                    }
                 }
                 fileStatusList.add(fileStatuses);
                 for (TBrokerFileStatus fstatus : fileStatuses) {

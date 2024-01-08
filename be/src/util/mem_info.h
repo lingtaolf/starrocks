@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/mem_info.h
 
@@ -19,8 +32,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_COMMON_UTIL_MEM_INFO_H
-#define STARROCKS_BE_SRC_COMMON_UTIL_MEM_INFO_H
+#pragma once
 
 #include <boost/cstdint.hpp>
 #include <string>
@@ -46,9 +58,10 @@ public:
     static std::string debug_string();
 
 private:
+    static void set_memlimit_if_container();
+
     static bool _s_initialized;
     static int64_t _s_physical_mem;
 };
 
 } // namespace starrocks
-#endif

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/system/FrontendHbResponse.java
 
@@ -21,8 +34,10 @@
 
 package com.starrocks.system;
 
+import com.google.gson.annotations.SerializedName;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
+import com.starrocks.common.util.TimeUtils;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -34,16 +49,25 @@ import java.io.IOException;
  */
 public class FrontendHbResponse extends HeartbeatResponse implements Writable {
 
+    @SerializedName(value = "name")
     private String name;
+    @SerializedName(value = "queryPort")
     private int queryPort;
+    @SerializedName(value = "rpcPort")
     private int rpcPort;
+    @SerializedName(value = "replayedJournalId")
     private long replayedJournalId;
+    @SerializedName(value = "feStartTime")
+    private long feStartTime;
+    @SerializedName(value = "feVersion")
+    private String feVersion;
 
     public FrontendHbResponse() {
         super(HeartbeatResponse.Type.FRONTEND);
     }
 
-    public FrontendHbResponse(String name, int queryPort, int rpcPort, long replayedJournalId, long hbTime) {
+    public FrontendHbResponse(String name, int queryPort, int rpcPort,
+                              long replayedJournalId, long hbTime, long feStartTime, String feVersion) {
         super(HeartbeatResponse.Type.FRONTEND);
         this.status = HbStatus.OK;
         this.name = name;
@@ -51,6 +75,8 @@ public class FrontendHbResponse extends HeartbeatResponse implements Writable {
         this.rpcPort = rpcPort;
         this.replayedJournalId = replayedJournalId;
         this.hbTime = hbTime;
+        this.feStartTime = feStartTime;
+        this.feVersion = feVersion;
     }
 
     public FrontendHbResponse(String name, String errMsg) {
@@ -74,6 +100,14 @@ public class FrontendHbResponse extends HeartbeatResponse implements Writable {
 
     public long getReplayedJournalId() {
         return replayedJournalId;
+    }
+
+    public long getFeStartTime() {
+        return feStartTime;
+    }
+
+    public String getFeVersion() {
+        return feVersion;
     }
 
     public static FrontendHbResponse read(DataInput in) throws IOException {
@@ -108,6 +142,8 @@ public class FrontendHbResponse extends HeartbeatResponse implements Writable {
         sb.append(", queryPort: ").append(queryPort);
         sb.append(", rpcPort: ").append(rpcPort);
         sb.append(", replayedJournalId: ").append(replayedJournalId);
+        sb.append(", feStartTime: ").append(TimeUtils.longToTimeString(feStartTime));
+        sb.append(", feVersion: ").append(feVersion);
         return sb.toString();
     }
 

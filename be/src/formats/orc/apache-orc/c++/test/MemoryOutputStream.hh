@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/test/MemoryOutputStream.hh
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -20,8 +16,7 @@
  * limitations under the License.
  */
 
-#ifndef ORC_MEMORYOUTPUTSTREAM_HH
-#define ORC_MEMORYOUTPUTSTREAM_HH
+#pragma once
 
 #include <iostream>
 
@@ -59,5 +54,3 @@ private:
     uint64_t length, naturalWriteSize;
 };
 } // namespace orc
-
-#endif

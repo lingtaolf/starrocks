@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/network_util.h
 
@@ -19,8 +32,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_COMMON_UTIL_NETWORK_UTIL_H
-#define STARROCKS_BE_SRC_COMMON_UTIL_NETWORK_UTIL_H
+#pragma once
 
 #include <vector>
 
@@ -46,6 +58,10 @@ private:
 // is returned, addresses may still be of zero length.
 Status hostname_to_ip_addrs(const std::string& name, std::vector<std::string>* addresses);
 
+bool is_valid_ip(const std::string& ip);
+
+std::string hostname_to_ip(const std::string& host);
+
 // Finds the first non-localhost IP address in the given list. Returns
 // true if such an address was found, false otherwise.
 bool find_first_non_localhost(const std::vector<std::string>& addresses, std::string* addr);
@@ -62,5 +78,3 @@ TNetworkAddress make_network_address(const std::string& hostname, int port);
 Status get_inet_interfaces(std::vector<std::string>* interfaces, bool include_ipv6 = false);
 
 } // namespace starrocks
-
-#endif

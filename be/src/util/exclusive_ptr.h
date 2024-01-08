@@ -1,4 +1,16 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #pragma once
 #include <memory>
@@ -21,11 +33,11 @@ class exclusive_ptr {
     using pointer_type = std::unique_ptr<type>;
 
 public:
-    constexpr exclusive_ptr() {}
-    constexpr exclusive_ptr(nullptr_t) {}
+    constexpr exclusive_ptr() = default;
+    constexpr exclusive_ptr(std::nullptr_t) {}
     explicit exclusive_ptr(pointer_type&& v) : _value(v.release()) {}
     exclusive_ptr(const exclusive_ptr& other) : _value(other.release()) {}
-    exclusive_ptr(exclusive_ptr&& other) : _value(other.release()) {}
+    exclusive_ptr(exclusive_ptr&& other) noexcept : _value(other.release()) {}
 
     template <typename U>
     exclusive_ptr(exclusive_ptr<U>&& other) : _value(other.release()) {}
@@ -37,7 +49,7 @@ public:
         this->reset(other.release());
         return *this;
     }
-    exclusive_ptr& operator=(exclusive_ptr&& other) {
+    exclusive_ptr& operator=(exclusive_ptr&& other) noexcept {
         this->reset(other.release());
         return *this;
     }
@@ -53,7 +65,7 @@ public:
         return *this;
     }
 
-    exclusive_ptr& operator=(nullptr_t) {
+    exclusive_ptr& operator=(std::nullptr_t) {
         this->_value = nullptr;
         return *this;
     }

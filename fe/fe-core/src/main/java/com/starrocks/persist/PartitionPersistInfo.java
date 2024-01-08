@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/persist/PartitionPersistInfo.java
 
@@ -22,11 +35,9 @@
 package com.starrocks.persist;
 
 import com.google.common.collect.Range;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.DataProperty;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.PartitionKey;
-import com.starrocks.common.FeMetaVersion;
 import com.starrocks.common.io.Writable;
 import com.starrocks.common.util.RangeUtils;
 
@@ -121,27 +132,8 @@ public class PartitionPersistInfo implements Writable {
         range = RangeUtils.readRange(in);
         dataProperty = DataProperty.read(in);
         replicationNum = in.readShort();
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_72) {
-            isInMemory = in.readBoolean();
-        }
-
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_74) {
-            isTempPartition = in.readBoolean();
-        }
+        isInMemory = in.readBoolean();
+        isTempPartition = in.readBoolean();
     }
 
-    public boolean equals(Object obj) {
-        if (this == obj) {
-            return true;
-        }
-        if (!(obj instanceof PartitionPersistInfo)) {
-            return false;
-        }
-
-        PartitionPersistInfo info = (PartitionPersistInfo) obj;
-
-        return dbId.equals(info.dbId)
-                && tableId.equals(info.tableId)
-                && partition.equals(info.partition);
-    }
 }

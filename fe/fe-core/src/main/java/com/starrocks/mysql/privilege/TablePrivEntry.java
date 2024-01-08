@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/mysql/privilege/TablePrivEntry.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,17 +17,20 @@
 
 package com.starrocks.mysql.privilege;
 
+import com.starrocks.analysis.TablePattern;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.CaseSensibility;
 import com.starrocks.common.PatternMatcher;
 import com.starrocks.common.io.Text;
+import com.starrocks.sql.analyzer.AstToStringBuilder;
+import com.starrocks.sql.ast.GrantPrivilegeStmt;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 
 public class TablePrivEntry extends DbPrivEntry {
-    private static final String ANY_TBL = "*";
+    public static final String ANY_TBL = "*";
 
     private PatternMatcher tblPattern;
     private String origTbl;
@@ -40,12 +39,17 @@ public class TablePrivEntry extends DbPrivEntry {
     protected TablePrivEntry() {
     }
 
-    private TablePrivEntry(PatternMatcher hostPattern, String origHost, PatternMatcher dbPattern, String origDb,
-                           PatternMatcher userPattern, String user, PatternMatcher tblPattern, String origTbl,
-                           boolean isDomain, PrivBitSet privSet) {
-        super(hostPattern, origHost, dbPattern, origDb, userPattern, user, isDomain, privSet);
-        this.tblPattern = tblPattern;
+    private TablePrivEntry(String origHost, String user, boolean isDomain, PrivBitSet privSet, String db, String origTbl) {
+        super(origHost, user, isDomain, privSet, db);
         this.origTbl = origTbl;
+    }
+
+    @Override
+    protected void analyse() throws AnalysisException {
+        super.analyse();
+
+        tblPattern = PatternMatcher.createMysqlPattern(origTbl.equals(ANY_TBL) ? "%" : origTbl,
+                CaseSensibility.TABLE.getCaseSensibility());
         if (origTbl.equals(ANY_TBL)) {
             isAnyTbl = true;
         }
@@ -53,20 +57,10 @@ public class TablePrivEntry extends DbPrivEntry {
 
     public static TablePrivEntry create(String host, String db, String user, String tbl, boolean isDomain,
                                         PrivBitSet privs) throws AnalysisException {
-        PatternMatcher hostPattern = PatternMatcher.createMysqlPattern(host, CaseSensibility.HOST.getCaseSensibility());
-        PatternMatcher dbPattern = PatternMatcher.createMysqlPattern(db.equals(ANY_DB) ? "%" : db,
-                CaseSensibility.DATABASE.getCaseSensibility());
-        PatternMatcher userPattern = PatternMatcher.createMysqlPattern(user, CaseSensibility.USER.getCaseSensibility());
 
-        PatternMatcher tblPattern = PatternMatcher.createMysqlPattern(tbl.equals(ANY_TBL) ? "%" : tbl,
-                CaseSensibility.TABLE.getCaseSensibility());
-
-        if (privs.containsNodePriv() || privs.containsResourcePriv()) {
-            throw new AnalysisException("Table privilege can not contains global or resource privileges: " + privs);
-        }
-
-        return new TablePrivEntry(hostPattern, host, dbPattern, db, userPattern, user, tblPattern, tbl, isDomain,
-                privs);
+        TablePrivEntry tablePrivEntry = new TablePrivEntry(host, user, isDomain, privs, db, tbl);
+        tablePrivEntry.analyse();
+        return tablePrivEntry;
     }
 
     public PatternMatcher getTblPattern() {
@@ -88,22 +82,22 @@ public class TablePrivEntry extends DbPrivEntry {
         }
 
         TablePrivEntry otherEntry = (TablePrivEntry) other;
-        int res = origHost.compareTo(otherEntry.origHost);
+        int res = otherEntry.origHost.compareTo(origHost);
         if (res != 0) {
-            return -res;
+            return res;
         }
 
-        res = origDb.compareTo(otherEntry.origDb);
+        res = otherEntry.origDb.compareTo(origDb);
         if (res != 0) {
-            return -res;
+            return res;
         }
 
-        res = origUser.compareTo(otherEntry.origUser);
+        res = otherEntry.realOrigUser.compareTo(realOrigUser);
         if (res != 0) {
-            return -res;
+            return res;
         }
 
-        return -origTbl.compareTo(otherEntry.origTbl);
+        return otherEntry.origTbl.compareTo(origTbl);
     }
 
     @Override
@@ -113,7 +107,7 @@ public class TablePrivEntry extends DbPrivEntry {
         }
 
         TablePrivEntry otherEntry = (TablePrivEntry) other;
-        if (origHost.equals(otherEntry.origHost) && origUser.equals(otherEntry.origUser)
+        if (origHost.equals(otherEntry.origHost) && realOrigUser.equals(otherEntry.realOrigUser)
                 && origDb.equals(otherEntry.origDb) && origTbl.equals(otherEntry.origTbl)
                 && isDomain == otherEntry.isDomain) {
             return true;
@@ -125,7 +119,7 @@ public class TablePrivEntry extends DbPrivEntry {
     public String toString() {
         StringBuilder sb = new StringBuilder();
         sb.append("db priv. host: ").append(origHost).append(", db: ").append(origDb);
-        sb.append(", user: ").append(origUser).append(", tbl: ").append(origTbl);
+        sb.append(", user: ").append(realOrigUser).append(", tbl: ").append(origTbl);
         sb.append(", priv: ").append(privSet).append(", set by resolver: ").append(isSetByDomainResolver);
         return sb.toString();
     }
@@ -146,14 +140,14 @@ public class TablePrivEntry extends DbPrivEntry {
 
     public void readFields(DataInput in) throws IOException {
         super.readFields(in);
-
         origTbl = Text.readString(in);
-        try {
-            tblPattern = PatternMatcher.createMysqlPattern(origTbl, CaseSensibility.TABLE.getCaseSensibility());
-        } catch (AnalysisException e) {
-            throw new IOException(e);
-        }
-        isAnyTbl = origTbl.equals(ANY_TBL);
+    }
+
+    @Override
+    public String toGrantSQL() {
+        GrantPrivilegeStmt stmt = new GrantPrivilegeStmt(null, "TABLE", getUserIdent(), false);
+        stmt.setAnalysedTable(privSet, new TablePattern(origDb, origTbl));
+        return AstToStringBuilder.toString(stmt);
     }
 
 }

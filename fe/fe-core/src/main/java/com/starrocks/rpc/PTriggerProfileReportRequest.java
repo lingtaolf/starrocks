@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/rpc/PTriggerProfileReportRequest.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -24,7 +20,6 @@ package com.starrocks.rpc;
 import com.baidu.bjf.remoting.protobuf.FieldType;
 import com.baidu.bjf.remoting.protobuf.annotation.Protobuf;
 import com.baidu.bjf.remoting.protobuf.annotation.ProtobufClass;
-import com.google.common.collect.Lists;
 import com.starrocks.proto.PUniqueId;
 
 import java.util.List;
@@ -35,11 +30,14 @@ public class PTriggerProfileReportRequest extends AttachmentRequest {
     @Protobuf(fieldType = FieldType.OBJECT, order = 1, required = false)
     List<PUniqueId> instanceIds;
 
+    @Protobuf(order = 2, required = false)
+    PUniqueId queryId;
+
     public PTriggerProfileReportRequest() {
     }
 
-    public PTriggerProfileReportRequest(List<PUniqueId> instanceIds) {
-        this.instanceIds = Lists.newArrayList();
-        this.instanceIds.addAll(instanceIds);
+    public PTriggerProfileReportRequest(List<PUniqueId> instanceIds, PUniqueId queryId) {
+        this.instanceIds = instanceIds;
+        this.queryId = queryId;
     }
 }

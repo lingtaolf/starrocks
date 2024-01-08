@@ -1,40 +1,4 @@
 [sql]
-select @@enable_cbo;
-[result]
-VALUES (true)
-[end]
-
-[sql]
-select database();
-[result]
-VALUES (DATABASE(test, 0))
-[end]
-
-[sql]
-select SCHEMA();
-[result]
-VALUES (SCHEMA(test, 0))
-[end]
-
-[sql]
-select user();
-[result]
-VALUES (USER('root'@%, 0))
-[end]
-
-[sql]
-select current_user();
-[result]
-VALUES (CURRENT_USER('root'@'%', 0))
-[end]
-
-[sql]
-select connection_id();
-[result]
-VALUES (CONNECTION_ID(0))
-[end]
-
-[sql]
 select * from (values (1,2,3), (4,5,6)) v;
 [result]
 VALUES (1,2,3),(4,5,6)
@@ -57,18 +21,13 @@ PARTITION: UNPARTITIONED
 
 RESULT SINK
 
-1:Project
-|  <slot 4> : 1
-|  use vectorized: true
-|
 0:EMPTYSET
-use vectorized: true
 [end]
 
 [sql]
 select * from t0 where v1 in (1.1, 2, null)
 [result]
-SCAN (columns[1: v1, 2: v2, 3: v3] predicate[cast(1: v1 as decimal(20, 1)) IN (1.1, 2, null)])
+SCAN (columns[1: v1, 2: v2, 3: v3] predicate[cast(1: v1 as decimal128(20, 1)) IN (1.1, 2.0, null)])
 [end]
 
 [sql]
@@ -89,7 +48,6 @@ PARTITION: UNPARTITIONED
 RESULT SINK
 
 2:EXCHANGE
-use vectorized: true
 
 PLAN FRAGMENT 1
 OUTPUT EXPRS:
@@ -101,7 +59,6 @@ UNPARTITIONED
 
 1:Project
 |  <slot 4> : 510835.0
-|  use vectorized: true
 |
 0:OlapScanNode
 TABLE: t0
@@ -111,9 +68,7 @@ rollup: t0
 tabletRatio=3/3
 tabletList=10006,10008,10010
 cardinality=1
-avgRowSize=1.0
-numNodes=0
-use vectorized: true
+avgRowSize=9.0
 [end]
 
 [sql]
@@ -131,7 +86,7 @@ SCAN (columns[1: v1] predicate[null])
 [sql]
 select v1 from t0 where (null * null) is null
 [result]
-SCAN (columns[1: v1] predicate[true])
+SCAN (columns[1: v1] predicate[null])
 [end]
 
 [sql]
@@ -146,7 +101,7 @@ select * from (values (1,2,3), (4,'a',6), (7,8,9)) v limit 2
 VALUES (1,2,3),(4,a,6),(7,8,9)
 [fragment]
 PLAN FRAGMENT 0
-OUTPUT EXPRS:1: expr | 2: expr | 3: expr
+OUTPUT EXPRS:1: column_0 | 2: column_1 | 3: column_2
 PARTITION: UNPARTITIONED
 
 RESULT SINK
@@ -157,7 +112,6 @@ constant exprs:
 4 | 'a' | 6
 7 | '8' | 9
 limit: 2
-use vectorized: true
 [end]
 
 [sql]
@@ -187,7 +141,7 @@ SCAN (columns[4: t1d, 9: id_date] predicate[9: id_date = 2020-01-01])
 [sql]
 select v1 from t0 where ((NULL) - (NULL)) <=> ((NULL) % (NULL))
 [result]
-SCAN (columns[1: v1] predicate[true])
+SCAN (columns[1: v1] predicate[null])
 [end]
 
 [sql]
@@ -205,10 +159,6 @@ VALUES
 [sql]
 select v1 from (select * from (select v1,sum(v2) from t0 group by v1  union all select null as v1,null ) t) temp where v1 = 1
 [result]
-UNION
-    AGGREGATE ([GLOBAL] aggregate [{}] group by [[1: v1]] having [null]
-        AGGREGATE ([LOCAL] aggregate [{}] group by [[1: v1]] having [null]
-            SCAN (columns[1: v1] predicate[1: v1 = 1])
-    PREDICATE 7: expr = 1
-        VALUES (null)
+AGGREGATE ([GLOBAL] aggregate [{}] group by [[1: v1]] having [null]
+    SCAN (columns[1: v1] predicate[1: v1 = 1])
 [end]

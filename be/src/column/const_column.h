@@ -1,11 +1,25 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #pragma once
 
 #include "column/column.h"
+#include "column/datum.h"
+#include "column/vectorized_fwd.h"
 #include "common/logging.h"
 
-namespace starrocks::vectorized {
+namespace starrocks {
 
 class ConstColumn final : public ColumnFactory<Column, ConstColumn> {
     friend class ColumnFactory<Column, ConstColumn>;
@@ -14,21 +28,17 @@ public:
     explicit ConstColumn(ColumnPtr data_column);
     ConstColumn(ColumnPtr data_column, size_t size);
 
-    // Copy constructor
     ConstColumn(const ConstColumn& rhs) : _data(rhs._data->clone_shared()), _size(rhs._size) {}
 
-    // Move constructor
     ConstColumn(ConstColumn&& rhs) noexcept : _data(std::move(rhs._data)), _size(rhs._size) {}
 
-    // Copy assignment
     ConstColumn& operator=(const ConstColumn& rhs) {
         ConstColumn tmp(rhs);
         this->swap_column(tmp);
         return *this;
     }
 
-    // Move assignment
-    ConstColumn& operator=(ConstColumn&& rhs) {
+    ConstColumn& operator=(ConstColumn&& rhs) noexcept {
         ConstColumn tmp(std::move(rhs));
         this->swap_column(tmp);
         return *this;
@@ -40,19 +50,22 @@ public:
 
     bool is_null(size_t index) const override { return _data->is_null(0); }
 
-    bool only_null() const override { return _data->is_nullable(); }
+    bool only_null() const override {
+        DCHECK(_data->is_nullable() ? _size == 0 || _data->is_null(0) : true);
+        return _data->is_nullable();
+    }
 
     bool has_null() const override { return _data->has_null(); }
 
     bool is_constant() const override { return true; }
-
-    bool low_cardinality() const override { return false; }
 
     const uint8_t* raw_data() const override { return _data->raw_data(); }
 
     uint8_t* mutable_raw_data() override { return reinterpret_cast<uint8_t*>(_data->mutable_raw_data()); }
 
     size_t size() const override { return _size; }
+
+    size_t capacity() const override { return UINT32_MAX; }
 
     size_t type_size() const override { return _data->type_size(); }
 
@@ -65,7 +78,12 @@ public:
 
     void reserve(size_t n) override {}
 
-    void resize(size_t n) override { _size = n; }
+    void resize(size_t n) override {
+        if (_size == 0) {
+            _data->resize(1);
+        }
+        _size = n;
+    }
 
     // This method resize the underlying data column,
     // Because when sometimes(agg functions), we want to handle const column as normal data column
@@ -90,20 +108,23 @@ public:
 
     void append_value_multiple_times(const Column& src, uint32_t index, uint32_t size) override;
 
+    ColumnPtr replicate(const std::vector<uint32_t>& offsets) override;
+
     bool append_nulls(size_t count) override {
+        DCHECK_GT(count, 0);
         if (_data->is_nullable()) {
             bool ok = true;
             if (_size == 0) {
                 ok = _data->append_nulls(1);
             }
-            _size += ok;
+            _size += count;
             return ok;
         } else {
             return false;
         }
     }
 
-    bool append_strings(const std::vector<Slice>& strs) override { return false; }
+    bool append_strings(const Buffer<Slice>& strs) override { return false; }
 
     size_t append_numbers(const void* buff, size_t length) override { return -1; }
 
@@ -113,9 +134,23 @@ public:
         }
     }
 
-    void append_default() override { _size++; }
+    void append_default() override {
+        if (_size == 0) {
+            _data->append_default(1);
+        }
+        _size++;
+    }
 
-    void append_default(size_t count) override { _size += count; }
+    void append_default(size_t count) override {
+        if (_size == 0) {
+            _data->append_default(1);
+        }
+        _size += count;
+    }
+
+    void fill_default(const Filter& filter) override;
+
+    void update_rows(const Column& src, const uint32_t* indexes) override;
 
     uint32_t serialize(size_t idx, uint8_t* pos) override { return _data->serialize(0, pos); }
 
@@ -137,14 +172,14 @@ public:
         return pos + _data->serialize_size(0);
     }
 
-    void deserialize_and_append_batch(std::vector<Slice>& srcs, size_t batch_size) override {
-        _size += batch_size;
+    void deserialize_and_append_batch(Buffer<Slice>& srcs, size_t chunk_size) override {
+        _size += chunk_size;
         if (_data->empty()) {
             _data->deserialize_and_append((uint8_t*)srcs[0].data);
         }
         uint32_t serialize_size = _data->serialize_size(0);
         // Note: we must update the pos
-        for (size_t i = 0; i < batch_size; i++) {
+        for (size_t i = 0; i < chunk_size; i++) {
             srcs[0].data = srcs[0].data + serialize_size;
         }
     }
@@ -153,21 +188,19 @@ public:
 
     uint32_t serialize_size(size_t idx) const override { return _data->serialize_size(0); }
 
-    size_t serialize_size() const override { return _data->serialize_size() + sizeof(size_t); }
-
-    uint8_t* serialize_column(uint8_t* dst) override;
-
-    const uint8_t* deserialize_column(const uint8_t* src) override;
-
     MutableColumnPtr clone_empty() const override { return create_mutable(_data->clone_empty(), 0); }
 
-    size_t filter_range(const Column::Filter& filter, size_t from, size_t to) override;
+    size_t filter_range(const Filter& filter, size_t from, size_t to) override;
 
     int compare_at(size_t left, size_t right, const Column& rhs, int nan_direction_hint) const override;
 
-    void fvn_hash(uint32_t* hash, uint16_t from, uint16_t to) const override;
+    int equals(size_t left, const Column& rhs, size_t right, bool safe_eq = true) const override;
 
-    void crc32_hash(uint32_t* hash, uint16_t from, uint16_t to) const override;
+    void fnv_hash(uint32_t* hash, uint32_t from, uint32_t to) const override;
+
+    void crc32_hash(uint32_t* hash, uint32_t from, uint32_t to) const override;
+
+    int64_t xor_checksum(uint32_t from, uint32_t to) const override;
 
     void put_mysql_row_buffer(MysqlRowBuffer* buf, size_t idx) const override { _data->put_mysql_row_buffer(buf, 0); }
 
@@ -181,15 +214,13 @@ public:
 
     size_t memory_usage() const override { return _data->memory_usage() + sizeof(size_t); }
 
-    size_t shrink_memory_usage() const override { return _data->shrink_memory_usage() + sizeof(size_t); }
-
     size_t container_memory_usage() const override { return _data->container_memory_usage(); }
 
-    size_t element_memory_usage() const override { return _data->element_memory_usage(); }
+    size_t reference_memory_usage() const override { return _data->reference_memory_usage(); }
 
-    size_t element_memory_usage(size_t from, size_t size) const override {
+    size_t reference_memory_usage(size_t from, size_t size) const override {
         // const column has only one element
-        return element_memory_usage();
+        return size == 0 ? 0 : reference_memory_usage();
     }
 
     void swap_column(Column& rhs) override {
@@ -205,7 +236,7 @@ public:
         _size = 0;
     }
 
-    std::string debug_item(uint32_t idx) const override {
+    std::string debug_item(size_t idx) const override {
         std::stringstream ss;
         ss << "CONST: " << _data->debug_item(0);
         return ss.str();
@@ -217,9 +248,28 @@ public:
         return ss.str();
     }
 
+    bool capacity_limit_reached(std::string* msg = nullptr) const override {
+        RETURN_IF_UNLIKELY(_data->capacity_limit_reached(msg), true);
+        if (_size > Column::MAX_CAPACITY_LIMIT) {
+            if (msg != nullptr) {
+                msg->append("Row count of const column reach limit: " + std::to_string(Column::MAX_CAPACITY_LIMIT));
+            }
+            return true;
+        }
+        return false;
+    }
+
+    void check_or_die() const override;
+
+    StatusOr<ColumnPtr> upgrade_if_overflow() override;
+
+    StatusOr<ColumnPtr> downgrade() override;
+
+    bool has_large_column() const override { return _data->has_large_column(); }
+
 private:
     ColumnPtr _data;
-    size_t _size;
+    uint64_t _size;
 };
 
-} // namespace starrocks::vectorized
+} // namespace starrocks

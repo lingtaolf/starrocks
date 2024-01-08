@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/parse_util.cpp
 
@@ -26,14 +39,14 @@
 
 namespace starrocks {
 
-int64_t ParseUtil::parse_mem_spec(const std::string& mem_spec_str, bool* is_percent) {
+int64_t ParseUtil::parse_mem_spec(const std::string& mem_spec_str, const int64_t memory_limit) {
+    bool is_percent = false;
     if (mem_spec_str.empty()) {
         return 0;
     }
 
     // Assume last character indicates unit or percent.
     int32_t number_str_len = mem_spec_str.size() - 1;
-    *is_percent = false;
     int64_t multiplier = -1;
 
     // Look for accepted suffix character.
@@ -62,7 +75,7 @@ int64_t ParseUtil::parse_mem_spec(const std::string& mem_spec_str, bool* is_perc
     case 'B':
         break;
     case '%':
-        *is_percent = true;
+        is_percent = true;
         break;
     default:
         // No unit was given. Default to bytes.
@@ -75,7 +88,7 @@ int64_t ParseUtil::parse_mem_spec(const std::string& mem_spec_str, bool* is_perc
 
     if (multiplier != -1) {
         // Parse float - MB or GB
-        double limit_val = StringParser::string_to_float<double>(mem_spec_str.data(), number_str_len, &result);
+        auto limit_val = StringParser::string_to_float<double>(mem_spec_str.data(), number_str_len, &result);
 
         if (result != StringParser::PARSE_SUCCESS) {
             return -1;
@@ -84,14 +97,14 @@ int64_t ParseUtil::parse_mem_spec(const std::string& mem_spec_str, bool* is_perc
         bytes = multiplier * limit_val;
     } else {
         // Parse int - bytes or percent
-        int64_t limit_val = StringParser::string_to_int<int64_t>(mem_spec_str.data(), number_str_len, &result);
+        auto limit_val = StringParser::string_to_int<int64_t>(mem_spec_str.data(), number_str_len, &result);
 
         if (result != StringParser::PARSE_SUCCESS) {
             return -1;
         }
 
-        if (*is_percent) {
-            bytes = (static_cast<double>(limit_val) / 100.0) * MemInfo::physical_mem();
+        if (is_percent) {
+            bytes = (static_cast<double>(limit_val) / 100.0) * memory_limit;
         } else {
             bytes = limit_val;
         }

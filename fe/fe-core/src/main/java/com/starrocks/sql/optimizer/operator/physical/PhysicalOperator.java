@@ -1,4 +1,17 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.sql.optimizer.operator.physical;
 
@@ -7,28 +20,11 @@ import com.starrocks.sql.optimizer.base.DistributionSpec;
 import com.starrocks.sql.optimizer.base.OrderSpec;
 import com.starrocks.sql.optimizer.operator.Operator;
 import com.starrocks.sql.optimizer.operator.OperatorType;
-import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+
+import java.util.Objects;
+import java.util.Set;
 
 public abstract class PhysicalOperator extends Operator {
-    protected long limit = -1;
-    protected ScalarOperator predicate;
-
-    public long getLimit() {
-        return limit;
-    }
-
-    public void setLimit(long limit) {
-        this.limit = limit;
-    }
-
-    public ScalarOperator getPredicate() {
-        return predicate;
-    }
-
-    public void setPredicate(ScalarOperator predicate) {
-        this.predicate = predicate;
-    }
-
     protected OrderSpec orderSpec;
     protected DistributionSpec distributionSpec;
 
@@ -77,7 +73,44 @@ public abstract class PhysicalOperator extends Operator {
         return result;
     }
 
-    public abstract boolean equals(Object o);
+    public boolean couldApplyStringDict(Set<Integer> childDictColumns) {
+        return false;
+    }
 
-    public abstract int hashCode();
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        if (!super.equals(o)) {
+            return false;
+        }
+        PhysicalOperator that = (PhysicalOperator) o;
+        return Objects.equals(orderSpec, that.orderSpec) &&
+                Objects.equals(distributionSpec, that.distributionSpec);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(super.hashCode(), orderSpec, distributionSpec);
+    }
+
+    public abstract static class Builder<O extends PhysicalOperator, B extends PhysicalOperator.Builder>
+            extends Operator.Builder<O, B> {
+        @Override
+        public B withOperator(O operator) {
+            super.withOperator(operator);
+            builder.distributionSpec = operator.distributionSpec;
+            builder.orderSpec = operator.orderSpec;
+            return (B) this;
+        }
+
+        public B setOrderSpec(OrderSpec orderSpec) {
+            builder.orderSpec = orderSpec;
+            return (B) this;
+        }
+    }
 }

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/journal/bdbje/Timestamp.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,6 +17,7 @@
 
 package com.starrocks.journal.bdbje;
 
+import com.google.gson.annotations.SerializedName;
 import com.starrocks.common.io.Writable;
 
 import java.io.DataInput;
@@ -29,6 +26,7 @@ import java.io.IOException;
 
 // Write this class to bdb periodically
 public class Timestamp implements Writable {
+    @SerializedName("ts")
     private long timestamp;
 
     public Timestamp() {

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/include/orc/Writer.hh
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -20,8 +16,7 @@
  * limitations under the License.
  */
 
-#ifndef ORC_WRITER_HH
-#define ORC_WRITER_HH
+#pragma once
 
 #include <memory>
 #include <set>
@@ -263,5 +258,3 @@ public:
     virtual void addUserMetadata(const std::string name, const std::string value) = 0;
 };
 } // namespace orc
-
-#endif

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/common/util/SmallFileMgrTest.java
 
@@ -21,29 +34,43 @@
 
 package com.starrocks.common.util;
 
-import com.starrocks.analysis.CreateFileStmt;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Database;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.common.util.SmallFileMgr.SmallFile;
 import com.starrocks.persist.EditLog;
+import com.starrocks.persist.metablock.SRMetaBlockReader;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.CreateFileStmt;
+import com.starrocks.utframe.UtFrameUtils;
 import mockit.Expectations;
 import mockit.Injectable;
 import mockit.Mocked;
+import org.junit.After;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Test;
 
 public class SmallFileMgrTest {
 
     @Mocked
-    Catalog catalog;
+    GlobalStateMgr globalStateMgr;
     @Mocked
     EditLog editLog;
     @Mocked
     Database db;
+
+    @Before
+    public void setUp() {
+        UtFrameUtils.setUpForPersistTest();
+    }
+
+    @After
+    public void teardown() {
+        UtFrameUtils.tearDownForPersisTest();
+    }
 
     @Ignore // Could not find a way to mock a private method
     @Test
@@ -53,7 +80,7 @@ public class SmallFileMgrTest {
                 db.getId();
                 minTimes = 0;
                 result = 1L;
-                catalog.getDb(anyString);
+                globalStateMgr.getDb(anyString);
                 minTimes = 0;
                 result = db;
                 stmt1.getDbName();
@@ -142,4 +169,20 @@ public class SmallFileMgrTest {
         Assert.assertEquals(10001L, gotFile.id);
     }
 
+    @Test
+    public void testSaveLoadJsonFormatImage() throws Exception {
+        SmallFileMgr smallFileMgr = new SmallFileMgr();
+        SmallFile smallFile = new SmallFile(1L, "c1", "f1", 2L, "xxx", 3, "xxx", true);
+        smallFileMgr.replayCreateFile(smallFile);
+
+        UtFrameUtils.PseudoImage image = new UtFrameUtils.PseudoImage();
+        smallFileMgr.saveSmallFilesV2(image.getDataOutputStream());
+
+        SmallFileMgr followerMgr = new SmallFileMgr();
+        SRMetaBlockReader reader = new SRMetaBlockReader(image.getDataInputStream());
+        followerMgr.loadSmallFilesV2(reader);
+        reader.close();
+
+        Assert.assertNotNull(followerMgr.getSmallFile(2L));
+    }
 }

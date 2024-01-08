@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/ColumnWriter.cc
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -39,7 +35,7 @@ public:
     StreamsFactoryImpl(const WriterOptions& writerOptions, OutputStream* outputStream)
             : options(writerOptions), outStream(outputStream) {}
 
-    virtual std::unique_ptr<BufferedOutputStream> createStream(proto::Stream_Kind kind) const override;
+    std::unique_ptr<BufferedOutputStream> createStream(proto::Stream_Kind kind) const override;
 
 private:
     const WriterOptions& options;
@@ -86,7 +82,8 @@ ColumnWriter::ColumnWriter(const Type& type, const StreamsFactory& factory, cons
           enableBloomFilter(false),
           memPool(*options.getMemoryPool()),
           indexStream(),
-          bloomFilterStream() {
+          bloomFilterStream(),
+          hasNullValue(false) {
     std::unique_ptr<BufferedOutputStream> presentStream = factory.createStream(proto::Stream_Kind_PRESENT);
     notNullEncoder = createBooleanRleEncoder(std::move(presentStream));
 
@@ -115,10 +112,22 @@ ColumnWriter::~ColumnWriter() {
 }
 
 void ColumnWriter::add(ColumnVectorBatch& batch, uint64_t offset, uint64_t numValues, const char* incomingMask) {
-    notNullEncoder->add(batch.notNull.data() + offset, numValues, incomingMask);
+    const char* notNull = batch.notNull.data() + offset;
+    notNullEncoder->add(notNull, numValues, incomingMask);
+    hasNullValue |= batch.hasNulls;
+    for (uint64_t i = 0; !hasNullValue && i < numValues; ++i) {
+        if (!notNull[i]) {
+            hasNullValue = true;
+        }
+    }
 }
 
 void ColumnWriter::flush(std::vector<proto::Stream>& streams) {
+    if (!hasNullValue) {
+        // supress the present stream
+        notNullEncoder->suppress();
+        return;
+    }
     proto::Stream stream;
     stream.set_kind(proto::Stream_Kind_PRESENT);
     stream.set_column(static_cast<uint32_t>(columnId));
@@ -173,6 +182,21 @@ void ColumnWriter::addBloomFilterEntry() {
 }
 
 void ColumnWriter::writeIndex(std::vector<proto::Stream>& streams) const {
+    if (!hasNullValue) {
+        // remove positions of present stream
+        int presentCount = indexStream->isCompressed() ? 4 : 3;
+        for (int i = 0; i != rowIndex->entry_size(); ++i) {
+            proto::RowIndexEntry* entry = rowIndex->mutable_entry(i);
+            std::vector<uint64_t> positions;
+            for (int j = presentCount; j < entry->positions_size(); ++j) {
+                positions.push_back(entry->positions(j));
+            }
+            entry->clear_positions();
+            for (unsigned long position : positions) {
+                entry->add_positions(position);
+            }
+        }
+    }
     // write row index to output stream
     rowIndex->SerializeToZeroCopyStream(indexStream.get());
 
@@ -224,29 +248,28 @@ class StructColumnWriter : public ColumnWriter {
 public:
     StructColumnWriter(const Type& type, const StreamsFactory& factory, const WriterOptions& options);
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 
-    virtual void flush(std::vector<proto::Stream>& streams) override;
+    void flush(std::vector<proto::Stream>& streams) override;
 
-    virtual uint64_t getEstimatedSize() const override;
-    virtual void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
+    uint64_t getEstimatedSize() const override;
+    void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
 
-    virtual void getStripeStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
+    void getStripeStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
 
-    virtual void getFileStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
+    void getFileStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
 
-    virtual void mergeStripeStatsIntoFileStats() override;
+    void mergeStripeStatsIntoFileStats() override;
 
-    virtual void mergeRowGroupStatsIntoStripeStats() override;
+    void mergeRowGroupStatsIntoStripeStats() override;
 
-    virtual void createRowIndexEntry() override;
+    void createRowIndexEntry() override;
 
-    virtual void writeIndex(std::vector<proto::Stream>& streams) const override;
+    void writeIndex(std::vector<proto::Stream>& streams) const override;
 
-    virtual void writeDictionary() override;
+    void writeDictionary() override;
 
-    virtual void reset() override;
+    void reset() override;
 
 private:
     std::vector<std::unique_ptr<ColumnWriter>> children;
@@ -266,7 +289,7 @@ StructColumnWriter::StructColumnWriter(const Type& type, const StreamsFactory& f
 
 void StructColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
                              const char* incomingMask) {
-    const StructVectorBatch* structBatch = dynamic_cast<const StructVectorBatch*>(&rowBatch);
+    const auto* structBatch = dynamic_cast<const StructVectorBatch*>(&rowBatch);
     if (structBatch == nullptr) {
         throw InvalidArgument("Failed to cast to StructVectorBatch");
     }
@@ -296,22 +319,22 @@ void StructColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint6
 
 void StructColumnWriter::flush(std::vector<proto::Stream>& streams) {
     ColumnWriter::flush(streams);
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->flush(streams);
+    for (auto& i : children) {
+        i->flush(streams);
     }
 }
 
 void StructColumnWriter::writeIndex(std::vector<proto::Stream>& streams) const {
     ColumnWriter::writeIndex(streams);
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->writeIndex(streams);
+    for (const auto& i : children) {
+        i->writeIndex(streams);
     }
 }
 
 uint64_t StructColumnWriter::getEstimatedSize() const {
     uint64_t size = ColumnWriter::getEstimatedSize();
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        size += children[i]->getEstimatedSize();
+    for (const auto& i : children) {
+        size += i->getEstimatedSize();
     }
     return size;
 }
@@ -321,62 +344,62 @@ void StructColumnWriter::getColumnEncoding(std::vector<proto::ColumnEncoding>& e
     encoding.set_kind(proto::ColumnEncoding_Kind_DIRECT);
     encoding.set_dictionarysize(0);
     encodings.push_back(encoding);
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->getColumnEncoding(encodings);
+    for (const auto& i : children) {
+        i->getColumnEncoding(encodings);
     }
 }
 
 void StructColumnWriter::getStripeStatistics(std::vector<proto::ColumnStatistics>& stats) const {
     ColumnWriter::getStripeStatistics(stats);
 
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->getStripeStatistics(stats);
+    for (const auto& i : children) {
+        i->getStripeStatistics(stats);
     }
 }
 
 void StructColumnWriter::mergeStripeStatsIntoFileStats() {
     ColumnWriter::mergeStripeStatsIntoFileStats();
 
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->mergeStripeStatsIntoFileStats();
+    for (auto& i : children) {
+        i->mergeStripeStatsIntoFileStats();
     }
 }
 
 void StructColumnWriter::getFileStatistics(std::vector<proto::ColumnStatistics>& stats) const {
     ColumnWriter::getFileStatistics(stats);
 
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->getFileStatistics(stats);
+    for (const auto& i : children) {
+        i->getFileStatistics(stats);
     }
 }
 
 void StructColumnWriter::mergeRowGroupStatsIntoStripeStats() {
     ColumnWriter::mergeRowGroupStatsIntoStripeStats();
 
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->mergeRowGroupStatsIntoStripeStats();
+    for (auto& i : children) {
+        i->mergeRowGroupStatsIntoStripeStats();
     }
 }
 
 void StructColumnWriter::createRowIndexEntry() {
     ColumnWriter::createRowIndexEntry();
 
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->createRowIndexEntry();
+    for (auto& i : children) {
+        i->createRowIndexEntry();
     }
 }
 
 void StructColumnWriter::reset() {
     ColumnWriter::reset();
 
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->reset();
+    for (auto& i : children) {
+        i->reset();
     }
 }
 
 void StructColumnWriter::writeDictionary() {
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->writeDictionary();
+    for (auto& i : children) {
+        i->writeDictionary();
     }
 }
 
@@ -384,16 +407,15 @@ class IntegerColumnWriter : public ColumnWriter {
 public:
     IntegerColumnWriter(const Type& type, const StreamsFactory& factory, const WriterOptions& options);
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 
-    virtual void flush(std::vector<proto::Stream>& streams) override;
+    void flush(std::vector<proto::Stream>& streams) override;
 
-    virtual uint64_t getEstimatedSize() const override;
+    uint64_t getEstimatedSize() const override;
 
-    virtual void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
+    void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
 
-    virtual void recordPosition() const override;
+    void recordPosition() const override;
 
 protected:
     std::unique_ptr<RleEncoder> rleEncoder;
@@ -414,11 +436,11 @@ IntegerColumnWriter::IntegerColumnWriter(const Type& type, const StreamsFactory&
 
 void IntegerColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
                               const char* incomingMask) {
-    const LongVectorBatch* longBatch = dynamic_cast<const LongVectorBatch*>(&rowBatch);
+    const auto* longBatch = dynamic_cast<const LongVectorBatch*>(&rowBatch);
     if (longBatch == nullptr) {
         throw InvalidArgument("Failed to cast to LongVectorBatch");
     }
-    IntegerColumnStatisticsImpl* intStats = dynamic_cast<IntegerColumnStatisticsImpl*>(colIndexStatistics.get());
+    auto* intStats = dynamic_cast<IntegerColumnStatisticsImpl*>(colIndexStatistics.get());
     if (intStats == nullptr) {
         throw InvalidArgument("Failed to cast to IntegerColumnStatisticsImpl");
     }
@@ -482,16 +504,15 @@ class ByteColumnWriter : public ColumnWriter {
 public:
     ByteColumnWriter(const Type& type, const StreamsFactory& factory, const WriterOptions& options);
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 
-    virtual void flush(std::vector<proto::Stream>& streams) override;
+    void flush(std::vector<proto::Stream>& streams) override;
 
-    virtual uint64_t getEstimatedSize() const override;
+    uint64_t getEstimatedSize() const override;
 
-    virtual void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
+    void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
 
-    virtual void recordPosition() const override;
+    void recordPosition() const override;
 
 private:
     std::unique_ptr<ByteRleEncoder> byteRleEncoder;
@@ -508,11 +529,11 @@ ByteColumnWriter::ByteColumnWriter(const Type& type, const StreamsFactory& facto
 }
 
 void ByteColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) {
-    LongVectorBatch* byteBatch = dynamic_cast<LongVectorBatch*>(&rowBatch);
+    auto* byteBatch = dynamic_cast<LongVectorBatch*>(&rowBatch);
     if (byteBatch == nullptr) {
         throw InvalidArgument("Failed to cast to LongVectorBatch");
     }
-    IntegerColumnStatisticsImpl* intStats = dynamic_cast<IntegerColumnStatisticsImpl*>(colIndexStatistics.get());
+    auto* intStats = dynamic_cast<IntegerColumnStatisticsImpl*>(colIndexStatistics.get());
     if (intStats == nullptr) {
         throw InvalidArgument("Failed to cast to IntegerColumnStatisticsImpl");
     }
@@ -579,16 +600,15 @@ class BooleanColumnWriter : public ColumnWriter {
 public:
     BooleanColumnWriter(const Type& type, const StreamsFactory& factory, const WriterOptions& options);
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 
-    virtual void flush(std::vector<proto::Stream>& streams) override;
+    void flush(std::vector<proto::Stream>& streams) override;
 
-    virtual uint64_t getEstimatedSize() const override;
+    uint64_t getEstimatedSize() const override;
 
-    virtual void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
+    void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
 
-    virtual void recordPosition() const override;
+    void recordPosition() const override;
 
 private:
     std::unique_ptr<ByteRleEncoder> rleEncoder;
@@ -606,11 +626,11 @@ BooleanColumnWriter::BooleanColumnWriter(const Type& type, const StreamsFactory&
 
 void BooleanColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
                               const char* incomingMask) {
-    LongVectorBatch* byteBatch = dynamic_cast<LongVectorBatch*>(&rowBatch);
+    auto* byteBatch = dynamic_cast<LongVectorBatch*>(&rowBatch);
     if (byteBatch == nullptr) {
         throw InvalidArgument("Failed to cast to LongVectorBatch");
     }
-    BooleanColumnStatisticsImpl* boolStats = dynamic_cast<BooleanColumnStatisticsImpl*>(colIndexStatistics.get());
+    auto* boolStats = dynamic_cast<BooleanColumnStatisticsImpl*>(colIndexStatistics.get());
     if (boolStats == nullptr) {
         throw InvalidArgument("Failed to cast to BooleanColumnStatisticsImpl");
     }
@@ -677,16 +697,15 @@ class DoubleColumnWriter : public ColumnWriter {
 public:
     DoubleColumnWriter(const Type& type, const StreamsFactory& factory, const WriterOptions& options, bool isFloat);
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 
-    virtual void flush(std::vector<proto::Stream>& streams) override;
+    void flush(std::vector<proto::Stream>& streams) override;
 
-    virtual uint64_t getEstimatedSize() const override;
+    uint64_t getEstimatedSize() const override;
 
-    virtual void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
+    void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
 
-    virtual void recordPosition() const override;
+    void recordPosition() const override;
 
 private:
     bool isFloat;
@@ -709,7 +728,7 @@ DoubleColumnWriter::DoubleColumnWriter(const Type& type, const StreamsFactory& f
 // Float columns use 4 bytes per value and double columns use 8 bytes.
 template <typename FLOAT_TYPE, typename INTEGER_TYPE>
 inline void encodeFloatNum(FLOAT_TYPE input, char* output) {
-    INTEGER_TYPE* intBits = reinterpret_cast<INTEGER_TYPE*>(&input);
+    auto* intBits = reinterpret_cast<INTEGER_TYPE*>(&input);
     for (size_t i = 0; i < sizeof(INTEGER_TYPE); ++i) {
         output[i] = static_cast<char>(((*intBits) >> (8 * i)) & 0xff);
     }
@@ -717,11 +736,11 @@ inline void encodeFloatNum(FLOAT_TYPE input, char* output) {
 
 void DoubleColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
                              const char* incomingMask) {
-    const DoubleVectorBatch* dblBatch = dynamic_cast<const DoubleVectorBatch*>(&rowBatch);
+    const auto* dblBatch = dynamic_cast<const DoubleVectorBatch*>(&rowBatch);
     if (dblBatch == nullptr) {
         throw InvalidArgument("Failed to cast to DoubleVectorBatch");
     }
-    DoubleColumnStatisticsImpl* doubleStats = dynamic_cast<DoubleColumnStatisticsImpl*>(colIndexStatistics.get());
+    auto* doubleStats = dynamic_cast<DoubleColumnStatisticsImpl*>(colIndexStatistics.get());
     if (doubleStats == nullptr) {
         throw InvalidArgument("Failed to cast to DoubleColumnStatisticsImpl");
     }
@@ -797,7 +816,7 @@ public:
         size_t length;
     };
 
-    SortedStringDictionary() : totalLength(0) {}
+    SortedStringDictionary() = default;
 
     // insert a new string into dictionary, return its insertion order
     size_t insert(const char* data, size_t len);
@@ -832,7 +851,7 @@ private:
 
     std::map<DictEntry, size_t, LessThan> dict;
     std::vector<std::vector<char>> data;
-    uint64_t totalLength;
+    uint64_t totalLength{0};
 
     // use friend class here to avoid being bothered by const function calls
     friend class StringColumnWriter;
@@ -847,10 +866,10 @@ size_t SortedStringDictionary::insert(const char* str, size_t len) {
     auto ret = dict.insert({DictEntry(str, len), dict.size()});
     if (ret.second) {
         // make a copy to internal storage
-        data.push_back(std::vector<char>(len));
+        data.emplace_back(len);
         memcpy(data.back().data(), str, len);
         // update dictionary entry to link pointer to internal storage
-        DictEntry* entry = const_cast<DictEntry*>(&(ret.first->first));
+        auto* entry = const_cast<DictEntry*>(&(ret.first->first));
         entry->data = data.back().data();
         totalLength += len;
     }
@@ -859,9 +878,9 @@ size_t SortedStringDictionary::insert(const char* str, size_t len) {
 
 // write dictionary data & length to output buffer
 void SortedStringDictionary::flush(AppendOnlyBufferedStream* dataStream, RleEncoder* lengthEncoder) const {
-    for (auto it = dict.cbegin(); it != dict.cend(); ++it) {
-        dataStream->write(it->first.data, it->first.length);
-        lengthEncoder->write(static_cast<int64_t>(it->first.length));
+    for (const auto& it : dict) {
+        dataStream->write(it.first.data, it.first.length);
+        lengthEncoder->write(static_cast<int64_t>(it.first.length));
     }
 }
 
@@ -879,21 +898,21 @@ void SortedStringDictionary::reorder(std::vector<int64_t>& idxBuffer) const {
     // iterate the dictionary to get mapping from insertion order to value order
     std::vector<size_t> mapping(dict.size());
     size_t dictIdx = 0;
-    for (auto it = dict.cbegin(); it != dict.cend(); ++it) {
-        mapping[it->second] = dictIdx++;
+    for (const auto& it : dict) {
+        mapping[it.second] = dictIdx++;
     }
 
     // do the transformation
-    for (size_t i = 0; i != idxBuffer.size(); ++i) {
-        idxBuffer[i] = static_cast<int64_t>(mapping[static_cast<size_t>(idxBuffer[i])]);
+    for (long& i : idxBuffer) {
+        i = static_cast<int64_t>(mapping[static_cast<size_t>(i)]);
     }
 }
 
 // get dict entries in insertion order
 void SortedStringDictionary::getEntriesInInsertionOrder(std::vector<const DictEntry*>& entries) const {
     entries.resize(dict.size());
-    for (auto it = dict.cbegin(); it != dict.cend(); ++it) {
-        entries[it->second] = &(it->first);
+    for (const auto& it : dict) {
+        entries[it.second] = &(it.first);
     }
 }
 
@@ -917,22 +936,21 @@ class StringColumnWriter : public ColumnWriter {
 public:
     StringColumnWriter(const Type& type, const StreamsFactory& factory, const WriterOptions& options);
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 
-    virtual void flush(std::vector<proto::Stream>& streams) override;
+    void flush(std::vector<proto::Stream>& streams) override;
 
-    virtual uint64_t getEstimatedSize() const override;
+    uint64_t getEstimatedSize() const override;
 
-    virtual void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
+    void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
 
-    virtual void recordPosition() const override;
+    void recordPosition() const override;
 
-    virtual void createRowIndexEntry() override;
+    void createRowIndexEntry() override;
 
-    virtual void writeDictionary() override;
+    void writeDictionary() override;
 
-    virtual void reset() override;
+    void reset() override;
 
 private:
     /**
@@ -964,7 +982,7 @@ protected:
      */
     SortedStringDictionary dictionary;
     // whether or not dictionary checking is done
-    bool doneDictionaryCheck;
+    bool doneDictionaryCheck{false};
     // whether or not it should be used
     bool useDictionary;
     // keys in the dictionary should not exceed this ratio
@@ -980,7 +998,7 @@ StringColumnWriter::StringColumnWriter(const Type& type, const StreamsFactory& f
           useCompression(options.getCompression() != CompressionKind_NONE),
           streamsFactory(factory),
           alignedBitPacking(options.getAlignedBitpacking()),
-          doneDictionaryCheck(false),
+
           useDictionary(options.getEnableDictionary()),
           dictSizeThreshold(options.getDictionaryKeySizeThreshold()) {
     if (type.getKind() == TypeKind::BINARY) {
@@ -1002,12 +1020,12 @@ StringColumnWriter::StringColumnWriter(const Type& type, const StreamsFactory& f
 
 void StringColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
                              const char* incomingMask) {
-    const StringVectorBatch* stringBatch = dynamic_cast<const StringVectorBatch*>(&rowBatch);
+    const auto* stringBatch = dynamic_cast<const StringVectorBatch*>(&rowBatch);
     if (stringBatch == nullptr) {
         throw InvalidArgument("Failed to cast to StringVectorBatch");
     }
 
-    StringColumnStatisticsImpl* strStats = dynamic_cast<StringColumnStatisticsImpl*>(colIndexStatistics.get());
+    auto* strStats = dynamic_cast<StringColumnStatisticsImpl*>(colIndexStatistics.get());
     if (strStats == nullptr) {
         throw InvalidArgument("Failed to cast to StringColumnStatisticsImpl");
     }
@@ -1025,7 +1043,7 @@ void StringColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint6
     uint64_t count = 0;
     for (uint64_t i = 0; i < numValues; ++i) {
         if (!notNull || notNull[i]) {
-            const size_t len = static_cast<size_t>(length[i]);
+            const auto len = static_cast<size_t>(length[i]);
             if (useDictionary) {
                 size_t index = dictionary.insert(data[i], len);
                 dictionary.idxInDictBuffer.push_back(static_cast<int64_t>(index));
@@ -1241,9 +1259,9 @@ void StringColumnWriter::fallbackToDirectEncoding() {
 
     // store each length of the data into a vector
     const SortedStringDictionary::DictEntry* dictEntry = nullptr;
-    for (uint64_t i = 0; i != dictionary.idxInDictBuffer.size(); ++i) {
+    for (long i : dictionary.idxInDictBuffer) {
         // write one row data in direct encoding
-        dictEntry = entries[static_cast<size_t>(dictionary.idxInDictBuffer[i])];
+        dictEntry = entries[static_cast<size_t>(i)];
         directDataStream->write(dictEntry->data, dictEntry->length);
         directLengthEncoder->write(static_cast<int64_t>(dictEntry->length));
     }
@@ -1328,8 +1346,7 @@ public:
         padBuffer.resize(maxLength * 6);
     }
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 
 private:
     uint64_t maxLength;
@@ -1337,12 +1354,12 @@ private:
 };
 
 void CharColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) {
-    StringVectorBatch* charsBatch = dynamic_cast<StringVectorBatch*>(&rowBatch);
+    auto* charsBatch = dynamic_cast<StringVectorBatch*>(&rowBatch);
     if (charsBatch == nullptr) {
         throw InvalidArgument("Failed to cast to StringVectorBatch");
     }
 
-    StringColumnStatisticsImpl* strStats = dynamic_cast<StringColumnStatisticsImpl*>(colIndexStatistics.get());
+    auto* strStats = dynamic_cast<StringColumnStatisticsImpl*>(colIndexStatistics.get());
     if (strStats == nullptr) {
         throw InvalidArgument("Failed to cast to StringColumnStatisticsImpl");
     }
@@ -1357,7 +1374,7 @@ void CharColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_
     for (uint64_t i = 0; i < numValues; ++i) {
         if (!notNull || notNull[i]) {
             const char* charData = nullptr;
-            uint64_t originLength = static_cast<uint64_t>(length[i]);
+            auto originLength = static_cast<uint64_t>(length[i]);
             uint64_t charLength = Utf8Utils::charLength(data[i], originLength);
             if (charLength >= maxLength) {
                 charData = data[i];
@@ -1402,8 +1419,7 @@ public:
         // PASS
     }
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 
 private:
     uint64_t maxLength;
@@ -1411,12 +1427,12 @@ private:
 
 void VarCharColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
                               const char* incomingMask) {
-    StringVectorBatch* charsBatch = dynamic_cast<StringVectorBatch*>(&rowBatch);
+    auto* charsBatch = dynamic_cast<StringVectorBatch*>(&rowBatch);
     if (charsBatch == nullptr) {
         throw InvalidArgument("Failed to cast to StringVectorBatch");
     }
 
-    StringColumnStatisticsImpl* strStats = dynamic_cast<StringColumnStatisticsImpl*>(colIndexStatistics.get());
+    auto* strStats = dynamic_cast<StringColumnStatisticsImpl*>(colIndexStatistics.get());
     if (strStats == nullptr) {
         throw InvalidArgument("Failed to cast to StringColumnStatisticsImpl");
     }
@@ -1465,18 +1481,17 @@ public:
         // PASS
     }
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 };
 
 void BinaryColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
                              const char* incomingMask) {
-    StringVectorBatch* binBatch = dynamic_cast<StringVectorBatch*>(&rowBatch);
+    auto* binBatch = dynamic_cast<StringVectorBatch*>(&rowBatch);
     if (binBatch == nullptr) {
         throw InvalidArgument("Failed to cast to StringVectorBatch");
     }
 
-    BinaryColumnStatisticsImpl* binStats = dynamic_cast<BinaryColumnStatisticsImpl*>(colIndexStatistics.get());
+    auto* binStats = dynamic_cast<BinaryColumnStatisticsImpl*>(colIndexStatistics.get());
     if (binStats == nullptr) {
         throw InvalidArgument("Failed to cast to BinaryColumnStatisticsImpl");
     }
@@ -1489,7 +1504,7 @@ void BinaryColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint6
 
     uint64_t count = 0;
     for (uint64_t i = 0; i < numValues; ++i) {
-        uint64_t unsignedLength = static_cast<uint64_t>(length[i]);
+        auto unsignedLength = static_cast<uint64_t>(length[i]);
         if (!notNull || notNull[i]) {
             directDataStream->write(data[i], unsignedLength);
 
@@ -1512,16 +1527,15 @@ public:
     TimestampColumnWriter(const Type& type, const StreamsFactory& factory, const WriterOptions& options,
                           bool isInstantType);
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 
-    virtual void flush(std::vector<proto::Stream>& streams) override;
+    void flush(std::vector<proto::Stream>& streams) override;
 
-    virtual uint64_t getEstimatedSize() const override;
+    uint64_t getEstimatedSize() const override;
 
-    virtual void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
+    void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
 
-    virtual void recordPosition() const override;
+    void recordPosition() const override;
 
 protected:
     std::unique_ptr<RleEncoder> secRleEncoder, nanoRleEncoder;
@@ -1572,12 +1586,12 @@ static int64_t formatNano(int64_t nanos) {
 
 void TimestampColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
                                 const char* incomingMask) {
-    TimestampVectorBatch* tsBatch = dynamic_cast<TimestampVectorBatch*>(&rowBatch);
+    auto* tsBatch = dynamic_cast<TimestampVectorBatch*>(&rowBatch);
     if (tsBatch == nullptr) {
         throw InvalidArgument("Failed to cast to TimestampVectorBatch");
     }
 
-    TimestampColumnStatisticsImpl* tsStats = dynamic_cast<TimestampColumnStatisticsImpl*>(colIndexStatistics.get());
+    auto* tsStats = dynamic_cast<TimestampColumnStatisticsImpl*>(colIndexStatistics.get());
     if (tsStats == nullptr) {
         throw InvalidArgument("Failed to cast to TimestampColumnStatisticsImpl");
     }
@@ -1594,7 +1608,7 @@ void TimestampColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, ui
             // TimestampVectorBatch already stores data in UTC
             int64_t millsUTC = secs[i] * 1000 + nanos[i] / 1000000;
             if (!isUTC) {
-                millsUTC = timezone.convertToUTC(millsUTC);
+                millsUTC = timezone.convertToUTC(secs[i]) * 1000 + nanos[i] / 1000000;
             }
             ++count;
             if (enableBloomFilter) {
@@ -1662,8 +1676,7 @@ class DateColumnWriter : public IntegerColumnWriter {
 public:
     DateColumnWriter(const Type& type, const StreamsFactory& factory, const WriterOptions& options);
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 };
 
 DateColumnWriter::DateColumnWriter(const Type& type, const StreamsFactory& factory, const WriterOptions& options)
@@ -1672,12 +1685,12 @@ DateColumnWriter::DateColumnWriter(const Type& type, const StreamsFactory& facto
 }
 
 void DateColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) {
-    const LongVectorBatch* longBatch = dynamic_cast<const LongVectorBatch*>(&rowBatch);
+    const auto* longBatch = dynamic_cast<const LongVectorBatch*>(&rowBatch);
     if (longBatch == nullptr) {
         throw InvalidArgument("Failed to cast to LongVectorBatch");
     }
 
-    DateColumnStatisticsImpl* dateStats = dynamic_cast<DateColumnStatisticsImpl*>(colIndexStatistics.get());
+    auto* dateStats = dynamic_cast<DateColumnStatisticsImpl*>(colIndexStatistics.get());
     if (dateStats == nullptr) {
         throw InvalidArgument("Failed to cast to DateColumnStatisticsImpl");
     }
@@ -1712,16 +1725,15 @@ public:
 
     Decimal64ColumnWriter(const Type& type, const StreamsFactory& factory, const WriterOptions& options);
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 
-    virtual void flush(std::vector<proto::Stream>& streams) override;
+    void flush(std::vector<proto::Stream>& streams) override;
 
-    virtual uint64_t getEstimatedSize() const override;
+    uint64_t getEstimatedSize() const override;
 
-    virtual void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
+    void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
 
-    virtual void recordPosition() const override;
+    void recordPosition() const override;
 
 protected:
     RleVersion rleVersion;
@@ -1751,12 +1763,12 @@ Decimal64ColumnWriter::Decimal64ColumnWriter(const Type& type, const StreamsFact
 
 void Decimal64ColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
                                 const char* incomingMask) {
-    const Decimal64VectorBatch* decBatch = dynamic_cast<const Decimal64VectorBatch*>(&rowBatch);
+    const auto* decBatch = dynamic_cast<const Decimal64VectorBatch*>(&rowBatch);
     if (decBatch == nullptr) {
         throw InvalidArgument("Failed to cast to Decimal64VectorBatch");
     }
 
-    DecimalColumnStatisticsImpl* decStats = dynamic_cast<DecimalColumnStatisticsImpl*>(colIndexStatistics.get());
+    auto* decStats = dynamic_cast<DecimalColumnStatisticsImpl*>(colIndexStatistics.get());
     if (decStats == nullptr) {
         throw InvalidArgument("Failed to cast to DecimalColumnStatisticsImpl");
     }
@@ -1837,12 +1849,109 @@ void Decimal64ColumnWriter::recordPosition() const {
     scaleEncoder->recordPosition(rowIndexPosition.get());
 }
 
+class Decimal64ColumnWriterV2 : public ColumnWriter {
+public:
+    Decimal64ColumnWriterV2(const Type& type, const StreamsFactory& factory, const WriterOptions& options);
+
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
+
+    void flush(std::vector<proto::Stream>& streams) override;
+
+    uint64_t getEstimatedSize() const override;
+
+    void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
+
+    void recordPosition() const override;
+
+protected:
+    uint64_t precision;
+    uint64_t scale;
+    std::unique_ptr<RleEncoder> valueEncoder;
+};
+
+Decimal64ColumnWriterV2::Decimal64ColumnWriterV2(const Type& type, const StreamsFactory& factory,
+                                                 const WriterOptions& options)
+        : ColumnWriter(type, factory, options), precision(type.getPrecision()), scale(type.getScale()) {
+    std::unique_ptr<BufferedOutputStream> dataStream = factory.createStream(proto::Stream_Kind_DATA);
+    valueEncoder = createRleEncoder(std::move(dataStream), true, RleVersion_2, memPool, options.getAlignedBitpacking());
+
+    if (enableIndex) {
+        recordPosition();
+    }
+}
+
+void Decimal64ColumnWriterV2::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
+                                  const char* incomingMask) {
+    const auto* decBatch = dynamic_cast<const Decimal64VectorBatch*>(&rowBatch);
+    if (decBatch == nullptr) {
+        throw InvalidArgument("Failed to cast to Decimal64VectorBatch");
+    }
+
+    auto* decStats = dynamic_cast<DecimalColumnStatisticsImpl*>(colIndexStatistics.get());
+    if (decStats == nullptr) {
+        throw InvalidArgument("Failed to cast to DecimalColumnStatisticsImpl");
+    }
+
+    ColumnWriter::add(rowBatch, offset, numValues, incomingMask);
+
+    const int64_t* data = decBatch->values.data() + offset;
+    const char* notNull = decBatch->hasNulls ? decBatch->notNull.data() + offset : nullptr;
+
+    valueEncoder->add(data, numValues, notNull);
+
+    uint64_t count = 0;
+    for (uint64_t i = 0; i < numValues; ++i) {
+        if (!notNull || notNull[i]) {
+            ++count;
+            if (enableBloomFilter) {
+                std::string decimal = Decimal(data[i], static_cast<int32_t>(scale)).toString(true);
+                bloomFilter->addBytes(decimal.c_str(), static_cast<int64_t>(decimal.size()));
+            }
+            decStats->update(Decimal(data[i], static_cast<int32_t>(scale)));
+        }
+    }
+    decStats->increase(count);
+    if (count < numValues) {
+        decStats->setHasNull(true);
+    }
+}
+
+void Decimal64ColumnWriterV2::flush(std::vector<proto::Stream>& streams) {
+    ColumnWriter::flush(streams);
+
+    proto::Stream dataStream;
+    dataStream.set_kind(proto::Stream_Kind_DATA);
+    dataStream.set_column(static_cast<uint32_t>(columnId));
+    dataStream.set_length(valueEncoder->flush());
+    streams.push_back(dataStream);
+}
+
+uint64_t Decimal64ColumnWriterV2::getEstimatedSize() const {
+    uint64_t size = ColumnWriter::getEstimatedSize();
+    size += valueEncoder->getBufferSize();
+    return size;
+}
+
+void Decimal64ColumnWriterV2::getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const {
+    proto::ColumnEncoding encoding;
+    encoding.set_kind(RleVersionMapper(RleVersion_2));
+    encoding.set_dictionarysize(0);
+    if (enableBloomFilter) {
+        encoding.set_bloomencoding(BloomFilterVersion::UTF8);
+    }
+    encodings.push_back(encoding);
+}
+
+void Decimal64ColumnWriterV2::recordPosition() const {
+    ColumnWriter::recordPosition();
+    valueEncoder->recordPosition(rowIndexPosition.get());
+}
+
 class Decimal128ColumnWriter : public Decimal64ColumnWriter {
 public:
     Decimal128ColumnWriter(const Type& type, const StreamsFactory& factory, const WriterOptions& options);
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 
 private:
     char buffer[20];
@@ -1869,12 +1978,12 @@ Int128 zigZagInt128(const Int128& value) {
 
 void Decimal128ColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
                                  const char* incomingMask) {
-    const Decimal128VectorBatch* decBatch = dynamic_cast<const Decimal128VectorBatch*>(&rowBatch);
+    const auto* decBatch = dynamic_cast<const Decimal128VectorBatch*>(&rowBatch);
     if (decBatch == nullptr) {
         throw InvalidArgument("Failed to cast to Decimal128VectorBatch");
     }
 
-    DecimalColumnStatisticsImpl* decStats = dynamic_cast<DecimalColumnStatisticsImpl*>(colIndexStatistics.get());
+    auto* decStats = dynamic_cast<DecimalColumnStatisticsImpl*>(colIndexStatistics.get());
     if (decStats == nullptr) {
         throw InvalidArgument("Failed to cast to DecimalColumnStatisticsImpl");
     }
@@ -1923,32 +2032,31 @@ public:
     ListColumnWriter(const Type& type, const StreamsFactory& factory, const WriterOptions& options);
     ~ListColumnWriter() override;
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 
-    virtual void flush(std::vector<proto::Stream>& streams) override;
+    void flush(std::vector<proto::Stream>& streams) override;
 
-    virtual uint64_t getEstimatedSize() const override;
+    uint64_t getEstimatedSize() const override;
 
-    virtual void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
+    void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
 
-    virtual void getStripeStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
+    void getStripeStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
 
-    virtual void getFileStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
+    void getFileStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
 
-    virtual void mergeStripeStatsIntoFileStats() override;
+    void mergeStripeStatsIntoFileStats() override;
 
-    virtual void mergeRowGroupStatsIntoStripeStats() override;
+    void mergeRowGroupStatsIntoStripeStats() override;
 
-    virtual void createRowIndexEntry() override;
+    void createRowIndexEntry() override;
 
-    virtual void writeIndex(std::vector<proto::Stream>& streams) const override;
+    void writeIndex(std::vector<proto::Stream>& streams) const override;
 
-    virtual void recordPosition() const override;
+    void recordPosition() const override;
 
-    virtual void writeDictionary() override;
+    void writeDictionary() override;
 
-    virtual void reset() override;
+    void reset() override;
 
 private:
     std::unique_ptr<RleEncoder> lengthEncoder;
@@ -1976,7 +2084,7 @@ ListColumnWriter::~ListColumnWriter() {
 }
 
 void ListColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) {
-    ListVectorBatch* listBatch = dynamic_cast<ListVectorBatch*>(&rowBatch);
+    auto* listBatch = dynamic_cast<ListVectorBatch*>(&rowBatch);
     if (listBatch == nullptr) {
         throw InvalidArgument("Failed to cast to ListVectorBatch");
     }
@@ -1986,8 +2094,8 @@ void ListColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_
     int64_t* offsets = listBatch->offsets.data() + offset;
     const char* notNull = listBatch->hasNulls ? listBatch->notNull.data() + offset : nullptr;
 
-    uint64_t elemOffset = static_cast<uint64_t>(offsets[0]);
-    uint64_t totalNumValues = static_cast<uint64_t>(offsets[numValues] - offsets[0]);
+    auto elemOffset = static_cast<uint64_t>(offsets[0]);
+    auto totalNumValues = static_cast<uint64_t>(offsets[numValues] - offsets[0]);
 
     // translate offsets to lengths
     for (uint64_t i = 0; i != numValues; ++i) {
@@ -1995,7 +2103,7 @@ void ListColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_
     }
 
     // unnecessary to deal with null as elements are packed together
-    if (child.get()) {
+    if (child) {
         child->add(*listBatch->elements, elemOffset, totalNumValues, nullptr);
     }
     lengthEncoder->add(offsets, numValues, notNull);
@@ -2030,21 +2138,21 @@ void ListColumnWriter::flush(std::vector<proto::Stream>& streams) {
     stream.set_length(lengthEncoder->flush());
     streams.push_back(stream);
 
-    if (child.get()) {
+    if (child) {
         child->flush(streams);
     }
 }
 
 void ListColumnWriter::writeIndex(std::vector<proto::Stream>& streams) const {
     ColumnWriter::writeIndex(streams);
-    if (child.get()) {
+    if (child) {
         child->writeIndex(streams);
     }
 }
 
 uint64_t ListColumnWriter::getEstimatedSize() const {
     uint64_t size = ColumnWriter::getEstimatedSize();
-    if (child.get()) {
+    if (child) {
         size += lengthEncoder->getBufferSize();
         size += child->getEstimatedSize();
     }
@@ -2059,42 +2167,42 @@ void ListColumnWriter::getColumnEncoding(std::vector<proto::ColumnEncoding>& enc
         encoding.set_bloomencoding(BloomFilterVersion::UTF8);
     }
     encodings.push_back(encoding);
-    if (child.get()) {
+    if (child) {
         child->getColumnEncoding(encodings);
     }
 }
 
 void ListColumnWriter::getStripeStatistics(std::vector<proto::ColumnStatistics>& stats) const {
     ColumnWriter::getStripeStatistics(stats);
-    if (child.get()) {
+    if (child) {
         child->getStripeStatistics(stats);
     }
 }
 
 void ListColumnWriter::mergeStripeStatsIntoFileStats() {
     ColumnWriter::mergeStripeStatsIntoFileStats();
-    if (child.get()) {
+    if (child) {
         child->mergeStripeStatsIntoFileStats();
     }
 }
 
 void ListColumnWriter::getFileStatistics(std::vector<proto::ColumnStatistics>& stats) const {
     ColumnWriter::getFileStatistics(stats);
-    if (child.get()) {
+    if (child) {
         child->getFileStatistics(stats);
     }
 }
 
 void ListColumnWriter::mergeRowGroupStatsIntoStripeStats() {
     ColumnWriter::mergeRowGroupStatsIntoStripeStats();
-    if (child.get()) {
+    if (child) {
         child->mergeRowGroupStatsIntoStripeStats();
     }
 }
 
 void ListColumnWriter::createRowIndexEntry() {
     ColumnWriter::createRowIndexEntry();
-    if (child.get()) {
+    if (child) {
         child->createRowIndexEntry();
     }
 }
@@ -2122,32 +2230,31 @@ public:
     MapColumnWriter(const Type& type, const StreamsFactory& factory, const WriterOptions& options);
     ~MapColumnWriter() override;
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 
-    virtual void flush(std::vector<proto::Stream>& streams) override;
+    void flush(std::vector<proto::Stream>& streams) override;
 
-    virtual uint64_t getEstimatedSize() const override;
+    uint64_t getEstimatedSize() const override;
 
-    virtual void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
+    void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
 
-    virtual void getStripeStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
+    void getStripeStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
 
-    virtual void getFileStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
+    void getFileStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
 
-    virtual void mergeStripeStatsIntoFileStats() override;
+    void mergeStripeStatsIntoFileStats() override;
 
-    virtual void mergeRowGroupStatsIntoStripeStats() override;
+    void mergeRowGroupStatsIntoStripeStats() override;
 
-    virtual void createRowIndexEntry() override;
+    void createRowIndexEntry() override;
 
-    virtual void writeIndex(std::vector<proto::Stream>& streams) const override;
+    void writeIndex(std::vector<proto::Stream>& streams) const override;
 
-    virtual void recordPosition() const override;
+    void recordPosition() const override;
 
-    virtual void writeDictionary() override;
+    void writeDictionary() override;
 
-    virtual void reset() override;
+    void reset() override;
 
 private:
     std::unique_ptr<ColumnWriter> keyWriter;
@@ -2180,7 +2287,7 @@ MapColumnWriter::~MapColumnWriter() {
 }
 
 void MapColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) {
-    MapVectorBatch* mapBatch = dynamic_cast<MapVectorBatch*>(&rowBatch);
+    auto* mapBatch = dynamic_cast<MapVectorBatch*>(&rowBatch);
     if (mapBatch == nullptr) {
         throw InvalidArgument("Failed to cast to MapVectorBatch");
     }
@@ -2190,8 +2297,8 @@ void MapColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t
     int64_t* offsets = mapBatch->offsets.data() + offset;
     const char* notNull = mapBatch->hasNulls ? mapBatch->notNull.data() + offset : nullptr;
 
-    uint64_t elemOffset = static_cast<uint64_t>(offsets[0]);
-    uint64_t totalNumValues = static_cast<uint64_t>(offsets[numValues] - offsets[0]);
+    auto elemOffset = static_cast<uint64_t>(offsets[0]);
+    auto totalNumValues = static_cast<uint64_t>(offsets[numValues] - offsets[0]);
 
     // translate offsets to lengths
     for (uint64_t i = 0; i != numValues; ++i) {
@@ -2201,10 +2308,10 @@ void MapColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t
     lengthEncoder->add(offsets, numValues, notNull);
 
     // unnecessary to deal with null as keys and values are packed together
-    if (keyWriter.get()) {
+    if (keyWriter) {
         keyWriter->add(*mapBatch->keys, elemOffset, totalNumValues, nullptr);
     }
-    if (elemWriter.get()) {
+    if (elemWriter) {
         elemWriter->add(*mapBatch->elements, elemOffset, totalNumValues, nullptr);
     }
 
@@ -2238,20 +2345,20 @@ void MapColumnWriter::flush(std::vector<proto::Stream>& streams) {
     stream.set_length(lengthEncoder->flush());
     streams.push_back(stream);
 
-    if (keyWriter.get()) {
+    if (keyWriter) {
         keyWriter->flush(streams);
     }
-    if (elemWriter.get()) {
+    if (elemWriter) {
         elemWriter->flush(streams);
     }
 }
 
 void MapColumnWriter::writeIndex(std::vector<proto::Stream>& streams) const {
     ColumnWriter::writeIndex(streams);
-    if (keyWriter.get()) {
+    if (keyWriter) {
         keyWriter->writeIndex(streams);
     }
-    if (elemWriter.get()) {
+    if (elemWriter) {
         elemWriter->writeIndex(streams);
     }
 }
@@ -2259,10 +2366,10 @@ void MapColumnWriter::writeIndex(std::vector<proto::Stream>& streams) const {
 uint64_t MapColumnWriter::getEstimatedSize() const {
     uint64_t size = ColumnWriter::getEstimatedSize();
     size += lengthEncoder->getBufferSize();
-    if (keyWriter.get()) {
+    if (keyWriter) {
         size += keyWriter->getEstimatedSize();
     }
-    if (elemWriter.get()) {
+    if (elemWriter) {
         size += elemWriter->getEstimatedSize();
     }
     return size;
@@ -2276,60 +2383,60 @@ void MapColumnWriter::getColumnEncoding(std::vector<proto::ColumnEncoding>& enco
         encoding.set_bloomencoding(BloomFilterVersion::UTF8);
     }
     encodings.push_back(encoding);
-    if (keyWriter.get()) {
+    if (keyWriter) {
         keyWriter->getColumnEncoding(encodings);
     }
-    if (elemWriter.get()) {
+    if (elemWriter) {
         elemWriter->getColumnEncoding(encodings);
     }
 }
 
 void MapColumnWriter::getStripeStatistics(std::vector<proto::ColumnStatistics>& stats) const {
     ColumnWriter::getStripeStatistics(stats);
-    if (keyWriter.get()) {
+    if (keyWriter) {
         keyWriter->getStripeStatistics(stats);
     }
-    if (elemWriter.get()) {
+    if (elemWriter) {
         elemWriter->getStripeStatistics(stats);
     }
 }
 
 void MapColumnWriter::mergeStripeStatsIntoFileStats() {
     ColumnWriter::mergeStripeStatsIntoFileStats();
-    if (keyWriter.get()) {
+    if (keyWriter) {
         keyWriter->mergeStripeStatsIntoFileStats();
     }
-    if (elemWriter.get()) {
+    if (elemWriter) {
         elemWriter->mergeStripeStatsIntoFileStats();
     }
 }
 
 void MapColumnWriter::getFileStatistics(std::vector<proto::ColumnStatistics>& stats) const {
     ColumnWriter::getFileStatistics(stats);
-    if (keyWriter.get()) {
+    if (keyWriter) {
         keyWriter->getFileStatistics(stats);
     }
-    if (elemWriter.get()) {
+    if (elemWriter) {
         elemWriter->getFileStatistics(stats);
     }
 }
 
 void MapColumnWriter::mergeRowGroupStatsIntoStripeStats() {
     ColumnWriter::mergeRowGroupStatsIntoStripeStats();
-    if (keyWriter.get()) {
+    if (keyWriter) {
         keyWriter->mergeRowGroupStatsIntoStripeStats();
     }
-    if (elemWriter.get()) {
+    if (elemWriter) {
         elemWriter->mergeRowGroupStatsIntoStripeStats();
     }
 }
 
 void MapColumnWriter::createRowIndexEntry() {
     ColumnWriter::createRowIndexEntry();
-    if (keyWriter.get()) {
+    if (keyWriter) {
         keyWriter->createRowIndexEntry();
     }
-    if (elemWriter.get()) {
+    if (elemWriter) {
         elemWriter->createRowIndexEntry();
     }
 }
@@ -2362,32 +2469,31 @@ class UnionColumnWriter : public ColumnWriter {
 public:
     UnionColumnWriter(const Type& type, const StreamsFactory& factory, const WriterOptions& options);
 
-    virtual void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
-                     const char* incomingMask) override;
+    void add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues, const char* incomingMask) override;
 
-    virtual void flush(std::vector<proto::Stream>& streams) override;
+    void flush(std::vector<proto::Stream>& streams) override;
 
-    virtual uint64_t getEstimatedSize() const override;
+    uint64_t getEstimatedSize() const override;
 
-    virtual void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
+    void getColumnEncoding(std::vector<proto::ColumnEncoding>& encodings) const override;
 
-    virtual void getStripeStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
+    void getStripeStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
 
-    virtual void getFileStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
+    void getFileStatistics(std::vector<proto::ColumnStatistics>& stats) const override;
 
-    virtual void mergeStripeStatsIntoFileStats() override;
+    void mergeStripeStatsIntoFileStats() override;
 
-    virtual void mergeRowGroupStatsIntoStripeStats() override;
+    void mergeRowGroupStatsIntoStripeStats() override;
 
-    virtual void createRowIndexEntry() override;
+    void createRowIndexEntry() override;
 
-    virtual void writeIndex(std::vector<proto::Stream>& streams) const override;
+    void writeIndex(std::vector<proto::Stream>& streams) const override;
 
-    virtual void recordPosition() const override;
+    void recordPosition() const override;
 
-    virtual void writeDictionary() override;
+    void writeDictionary() override;
 
-    virtual void reset() override;
+    void reset() override;
 
 private:
     std::unique_ptr<ByteRleEncoder> rleEncoder;
@@ -2410,7 +2516,7 @@ UnionColumnWriter::UnionColumnWriter(const Type& type, const StreamsFactory& fac
 
 void UnionColumnWriter::add(ColumnVectorBatch& rowBatch, uint64_t offset, uint64_t numValues,
                             const char* incomingMask) {
-    UnionVectorBatch* unionBatch = dynamic_cast<UnionVectorBatch*>(&rowBatch);
+    auto* unionBatch = dynamic_cast<UnionVectorBatch*>(&rowBatch);
     if (unionBatch == nullptr) {
         throw InvalidArgument("Failed to cast to UnionVectorBatch");
     }
@@ -2470,23 +2576,23 @@ void UnionColumnWriter::flush(std::vector<proto::Stream>& streams) {
     stream.set_length(rleEncoder->flush());
     streams.push_back(stream);
 
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->flush(streams);
+    for (auto& i : children) {
+        i->flush(streams);
     }
 }
 
 void UnionColumnWriter::writeIndex(std::vector<proto::Stream>& streams) const {
     ColumnWriter::writeIndex(streams);
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->writeIndex(streams);
+    for (const auto& i : children) {
+        i->writeIndex(streams);
     }
 }
 
 uint64_t UnionColumnWriter::getEstimatedSize() const {
     uint64_t size = ColumnWriter::getEstimatedSize();
     size += rleEncoder->getBufferSize();
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        size += children[i]->getEstimatedSize();
+    for (const auto& i : children) {
+        size += i->getEstimatedSize();
     }
     return size;
 }
@@ -2499,43 +2605,43 @@ void UnionColumnWriter::getColumnEncoding(std::vector<proto::ColumnEncoding>& en
         encoding.set_bloomencoding(BloomFilterVersion::UTF8);
     }
     encodings.push_back(encoding);
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->getColumnEncoding(encodings);
+    for (const auto& i : children) {
+        i->getColumnEncoding(encodings);
     }
 }
 
 void UnionColumnWriter::getStripeStatistics(std::vector<proto::ColumnStatistics>& stats) const {
     ColumnWriter::getStripeStatistics(stats);
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->getStripeStatistics(stats);
+    for (const auto& i : children) {
+        i->getStripeStatistics(stats);
     }
 }
 
 void UnionColumnWriter::mergeStripeStatsIntoFileStats() {
     ColumnWriter::mergeStripeStatsIntoFileStats();
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->mergeStripeStatsIntoFileStats();
+    for (auto& i : children) {
+        i->mergeStripeStatsIntoFileStats();
     }
 }
 
 void UnionColumnWriter::getFileStatistics(std::vector<proto::ColumnStatistics>& stats) const {
     ColumnWriter::getFileStatistics(stats);
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->getFileStatistics(stats);
+    for (const auto& i : children) {
+        i->getFileStatistics(stats);
     }
 }
 
 void UnionColumnWriter::mergeRowGroupStatsIntoStripeStats() {
     ColumnWriter::mergeRowGroupStatsIntoStripeStats();
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->mergeRowGroupStatsIntoStripeStats();
+    for (auto& i : children) {
+        i->mergeRowGroupStatsIntoStripeStats();
     }
 }
 
 void UnionColumnWriter::createRowIndexEntry() {
     ColumnWriter::createRowIndexEntry();
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->createRowIndexEntry();
+    for (auto& i : children) {
+        i->createRowIndexEntry();
     }
 }
 
@@ -2546,14 +2652,14 @@ void UnionColumnWriter::recordPosition() const {
 
 void UnionColumnWriter::reset() {
     ColumnWriter::reset();
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->reset();
+    for (auto& i : children) {
+        i->reset();
     }
 }
 
 void UnionColumnWriter::writeDictionary() {
-    for (uint32_t i = 0; i < children.size(); ++i) {
-        children[i]->writeDictionary();
+    for (auto& i : children) {
+        i->writeDictionary();
     }
 }
 
@@ -2590,6 +2696,9 @@ std::unique_ptr<ColumnWriter> buildWriter(const Type& type, const StreamsFactory
         return std::unique_ptr<ColumnWriter>(new TimestampColumnWriter(type, factory, options, true));
     case DECIMAL:
         if (type.getPrecision() <= Decimal64ColumnWriter::MAX_PRECISION_64) {
+            if (options.getFileVersion() == FileVersion::UNSTABLE_PRE_2_0()) {
+                return std::unique_ptr<ColumnWriter>(new Decimal64ColumnWriterV2(type, factory, options));
+            }
             return std::unique_ptr<ColumnWriter>(new Decimal64ColumnWriter(type, factory, options));
         } else if (type.getPrecision() <= Decimal64ColumnWriter::MAX_PRECISION_128) {
             return std::unique_ptr<ColumnWriter>(new Decimal128ColumnWriter(type, factory, options));

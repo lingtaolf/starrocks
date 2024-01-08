@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/DataQualityException.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -25,7 +21,7 @@ package com.starrocks.common;
  * Exception for data quality check failed
  */
 public class DataQualityException extends LoadException {
-    public static final String QUALITY_FAIL_MSG = "quality not good enough to cancel";
+    public static final String QUALITY_FAIL_MSG = "quality issues with ingested data, please check trackingSQL for details";
 
     public DataQualityException(String msg) {
         super(msg);

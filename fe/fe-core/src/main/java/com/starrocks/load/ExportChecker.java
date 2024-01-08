@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/load/ExportChecker.java
 
@@ -22,30 +35,32 @@
 package com.starrocks.load;
 
 import com.google.common.collect.Maps;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.common.Config;
-import com.starrocks.common.util.MasterDaemon;
+import com.starrocks.common.UserException;
+import com.starrocks.common.util.FrontendDaemon;
 import com.starrocks.load.ExportJob.JobState;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.system.ComputeNode;
 import com.starrocks.task.ExportExportingTask;
 import com.starrocks.task.ExportPendingTask;
-import com.starrocks.task.MasterTask;
-import com.starrocks.task.MasterTaskExecutor;
+import com.starrocks.task.LeaderTaskExecutor;
+import com.starrocks.task.PriorityLeaderTask;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.List;
 import java.util.Map;
 
-public final class ExportChecker extends MasterDaemon {
+public final class ExportChecker extends FrontendDaemon {
     private static final Logger LOG = LogManager.getLogger(ExportChecker.class);
 
     // checkers for running job state
     private static Map<JobState, ExportChecker> checkers = Maps.newHashMap();
     // executors for pending tasks
-    private static Map<JobState, MasterTaskExecutor> executors = Maps.newHashMap();
+    private static Map<JobState, LeaderTaskExecutor> executors = Maps.newHashMap();
     private JobState jobState;
 
-    private static MasterTaskExecutor exportingSubTaskExecutor;
+    private static LeaderTaskExecutor exportingSubTaskExecutor;
 
     private ExportChecker(JobState jobState, long intervalMs) {
         super("export checker " + jobState.name().toLowerCase(), intervalMs);
@@ -57,14 +72,14 @@ public final class ExportChecker extends MasterDaemon {
         checkers.put(JobState.EXPORTING, new ExportChecker(JobState.EXPORTING, intervalMs));
 
         int poolSize = Config.export_running_job_num_limit == 0 ? 5 : Config.export_running_job_num_limit;
-        MasterTaskExecutor pendingTaskExecutor = new MasterTaskExecutor("export_pending_job", poolSize, true);
+        LeaderTaskExecutor pendingTaskExecutor = new LeaderTaskExecutor("export_pending_job", poolSize, true);
         executors.put(JobState.PENDING, pendingTaskExecutor);
 
-        MasterTaskExecutor exportingTaskExecutor = new MasterTaskExecutor("export_exporting_job", poolSize, true);
+        LeaderTaskExecutor exportingTaskExecutor = new LeaderTaskExecutor("export_exporting_job", poolSize, true);
         executors.put(JobState.EXPORTING, exportingTaskExecutor);
 
         // One export job will be split into multiple exporting sub tasks, the queue size is not determined, so set Integer.MAX_VALUE.
-        exportingSubTaskExecutor = new MasterTaskExecutor("export_exporting_sub_task", Config.export_task_pool_size,
+        exportingSubTaskExecutor = new LeaderTaskExecutor("export_exporting_sub_task", Config.export_task_pool_size,
                 Integer.MAX_VALUE, true);
     }
 
@@ -72,13 +87,13 @@ public final class ExportChecker extends MasterDaemon {
         for (ExportChecker exportChecker : checkers.values()) {
             exportChecker.start();
         }
-        for (MasterTaskExecutor masterTaskExecutor : executors.values()) {
-            masterTaskExecutor.start();
+        for (LeaderTaskExecutor leaderTaskExecutor : executors.values()) {
+            leaderTaskExecutor.start();
         }
         exportingSubTaskExecutor.start();
     }
 
-    public static MasterTaskExecutor getExportingSubTaskExecutor() {
+    public static LeaderTaskExecutor getExportingSubTaskExecutor() {
         return exportingSubTaskExecutor;
     }
 
@@ -99,7 +114,7 @@ public final class ExportChecker extends MasterDaemon {
     }
 
     private void runPendingJobs() {
-        ExportMgr exportMgr = Catalog.getCurrentCatalog().getExportMgr();
+        ExportMgr exportMgr = GlobalStateMgr.getCurrentState().getExportMgr();
         List<ExportJob> pendingJobs = exportMgr.getExportJobs(JobState.PENDING);
 
         // check to limit running etl job num
@@ -123,7 +138,7 @@ public final class ExportChecker extends MasterDaemon {
 
         for (ExportJob job : pendingJobs) {
             try {
-                MasterTask task = new ExportPendingTask(job);
+                PriorityLeaderTask task = new ExportPendingTask(job);
                 if (executors.get(JobState.PENDING).submit(task)) {
                     LOG.info("run pending export job. job: {}", job);
                 }
@@ -134,11 +149,15 @@ public final class ExportChecker extends MasterDaemon {
     }
 
     private void runExportingJobs() {
-        List<ExportJob> jobs = Catalog.getCurrentCatalog().getExportMgr().getExportJobs(JobState.EXPORTING);
+        List<ExportJob> jobs = GlobalStateMgr.getCurrentState().getExportMgr().getExportJobs(JobState.EXPORTING);
         LOG.debug("exporting export job num: {}", jobs.size());
         for (ExportJob job : jobs) {
+            boolean cancelled = checkJobNeedCancel(job);
+            if (cancelled) {
+                continue;
+            }
             try {
-                MasterTask task = new ExportExportingTask(job);
+                PriorityLeaderTask task = new ExportExportingTask(job);
                 if (executors.get(JobState.EXPORTING).submit(task)) {
                     LOG.info("run exporting export job. job: {}", job);
                 }
@@ -146,5 +165,43 @@ public final class ExportChecker extends MasterDaemon {
                 LOG.warn("run export exporing job error", e);
             }
         }
+    }
+
+    private boolean checkJobNeedCancel(ExportJob job) {
+
+        boolean beHasErr = false;
+        String errMsg = "";
+        for (Long nodeId : job.getBeStartTimeMap().keySet()) {
+            ComputeNode node = GlobalStateMgr.getCurrentSystemInfo().getBackendOrComputeNode(nodeId);
+            if (null == node) {
+                // The current implementation, if the be in the job is not found, 
+                // the job will be cancelled
+                beHasErr = true;
+                errMsg = "Be or cn not found during exec export job. Node:" + nodeId;
+                LOG.warn(errMsg + " job: {}", job);
+                break;
+            }
+            if (!node.isAlive()) {
+                beHasErr = true;
+                errMsg = "Be or cn not alive during exec export job. Node:" + nodeId;
+                LOG.warn(errMsg + " job: {}", job);
+                break;
+            }
+            if (node.getLastStartTime() > job.getBeStartTimeMap().get(nodeId)) {
+                beHasErr = true;
+                errMsg = "Be or cn has rebooted during exec export job. Node:" + nodeId;
+                LOG.warn(errMsg + " job: {}", job);
+                break;
+            }
+        }
+        if (beHasErr) {
+            try {
+                job.cancel(ExportFailMsg.CancelType.BE_STATUS_ERR, errMsg);
+            } catch (UserException e) {
+                LOG.warn("try to cancel a completed job. job: {}", job);
+            }
+            return true;
+        }
+        return false;
     }
 }

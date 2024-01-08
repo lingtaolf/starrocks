@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/http/action/pprof_actions.cpp
 
@@ -21,25 +34,22 @@
 
 #include "http/action/pprof_actions.h"
 
-#include <gperftools/heap-profiler.h>
-#include <gperftools/malloc_extension.h>
 #include <gperftools/profiler.h>
 
 #include <fstream>
 #include <iostream>
 #include <mutex>
-#include <sstream>
 
 #include "common/config.h"
+#include "common/prof/heap_prof.h"
+#include "common/status.h"
+#include "common/tracer.h"
 #include "http/ev_http_server.h"
 #include "http/http_channel.h"
-#include "http/http_handler.h"
 #include "http/http_headers.h"
 #include "http/http_request.h"
-#include "http/http_response.h"
-#include "runtime/exec_env.h"
+#include "io/io_profiler.h"
 #include "util/bfd_parser.h"
-#include "util/file_utils.h"
 
 namespace starrocks {
 
@@ -50,14 +60,6 @@ static const int kPprofDefaultSampleSecs = 30;
 // Protect, only one thread can work
 static std::mutex kPprofActionMutex;
 
-class HeapAction : public HttpHandler {
-public:
-    HeapAction() {}
-    virtual ~HeapAction() {}
-
-    virtual void handle(HttpRequest* req) override;
-};
-
 void HeapAction::handle(HttpRequest* req) {
 #if defined(ADDRESS_SANITIZER) || defined(LEAK_SANITIZER) || defined(THREAD_SANITIZER)
     (void)kPprofDefaultSampleSecs; // Avoid unused variable warning.
@@ -67,58 +69,29 @@ void HeapAction::handle(HttpRequest* req) {
     HttpChannel::send_reply(req, str);
 #else
     std::lock_guard<std::mutex> lock(kPprofActionMutex);
+    std::string str = HeapProf::getInstance().snapshot();
 
-    int seconds = kPprofDefaultSampleSecs;
-    const std::string& seconds_str = req->param(SECOND_KEY);
-    if (!seconds_str.empty()) {
-        seconds = std::atoi(seconds_str.c_str());
+    if (str.empty()) {
+        str = "dump jemalloc prof file failed";
+    } else {
+        std::ifstream f(str);
+        str = std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     }
-
-    std::stringstream tmp_prof_file_name;
-    // Build a temporary file name that is hopefully unique.
-    tmp_prof_file_name << config::pprof_profile_dir << "/heap_profile." << getpid() << "." << rand();
-
-    HeapProfilerStart(tmp_prof_file_name.str().c_str());
-    // Sleep to allow for some samples to be collected.
-    sleep(seconds);
-    const char* profile = GetHeapProfile();
-    HeapProfilerStop();
-    std::string str = profile;
-    delete profile;
-
     HttpChannel::send_reply(req, str);
 #endif
 }
-
-class GrowthAction : public HttpHandler {
-public:
-    GrowthAction() {}
-    virtual ~GrowthAction() {}
-
-    virtual void handle(HttpRequest* req) override;
-};
 
 void GrowthAction::handle(HttpRequest* req) {
 #if defined(ADDRESS_SANITIZER) || defined(LEAK_SANITIZER) || defined(THREAD_SANITIZER)
     std::string str = "Growth profiling is not available with address sanitizer builds.";
     HttpChannel::send_reply(req, str);
 #else
-    std::lock_guard<std::mutex> lock(kPprofActionMutex);
-
-    std::string heap_growth_stack;
-    MallocExtension::instance()->GetHeapGrowthStacks(&heap_growth_stack);
-
-    HttpChannel::send_reply(req, heap_growth_stack);
+    std::string str =
+            "Growth profiling is not available with jemalloc builds.You can set the `--base` flag to jeprof to compare "
+            "the results of two Heap Profiling";
+    HttpChannel::send_reply(req, str);
 #endif
 }
-
-class ProfileAction : public HttpHandler {
-public:
-    ProfileAction() {}
-    virtual ~ProfileAction() {}
-
-    virtual void handle(HttpRequest* req) override;
-};
 
 void ProfileAction::handle(HttpRequest* req) {
 #if defined(ADDRESS_SANITIZER) || defined(LEAK_SANITIZER) || defined(THREAD_SANITIZER)
@@ -126,6 +99,7 @@ void ProfileAction::handle(HttpRequest* req) {
     HttpChannel::send_reply(req, str);
 #else
     std::lock_guard<std::mutex> lock(kPprofActionMutex);
+    auto scoped_span = trace::Scope(Tracer::Instance().start_trace("http_handle_profile"));
 
     int seconds = kPprofDefaultSampleSecs;
     const std::string& seconds_str = req->param(SECOND_KEY);
@@ -155,27 +129,27 @@ void ProfileAction::handle(HttpRequest* req) {
 #endif
 }
 
-class PmuProfileAction : public HttpHandler {
-public:
-    PmuProfileAction() {}
-    virtual ~PmuProfileAction() {}
-    virtual void handle(HttpRequest* req) override {}
-};
+static std::mutex kIOPprofActionMutex;
 
-class ContentionAction : public HttpHandler {
-public:
-    ContentionAction() {}
-    virtual ~ContentionAction() {}
+void IOProfileAction::handle(HttpRequest* req) {
+    std::lock_guard<std::mutex> lock(kIOPprofActionMutex);
+    auto scoped_span = trace::Scope(Tracer::Instance().start_trace("http_handle_io_profile"));
 
-    virtual void handle(HttpRequest* req) override {}
-};
+    int seconds = 10;
+    const std::string& seconds_str = req->param(SECOND_KEY);
+    if (!seconds_str.empty()) {
+        seconds = std::atoi(seconds_str.c_str());
+    }
+    int topn = 10;
+    const std::string& topn_str = req->param("topn");
+    if (!topn_str.empty()) {
+        topn = std::atoi(topn_str.c_str());
+    }
+    topn = std::max(1, topn);
 
-class CmdlineAction : public HttpHandler {
-public:
-    CmdlineAction() {}
-    virtual ~CmdlineAction() {}
-    virtual void handle(HttpRequest* req) override;
-};
+    auto ret = IOProfiler::profile_and_get_topn_stats_str(req->param("mode"), seconds, topn);
+    HttpChannel::send_reply(req, ret);
+}
 
 void CmdlineAction::handle(HttpRequest* req) {
     FILE* fp = fopen("/proc/self/cmdline", "r");
@@ -186,23 +160,14 @@ void CmdlineAction::handle(HttpRequest* req) {
         return;
     }
     char buf[1024];
-    fscanf(fp, "%s ", buf);
+    if (fscanf(fp, "%s ", buf) != 1) {
+        strcpy(buf, "read cmdline failed");
+    }
     fclose(fp);
     std::string str = buf;
 
     HttpChannel::send_reply(req, str);
 }
-
-class SymbolAction : public HttpHandler {
-public:
-    SymbolAction(BfdParser* parser) : _parser(parser) {}
-    virtual ~SymbolAction() {}
-
-    virtual void handle(HttpRequest* req) override;
-
-private:
-    BfdParser* _parser;
-};
 
 void SymbolAction::handle(HttpRequest* req) {
     // TODO: Implement symbol resolution. Without this, the binary needs to be passed
@@ -242,23 +207,4 @@ void SymbolAction::handle(HttpRequest* req) {
         HttpChannel::send_reply(req, result);
     }
 }
-
-Status PprofActions::setup(ExecEnv* exec_env, EvHttpServer* http_server) {
-    if (!config::pprof_profile_dir.empty()) {
-        FileUtils::create_dir(config::pprof_profile_dir);
-    }
-
-    http_server->register_handler(HttpMethod::GET, "/pprof/heap", new HeapAction());
-    http_server->register_handler(HttpMethod::GET, "/pprof/growth", new GrowthAction());
-    http_server->register_handler(HttpMethod::GET, "/pprof/profile", new ProfileAction());
-    http_server->register_handler(HttpMethod::GET, "/pprof/pmuprofile", new PmuProfileAction());
-    http_server->register_handler(HttpMethod::GET, "/pprof/contention", new ContentionAction());
-    http_server->register_handler(HttpMethod::GET, "/pprof/cmdline", new CmdlineAction());
-    auto action = new SymbolAction(exec_env->bfd_parser());
-    http_server->register_handler(HttpMethod::GET, "/pprof/symbol", action);
-    http_server->register_handler(HttpMethod::HEAD, "/pprof/symbol", action);
-    http_server->register_handler(HttpMethod::POST, "/pprof/symbol", action);
-    return Status::OK();
-}
-
 } // namespace starrocks

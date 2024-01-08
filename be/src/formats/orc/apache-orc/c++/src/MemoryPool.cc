@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/orc/tree/main/c++/src/MemoryPool.cc
 
@@ -22,13 +35,9 @@
 
 #include "orc/MemoryPool.hh"
 
-#include <immintrin.h>
-#include <string.h>
-
 #include <cstdlib>
-#include <iostream>
+#include <cstring>
 
-#include "Adaptor.hh"
 #include "orc/Int128.hh"
 
 namespace orc {
@@ -39,7 +48,7 @@ MemoryPool::~MemoryPool() {
 
 class MemoryPoolImpl : public MemoryPool {
 public:
-    virtual ~MemoryPoolImpl() override;
+    ~MemoryPoolImpl() override;
 
     char* malloc(uint64_t size) override;
     void free(char* p) override;
@@ -117,6 +126,12 @@ void DataBuffer<T>::reserve(uint64_t newCapacity) {
 inline int CountTrailingZerosNonZero32(uint32_t n) {
     return __builtin_ctz(n);
 }
+
+#ifdef __x86_64__
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
+#endif
 
 // it's copied from `filter_range` in column_helper.h with some minor changes.
 template <class T>

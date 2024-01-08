@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/olap/rowset/rowset_factory.h
 
@@ -19,8 +32,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_OLAP_ROWSET_FACTORY_H
-#define STARROCKS_BE_SRC_OLAP_ROWSET_FACTORY_H
+#pragma once
 
 #include "gen_cpp/olap_file.pb.h"
 #include "storage/data_dir.h"
@@ -33,17 +45,15 @@ class RowsetWriterContext;
 
 class RowsetFactory {
 public:
-    // return OLAP_SUCCESS and set inited rowset in `*rowset`.
-    // return others if failed to create or init rowset.
-    static OLAPStatus create_rowset(MemTracker* mem_tracker, const TabletSchema* schema, const std::string& rowset_path,
-                                    RowsetMetaSharedPtr rowset_meta, RowsetSharedPtr* rowset);
+    // return OK on success and set inited rowset in `*rowset`.
+    // return error if failed to create or init rowset.
+    static Status create_rowset(const TabletSchemaCSPtr& schema, const std::string& rowset_path,
+                                const RowsetMetaSharedPtr& rowset_meta, RowsetSharedPtr* rowset);
 
     // create and init rowset writer.
-    // return OLAP_SUCCESS and set `*output` to inited rowset writer.
-    // return others if failed
-    static OLAPStatus create_rowset_writer(const RowsetWriterContext& context, std::unique_ptr<RowsetWriter>* output);
+    // return OK on success and set `*output` to inited rowset writer.
+    // return error if failed
+    static Status create_rowset_writer(const RowsetWriterContext& context, std::unique_ptr<RowsetWriter>* output);
 };
 
 } // namespace starrocks
-
-#endif // STARROCKS_BE_SRC_OLAP_ROWSET_FACTORY_H

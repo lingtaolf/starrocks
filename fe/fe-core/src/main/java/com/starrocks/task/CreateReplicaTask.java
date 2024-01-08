@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/task/CreateReplicaTask.java
 
@@ -22,16 +35,19 @@
 package com.starrocks.task;
 
 import com.starrocks.alter.SchemaChangeHandler;
+import com.starrocks.binlog.BinlogConfig;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Index;
 import com.starrocks.catalog.KeysType;
-import com.starrocks.common.MarkedCountDownLatch;
 import com.starrocks.common.Status;
+import com.starrocks.common.util.concurrent.MarkedCountDownLatch;
+import com.starrocks.thrift.TBinlogConfig;
 import com.starrocks.thrift.TColumn;
+import com.starrocks.thrift.TCompressionType;
 import com.starrocks.thrift.TCreateTabletReq;
 import com.starrocks.thrift.TOlapTableIndex;
+import com.starrocks.thrift.TPersistentIndexType;
 import com.starrocks.thrift.TStatusCode;
-import com.starrocks.thrift.TStorageFormat;
 import com.starrocks.thrift.TStorageMedium;
 import com.starrocks.thrift.TStorageType;
 import com.starrocks.thrift.TTabletSchema;
@@ -48,17 +64,25 @@ import java.util.Set;
 public class CreateReplicaTask extends AgentTask {
     private static final Logger LOG = LogManager.getLogger(CreateReplicaTask.class);
 
+    public enum RecoverySource {
+        SCHEDULER,
+        REPORT
+    }
+
     private short shortKeyColumnCount;
     private int schemaHash;
+    private int schemaVersion;
 
     private long version;
-    private long versionHash;
 
     private KeysType keysType;
     private TStorageType storageType;
+    private TCompressionType compressionType;
     private TStorageMedium storageMedium;
 
     private List<Column> columns;
+    private List<Integer> sortKeyIdxes;
+    private List<Integer> sortKeyUniqueIds;
 
     // bloom filter columns
     private Set<String> bfColumns;
@@ -68,6 +92,12 @@ public class CreateReplicaTask extends AgentTask {
     private List<Index> indexes;
 
     private boolean isInMemory;
+
+    private boolean enablePersistentIndex;
+
+    private TPersistentIndexType persistentIndexType;
+
+    private BinlogConfig binlogConfig;
 
     private TTabletType tabletType;
 
@@ -80,32 +110,95 @@ public class CreateReplicaTask extends AgentTask {
     private long baseTabletId = -1;
     private int baseSchemaHash = -1;
 
-    private TStorageFormat storageFormat = null;
+    private RecoverySource recoverySource;
 
     // true if this task is created by recover request(See comment of Config.recover_with_empty_tablet)
     private boolean isRecoverTask = false;
 
+    private boolean isFromScheduler = false;
+
+    private int primaryIndexCacheExpireSec = 0;
+    private boolean createSchemaFile = true;
+
     public CreateReplicaTask(long backendId, long dbId, long tableId, long partitionId, long indexId, long tabletId,
-                             short shortKeyColumnCount, int schemaHash, long version, long versionHash,
+                             short shortKeyColumnCount, int schemaHash, long version,
                              KeysType keysType, TStorageType storageType,
                              TStorageMedium storageMedium, List<Column> columns,
                              Set<String> bfColumns, double bfFpp, MarkedCountDownLatch<Long, Long> latch,
                              List<Index> indexes,
                              boolean isInMemory,
-                             TTabletType tabletType) {
+                             boolean enablePersistentIndex,
+                             int primaryIndexCacheExpireSec,
+                             TTabletType tabletType, TCompressionType compressionType) {
+        this(backendId, dbId, tableId, partitionId, indexId, tabletId, shortKeyColumnCount,
+                schemaHash, 0, version, keysType, storageType, storageMedium, columns, bfColumns,
+                bfFpp, latch, indexes, isInMemory, enablePersistentIndex, primaryIndexCacheExpireSec,
+                tabletType, compressionType, null, null);
+    }
+
+    public CreateReplicaTask(long backendId, long dbId, long tableId, long partitionId, long indexId, long tabletId,
+                             short shortKeyColumnCount, int schemaHash, long version,
+                             KeysType keysType, TStorageType storageType,
+                             TStorageMedium storageMedium, List<Column> columns,
+                             Set<String> bfColumns, double bfFpp, MarkedCountDownLatch<Long, Long> latch,
+                             List<Index> indexes,
+                             boolean isInMemory,
+                             boolean enablePersistentIndex,
+                             int primaryIndexCacheExpireSec,
+                             BinlogConfig binlogConfig,
+                             TTabletType tabletType, TCompressionType compressionType, List<Integer> sortKeyIdxes,
+                             List<Integer> sortKeyUniqueIds) {
+
+        this(backendId, dbId, tableId, partitionId, indexId, tabletId, shortKeyColumnCount, schemaHash, 0, version,
+                keysType, storageType, storageMedium, columns, bfColumns, bfFpp, latch, indexes, isInMemory,
+                enablePersistentIndex, primaryIndexCacheExpireSec, tabletType, compressionType, sortKeyIdxes, sortKeyUniqueIds);
+        this.binlogConfig = binlogConfig;
+    }
+
+    public CreateReplicaTask(long backendId, long dbId, long tableId, long partitionId, long indexId, long tabletId,
+                             short shortKeyColumnCount, int schemaHash, long version,
+                             KeysType keysType, TStorageType storageType,
+                             TStorageMedium storageMedium, List<Column> columns,
+                             Set<String> bfColumns, double bfFpp, MarkedCountDownLatch<Long, Long> latch,
+                             List<Index> indexes,
+                             boolean isInMemory,
+                             boolean enablePersistentIndex,
+                             int primaryIndexCacheExpireSec,
+                             TTabletType tabletType, TCompressionType compressionType, List<Integer> sortKeyIdxes,
+                             List<Integer> sortKeyUniqueIds,
+                             boolean createSchemaFile) {
+        this(backendId, dbId, tableId, partitionId, indexId, tabletId, shortKeyColumnCount, schemaHash, 0, version,
+                keysType, storageType, storageMedium, columns, bfColumns, bfFpp, latch, indexes, isInMemory,
+                enablePersistentIndex, primaryIndexCacheExpireSec, tabletType, compressionType, sortKeyIdxes, sortKeyUniqueIds);
+        this.createSchemaFile = createSchemaFile;
+    }
+
+    public CreateReplicaTask(long backendId, long dbId, long tableId, long partitionId, long indexId, long tabletId,
+                             short shortKeyColumnCount, int schemaHash, int schemaVersion, long version,
+                             KeysType keysType, TStorageType storageType,
+                             TStorageMedium storageMedium, List<Column> columns,
+                             Set<String> bfColumns, double bfFpp, MarkedCountDownLatch<Long, Long> latch,
+                             List<Index> indexes,
+                             boolean isInMemory,
+                             boolean enablePersistentIndex,
+                             int primaryIndexCacheExpireSec,
+                             TTabletType tabletType, TCompressionType compressionType, List<Integer> sortKeyIdxes,
+                             List<Integer> sortKeyUniqueIds) {
         super(null, backendId, TTaskType.CREATE, dbId, tableId, partitionId, indexId, tabletId);
 
         this.shortKeyColumnCount = shortKeyColumnCount;
         this.schemaHash = schemaHash;
+        this.schemaVersion = schemaVersion;
 
         this.version = version;
-        this.versionHash = versionHash;
 
         this.keysType = keysType;
         this.storageType = storageType;
         this.storageMedium = storageMedium;
 
         this.columns = columns;
+        this.sortKeyIdxes = sortKeyIdxes;
+        this.sortKeyUniqueIds = sortKeyUniqueIds;
 
         this.bfColumns = bfColumns;
         this.indexes = indexes;
@@ -114,15 +207,43 @@ public class CreateReplicaTask extends AgentTask {
         this.latch = latch;
 
         this.isInMemory = isInMemory;
+        this.enablePersistentIndex = enablePersistentIndex;
+        this.primaryIndexCacheExpireSec = primaryIndexCacheExpireSec;
         this.tabletType = tabletType;
+
+        this.compressionType = compressionType;
     }
 
-    public void setIsRecoverTask(boolean isRecoverTask) {
-        this.isRecoverTask = isRecoverTask;
+    public CreateReplicaTask(long backendId, long dbId, long tableId, long partitionId, long indexId, long tabletId,
+                             short shortKeyColumnCount, int schemaHash, long version,
+                             KeysType keysType, TStorageType storageType,
+                             TStorageMedium storageMedium, List<Column> columns,
+                             Set<String> bfColumns, double bfFpp, MarkedCountDownLatch<Long, Long> latch,
+                             List<Index> indexes,
+                             boolean isInMemory,
+                             boolean enablePersistentIndex,
+                             int primaryIndexCacheExpireSec,
+                             TPersistentIndexType persistentIndexType,
+                             TTabletType tabletType, TCompressionType compressionType, List<Integer> sortKeyIdxes,
+                             List<Integer> sortKeyUniqueIds,
+                             boolean createSchemaFile) {
+        this(backendId, dbId, tableId, partitionId, indexId, tabletId, shortKeyColumnCount, schemaHash, version,
+                keysType, storageType, storageMedium, columns, bfColumns, bfFpp, latch, indexes, isInMemory,
+                enablePersistentIndex, primaryIndexCacheExpireSec, tabletType, compressionType, sortKeyIdxes, sortKeyUniqueIds,
+                createSchemaFile);
+        this.persistentIndexType = persistentIndexType;
     }
 
-    public boolean isRecoverTask() {
-        return isRecoverTask;
+    public void setRecoverySource(RecoverySource source) {
+        this.recoverySource = source;
+    }
+
+    public RecoverySource getRecoverySource() {
+        return this.recoverySource;
+    }
+
+    public void setSchemaVersion(int schemaVersion) {
+        this.schemaVersion = schemaVersion;
     }
 
     public void countDownLatch(long backendId, long tabletId) {
@@ -155,10 +276,6 @@ public class CreateReplicaTask extends AgentTask {
         this.baseSchemaHash = baseSchemaHash;
     }
 
-    public void setStorageFormat(TStorageFormat storageFormat) {
-        this.storageFormat = storageFormat;
-    }
-
     public TCreateTabletReq toThrift() {
         TCreateTabletReq createTabletReq = new TCreateTabletReq();
         createTabletReq.setTablet_id(tabletId);
@@ -168,6 +285,8 @@ public class CreateReplicaTask extends AgentTask {
         tSchema.setSchema_hash(schemaHash);
         tSchema.setKeys_type(keysType.toThrift());
         tSchema.setStorage_type(storageType);
+        tSchema.setId(indexId); // use index id as the schema id. assume schema change will assign a new index id.
+        tSchema.setSchema_version(schemaVersion);
 
         List<TColumn> tColumns = new ArrayList<TColumn>();
         for (Column column : columns) {
@@ -181,9 +300,14 @@ public class CreateReplicaTask extends AgentTask {
             if (column.getName().startsWith(SchemaChangeHandler.SHADOW_NAME_PRFIX)) {
                 tColumn.setColumn_name(column.getName().substring(SchemaChangeHandler.SHADOW_NAME_PRFIX.length()));
             }
+            if (column.getName().startsWith(SchemaChangeHandler.SHADOW_NAME_PRFIX_V1)) {
+                tColumn.setColumn_name(column.getName().substring(SchemaChangeHandler.SHADOW_NAME_PRFIX_V1.length()));
+            }
             tColumns.add(tColumn);
         }
         tSchema.setColumns(tColumns);
+        tSchema.setSort_key_idxes(sortKeyIdxes);
+        tSchema.setSort_key_unique_ids(sortKeyUniqueIds);
 
         if (CollectionUtils.isNotEmpty(indexes)) {
             List<TOlapTableIndex> tIndexes = new ArrayList<>();
@@ -191,7 +315,6 @@ public class CreateReplicaTask extends AgentTask {
                 tIndexes.add(index.toThrift());
             }
             tSchema.setIndexes(tIndexes);
-            storageFormat = TStorageFormat.V2;
         }
 
         if (bfColumns != null) {
@@ -201,9 +324,21 @@ public class CreateReplicaTask extends AgentTask {
         createTabletReq.setTablet_schema(tSchema);
 
         createTabletReq.setVersion(version);
-        createTabletReq.setVersion_hash(versionHash);
 
         createTabletReq.setStorage_medium(storageMedium);
+        createTabletReq.setEnable_persistent_index(enablePersistentIndex);
+
+        if (persistentIndexType != null) {
+            createTabletReq.setPersistent_index_type(persistentIndexType);
+        }
+
+        createTabletReq.setPrimary_index_cache_expire_sec(primaryIndexCacheExpireSec);
+
+        if (binlogConfig != null) {
+            TBinlogConfig tBinlogConfig = binlogConfig.toTBinlogConfig();
+            createTabletReq.setBinlog_config(tBinlogConfig);
+        }
+
         if (inRestoreMode) {
             createTabletReq.setIn_restore_mode(true);
         }
@@ -215,11 +350,9 @@ public class CreateReplicaTask extends AgentTask {
             createTabletReq.setBase_schema_hash(baseSchemaHash);
         }
 
-        if (storageFormat != null) {
-            createTabletReq.setStorage_format(storageFormat);
-        }
-
+        createTabletReq.setCompression_type(compressionType);
         createTabletReq.setTablet_type(tabletType);
+        createTabletReq.setCreate_schema_file(createSchemaFile);
         return createTabletReq;
     }
 }

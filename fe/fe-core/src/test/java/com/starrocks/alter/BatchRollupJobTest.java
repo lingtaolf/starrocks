@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/alter/BatchRollupJobTest.java
 
@@ -23,15 +36,15 @@ package com.starrocks.alter;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.Lists;
-import com.starrocks.analysis.AlterTableStmt;
-import com.starrocks.analysis.CancelAlterTableStmt;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.MaterializedIndex.IndexExtState;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.OlapTable.OlapTableState;
 import com.starrocks.catalog.Partition;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.AlterTableStmt;
+import com.starrocks.sql.ast.CancelAlterTableStmt;
 import com.starrocks.utframe.StarRocksAssert;
 import com.starrocks.utframe.UtFrameUtils;
 import org.junit.Assert;
@@ -41,17 +54,15 @@ import org.junit.Test;
 
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 public class BatchRollupJobTest {
 
-    private static String runningDir = "fe/mocked/BatchRollupJobTest/" + UUID.randomUUID().toString() + "/";
     private static ConnectContext ctx;
     private static StarRocksAssert starRocksAssert;
 
     @BeforeClass
     public static void setup() throws Exception {
-        UtFrameUtils.createMinStarRocksCluster(runningDir);
+        UtFrameUtils.createMinStarRocksCluster();
         ctx = UtFrameUtils.createDefaultCtx();
         starRocksAssert = new StarRocksAssert(ctx);
         starRocksAssert.withDatabase("db1").useDatabase("db1");
@@ -59,25 +70,26 @@ public class BatchRollupJobTest {
 
     @Before
     public void before() throws Exception {
-        Map<Long, AlterJobV2> alterJobs = Catalog.getCurrentCatalog().getRollupHandler().getAlterJobsV2();
+        Map<Long, AlterJobV2> alterJobs = GlobalStateMgr.getCurrentState().getRollupHandler().getAlterJobsV2();
         alterJobs.clear();
     }
 
     @Test
     public void testBatchRollup() throws Exception {
         starRocksAssert.withTable(
-                "create table db1.tbl1(k1 int, k2 int, k3 int) distributed by hash(k1) buckets 3 properties('replication_num' = '1');");
+                "create table db1.tbl1(k1 int, k2 int, k3 int) " +
+                        "distributed by hash(k1) buckets 3 properties('replication_num' = '1');");
 
         // batch add 3 rollups
-        String stmtStr =
-                "alter table db1.tbl1 add rollup r1(k1) duplicate key(k1), r2(k1, k2) duplicate key(k1), r3(k2) duplicate key(k2);";
-        AlterTableStmt alterTableStmt = (AlterTableStmt) UtFrameUtils.parseAndAnalyzeStmt(stmtStr, ctx);
-        Catalog.getCurrentCatalog().getAlterInstance().processAlterTable(alterTableStmt);
+        String stmtStr = "alter table db1.tbl1 add rollup r1(k1) duplicate key(k1), r2(k1, k2) " +
+                "duplicate key(k1), r3(k2) duplicate key(k2);";
+        AlterTableStmt alterTableStmt = (AlterTableStmt) UtFrameUtils.parseStmtWithNewParser(stmtStr, ctx);
+        GlobalStateMgr.getCurrentState().getAlterJobMgr().processAlterTable(alterTableStmt);
 
-        Map<Long, AlterJobV2> alterJobs = Catalog.getCurrentCatalog().getRollupHandler().getAlterJobsV2();
+        Map<Long, AlterJobV2> alterJobs = GlobalStateMgr.getCurrentState().getRollupHandler().getAlterJobsV2();
         Assert.assertEquals(3, alterJobs.size());
 
-        Database db = Catalog.getCurrentCatalog().getDb("default_cluster:db1");
+        Database db = GlobalStateMgr.getCurrentState().getDb("db1");
         Assert.assertNotNull(db);
         OlapTable tbl = (OlapTable) db.getTable("tbl1");
         Assert.assertNotNull(tbl);
@@ -115,20 +127,20 @@ public class BatchRollupJobTest {
 
     @Test
     public void testCancelBatchRollup() throws Exception {
-        starRocksAssert.withTable(
-                "create table db1.tbl2(k1 int, k2 int, k3 int) distributed by hash(k1) buckets 3 properties('replication_num' = '1');");
+        starRocksAssert.withTable("create table db1.tbl2(k1 int, k2 int, k3 int) " +
+                "distributed by hash(k1) buckets 3 properties('replication_num' = '1');");
 
         // batch add 3 rollups
-        String stmtStr =
-                "alter table db1.tbl2 add rollup r1(k1) duplicate key(k1), r2(k1, k2) duplicate key(k1), r3(k2) duplicate key(k2);";
-        AlterTableStmt alterTableStmt = (AlterTableStmt) UtFrameUtils.parseAndAnalyzeStmt(stmtStr, ctx);
-        Catalog.getCurrentCatalog().getAlterInstance().processAlterTable(alterTableStmt);
+        String stmtStr = "alter table db1.tbl2 add rollup r1(k1) " +
+                "duplicate key(k1), r2(k1, k2) duplicate key(k1), r3(k2) duplicate key(k2);";
+        AlterTableStmt alterTableStmt = (AlterTableStmt) UtFrameUtils.parseStmtWithNewParser(stmtStr, ctx);
+        GlobalStateMgr.getCurrentState().getAlterJobMgr().processAlterTable(alterTableStmt);
 
-        Map<Long, AlterJobV2> alterJobs = Catalog.getCurrentCatalog().getRollupHandler().getAlterJobsV2();
+        Map<Long, AlterJobV2> alterJobs = GlobalStateMgr.getCurrentState().getRollupHandler().getAlterJobsV2();
         Assert.assertEquals(3, alterJobs.size());
         List<Long> jobIds = Lists.newArrayList(alterJobs.keySet());
 
-        Database db = Catalog.getCurrentCatalog().getDb("default_cluster:db1");
+        Database db = GlobalStateMgr.getCurrentState().getDb("db1");
         Assert.assertNotNull(db);
         OlapTable tbl = (OlapTable) db.getTable("tbl2");
         Assert.assertNotNull(tbl);
@@ -148,8 +160,8 @@ public class BatchRollupJobTest {
             Assert.assertEquals(OlapTableState.ROLLUP, tbl.getState());
             // cancel rest of rollup jobs
             stmtStr = "cancel alter table rollup from db1.tbl2 (" + Joiner.on(",").join(jobIds) + ")";
-            CancelAlterTableStmt cancelStmt = (CancelAlterTableStmt) UtFrameUtils.parseAndAnalyzeStmt(stmtStr, ctx);
-            Catalog.getCurrentCatalog().cancelAlter(cancelStmt);
+            CancelAlterTableStmt cancelStmt = (CancelAlterTableStmt) UtFrameUtils.parseStmtWithNewParser(stmtStr, ctx);
+            GlobalStateMgr.getCurrentState().cancelAlter(cancelStmt);
 
             Assert.assertEquals(OlapTableState.NORMAL, tbl.getState());
             break;

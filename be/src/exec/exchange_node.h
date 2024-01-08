@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/exec/exchange_node.h
 
@@ -19,8 +32,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_QUERY_EXEC_EXCHANGE_NODE_H
-#define STARROCKS_BE_SRC_QUERY_EXEC_EXCHANGE_NODE_H
+#pragma once
 
 #include "exec/exec_node.h"
 #include "exec/sort_exec_exprs.h"
@@ -28,7 +40,6 @@
 
 namespace starrocks {
 
-class RowBatch;
 class RuntimeProfile;
 
 // Receiver node for data streams. The data stream receiver is created in Prepare()
@@ -42,19 +53,19 @@ class RuntimeProfile;
 // its SortExecExprs member that are used to compare rows.
 // If _is_merging is false, the exchange node directly retrieves batches from the row
 // batch queue of the DataStreamRecvr via calls to DataStreamRecvr::GetBatch().
+
 class ExchangeNode final : public ExecNode {
 public:
     ExchangeNode(ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl& descs);
-    virtual ~ExchangeNode() {}
+    ~ExchangeNode() override = default;
 
     Status init(const TPlanNode& tnode, RuntimeState* state = nullptr) override;
     Status prepare(RuntimeState* state) override;
     // Blocks until the first batch is available for consumption via GetNext().
     Status open(RuntimeState* state) override;
-    Status get_next(RuntimeState* state, RowBatch* row_batch, bool* eos) override;
     Status get_next(RuntimeState* state, ChunkPtr* chunk, bool* eos) override;
     Status collect_query_statistics(QueryStatistics* statistics) override;
-    Status close(RuntimeState* state) override;
+    void close(RuntimeState* state) override;
 
     // the number of senders needs to be set after the c'tor, because it's not
     // recorded in TPlanNode, and before calling prepare()
@@ -69,12 +80,9 @@ protected:
 private:
     // Implements GetNext() for the case where _is_merging is true. Delegates the GetNext()
     // call to the underlying DataStreamRecvr.
-    Status get_next_merging(RuntimeState* state, RowBatch* output_batch, bool* eos);
     Status get_next_merging(RuntimeState* state, ChunkPtr* chunk, bool* eos);
 
-    // Resets _input_batch to the next batch from the from _stream_recvr's queue.
-    // Only used when _is_merging is false.
-    Status fill_input_row_batch(RuntimeState* state);
+    const TExchangeNode& _texchange_node;
 
     int _num_senders; // needed for _stream_recvr construction
 
@@ -84,28 +92,13 @@ private:
     // our input rows are a prefix of the rows we produce
     RowDescriptor _input_row_desc;
 
-    // the size of our input batches does not necessarily match the capacity
-    // of our output batches, which means that we need to buffer the input
-    // Current batch of rows from the receiver queue being processed by this node.
-    // Only valid if _is_merging is false. (If _is_merging is true, GetNext() is
-    // delegated to the receiver). Owned by the stream receiver.
-    // std::unique_ptr<RowBatch> _input_batch;
-    RowBatch* _input_batch = nullptr;
-
-    std::unique_ptr<vectorized::Chunk> _input_chunk;
+    std::unique_ptr<Chunk> _input_chunk;
     bool _is_finished = false;
-
-    // Next row to copy from _input_batch. For non-merging exchanges, _input_batch
-    // is retrieved directly from the sender queue in the stream recvr, and rows from
-    // _input_batch must be copied to the output batch in GetNext().
-    int _next_row_idx;
-
-    // time spent reconstructing received rows
-    RuntimeProfile::Counter* _convert_row_batch_timer = nullptr;
 
     // True if this is a merging exchange node. If true, GetNext() is delegated to the
     // underlying _stream_recvr, and _input_batch is not used/valid.
     bool _is_merging;
+    bool _is_parallel_merge;
 
     // Sort expressions and parameters passed to the merging receiver..
     SortExecExprs _sort_exec_exprs;
@@ -125,5 +118,3 @@ private:
 };
 
 }; // namespace starrocks
-
-#endif

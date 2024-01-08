@@ -1,4 +1,17 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package com.starrocks.sql.optimizer.rule.transformation;
 
 import com.google.common.collect.Lists;
@@ -28,7 +41,9 @@ public class PruneWindowColumnsRule extends TransformationRule {
     @Override
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
         LogicalWindowOperator windowOperator = (LogicalWindowOperator) input.getOp();
-        ColumnRefSet requiredOutputColumns = context.getTaskContext().get(0).getRequiredColumns();
+        ColumnRefSet requiredOutputColumns = context.getTaskContext().getRequiredColumns();
+        ColumnRefSet requiredInputColumns = new ColumnRefSet();
+        requiredInputColumns.union(requiredOutputColumns);
 
         Map<ColumnRefOperator, CallOperator> newWindowCall = new HashMap<>();
         windowOperator.getWindowCall().forEach((columnRefOperator, callOperator) -> {
@@ -38,23 +53,26 @@ public class PruneWindowColumnsRule extends TransformationRule {
             }
         });
 
-        if (newWindowCall.isEmpty()) {
-            return input.getInputs();
-        }
-
         windowOperator.getPartitionExpressions().forEach(e -> requiredOutputColumns.union(e.getUsedColumns()));
         windowOperator.getOrderByElements().stream().map(Ordering::getColumnRef).forEach(
+                e -> requiredOutputColumns.union(e.getUsedColumns()));
+
+        windowOperator.getEnforceSortColumns().stream().map(Ordering::getColumnRef).forEach(
                 e -> requiredOutputColumns.union(e.getUsedColumns()));
 
         if (newWindowCall.keySet().equals(windowOperator.getWindowCall().keySet())) {
             return Collections.emptyList();
         }
 
-        return Lists.newArrayList(OptExpression.create(new LogicalWindowOperator(
-                newWindowCall,
-                windowOperator.getPartitionExpressions(),
-                windowOperator.getOrderByElements(),
-                windowOperator.getAnalyticWindow()
-        ), input.getInputs()));
+        // If newWindowCall is empty, it will be clipped in PruneEmptyWindowRule,
+        // so it is directly transmitted requiredOutputColumns here
+        if (newWindowCall.isEmpty()) {
+            requiredOutputColumns.clear();
+            requiredOutputColumns.union(requiredInputColumns);
+        }
+
+        return Lists.newArrayList(OptExpression.create(
+                new LogicalWindowOperator.Builder().withOperator(windowOperator).setWindowCall(newWindowCall).build(),
+                input.getInputs()));
     }
 }

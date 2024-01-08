@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/system/Backend.java
 
@@ -21,17 +34,17 @@
 
 package com.starrocks.system;
 
+import com.google.common.base.Objects;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.starrocks.alter.DecommissionBackendJob.DecommissionType;
-import com.starrocks.catalog.Catalog;
+import com.google.common.collect.Sets;
+import com.google.gson.annotations.SerializedName;
 import com.starrocks.catalog.DiskInfo;
 import com.starrocks.catalog.DiskInfo.DiskState;
-import com.starrocks.common.FeMetaVersion;
+import com.starrocks.common.DdlException;
 import com.starrocks.common.io.Text;
-import com.starrocks.common.io.Writable;
-import com.starrocks.system.HeartbeatResponse.HbStatus;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.thrift.TDisk;
 import com.starrocks.thrift.TStorageMedium;
 import org.apache.logging.log4j.LogManager;
@@ -43,262 +56,55 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 /**
  * This class extends the primary identifier of a Backend with ephemeral state,
- * eg usage information, current administrative state etc.
+ * e.g. usage information, current administrative state etc.
  */
-public class Backend implements Writable {
+public class Backend extends ComputeNode {
 
     public enum BackendState {
-        using, /* backend is belong to a cluster*/
+        using, /* backend belongs to a cluster*/
         offline,
         free /* backend is not belong to any clusters */
     }
 
     private static final Logger LOG = LogManager.getLogger(Backend.class);
 
-    private long id;
-    private String host;
-    private String version;
-
-    private int heartbeatPort; // heartbeat
-    private volatile int bePort; // be
-    private volatile int httpPort; // web service
-    private volatile int beRpcPort; // be rpc port
-    private volatile int brpcPort = -1;
-
-    private volatile long lastUpdateMs;
-    private volatile long lastStartTime;
-    private AtomicBoolean isAlive;
-
-    private AtomicBoolean isDecommissioned;
-    private volatile int decommissionType;
-    private volatile String ownerClusterName;
-    // to index the state in some cluster
-    private volatile int backendState;
-    // private BackendState backendState;
-
     // rootPath -> DiskInfo
-    private volatile ImmutableMap<String, DiskInfo> disksRef;
+    @SerializedName(value = "d")
+    private volatile ConcurrentHashMap<String, DiskInfo> disksRef;
 
-    private String heartbeatErrMsg = "";
-
-    // This is used for the first time we init pathHashToDishInfo in SystemInfoService.
-    // after init it, this variable is set to true.
+    // This is used for the first time we initiate pathHashToDishInfo in SystemInfoService.
+    // after initiating it, this variable is set to true.
     private boolean initPathInfo = false;
 
-    private long lastMissingHeartbeatTime = -1;
     // the max tablet compaction score of this backend.
     // this field is set by tablet report, and just for metric monitor, no need to persist.
     private volatile long tabletMaxCompactionScore = 0;
 
     // additional backendStatus information for BE, display in JSON format
-    private BackendStatus backendStatus = new BackendStatus();
+    private final BackendStatus backendStatus = new BackendStatus();
 
     public Backend() {
-        this.host = "";
-        this.version = "";
-        this.lastUpdateMs = 0;
-        this.lastStartTime = 0;
-        this.isAlive = new AtomicBoolean();
-        this.isDecommissioned = new AtomicBoolean(false);
-
-        this.bePort = 0;
-        this.httpPort = 0;
-        this.beRpcPort = 0;
-        this.disksRef = ImmutableMap.of();
-
-        this.ownerClusterName = "";
-        this.backendState = BackendState.free.ordinal();
-
-        this.decommissionType = DecommissionType.SystemDecommission.ordinal();
+        super();
+        this.disksRef = new ConcurrentHashMap<>();
     }
 
     public Backend(long id, String host, int heartbeatPort) {
-        this.id = id;
-        this.host = host;
-        this.version = "";
-        this.heartbeatPort = heartbeatPort;
-        this.bePort = -1;
-        this.httpPort = -1;
-        this.beRpcPort = -1;
-        this.lastUpdateMs = -1L;
-        this.lastStartTime = -1L;
-        this.disksRef = ImmutableMap.of();
-
-        this.isAlive = new AtomicBoolean(false);
-        this.isDecommissioned = new AtomicBoolean(false);
-
-        this.ownerClusterName = "";
-        this.backendState = BackendState.free.ordinal();
-        this.decommissionType = DecommissionType.SystemDecommission.ordinal();
-    }
-
-    public long getId() {
-        return id;
-    }
-
-    public String getHost() {
-        return host;
-    }
-
-    public String getVersion() {
-        return version;
-    }
-
-    public int getBePort() {
-        return bePort;
-    }
-
-    public int getHeartbeatPort() {
-        return heartbeatPort;
-    }
-
-    public int getHttpPort() {
-        return httpPort;
-    }
-
-    public int getBeRpcPort() {
-        return beRpcPort;
-    }
-
-    public int getBrpcPort() {
-        return brpcPort;
-    }
-
-    public String getHeartbeatErrMsg() {
-        return heartbeatErrMsg;
-    }
-
-    // for test only
-    public void updateOnce(int bePort, int httpPort, int beRpcPort) {
-        if (this.bePort != bePort) {
-            this.bePort = bePort;
-        }
-
-        if (this.httpPort != httpPort) {
-            this.httpPort = httpPort;
-        }
-
-        if (this.beRpcPort != beRpcPort) {
-            this.beRpcPort = beRpcPort;
-        }
-
-        long currentTime = System.currentTimeMillis();
-        this.lastUpdateMs = currentTime;
-        if (!isAlive.get()) {
-            this.lastStartTime = currentTime;
-            LOG.info("{} is alive,", this.toString());
-            this.isAlive.set(true);
-        }
-
-        heartbeatErrMsg = "";
-    }
-
-    public boolean setDecommissioned(boolean isDecommissioned) {
-        if (this.isDecommissioned.compareAndSet(!isDecommissioned, isDecommissioned)) {
-            LOG.warn("{} set decommission: {}", this.toString(), isDecommissioned);
-            return true;
-        }
-        return false;
-    }
-
-    public void setBackendState(BackendState state) {
-        this.backendState = state.ordinal();
-    }
-
-    public void setAlive(boolean isAlive) {
-        this.isAlive.set(isAlive);
-    }
-
-    public void setBePort(int agentPort) {
-        this.bePort = agentPort;
-    }
-
-    public void setHttpPort(int httpPort) {
-        this.httpPort = httpPort;
-    }
-
-    public void setBeRpcPort(int beRpcPort) {
-        this.beRpcPort = beRpcPort;
-    }
-
-    public void setBrpcPort(int brpcPort) {
-        this.brpcPort = brpcPort;
-    }
-
-    public long getLastUpdateMs() {
-        return this.lastUpdateMs;
-    }
-
-    public void setLastUpdateMs(long currentTime) {
-        this.lastUpdateMs = currentTime;
-    }
-
-    public long getLastStartTime() {
-        return this.lastStartTime;
-    }
-
-    public void setLastStartTime(long currentTime) {
-        this.lastStartTime = currentTime;
-    }
-
-    public long getLastMissingHeartbeatTime() {
-        return lastMissingHeartbeatTime;
-    }
-
-    public boolean isAlive() {
-        return this.isAlive.get();
-    }
-
-    public boolean isDecommissioned() {
-        return this.isDecommissioned.get();
-    }
-
-    public boolean isAvailable() {
-        return this.isAlive.get() && !this.isDecommissioned.get();
+        super(id, host, heartbeatPort);
+        this.disksRef = new ConcurrentHashMap<>();
     }
 
     public void setDisks(ImmutableMap<String, DiskInfo> disks) {
-        this.disksRef = disks;
-    }
-
-    public BackendStatus getBackendStatus() {
-        return backendStatus;
-    }
-
-    /**
-     * backend belong to some cluster
-     *
-     * @return
-     */
-    public boolean isUsedByCluster() {
-        return this.backendState == BackendState.using.ordinal();
-    }
-
-    /**
-     * backend is free, and it isn't belong to any cluster
-     *
-     * @return
-     */
-    public boolean isFreeFromCluster() {
-        return this.backendState == BackendState.free.ordinal();
-    }
-
-    /**
-     * backend execute discommission in cluster , and backendState will be free
-     * finally
-     *
-     * @return
-     */
-    public boolean isOffLineFromCluster() {
-        return this.backendState == BackendState.offline.ordinal();
+        this.disksRef = new ConcurrentHashMap<>(disks);
     }
 
     public ImmutableMap<String, DiskInfo> getDisks() {
-        return this.disksRef;
+        return ImmutableMap.copyOf(this.disksRef);
     }
 
     public boolean hasPathHash() {
@@ -306,22 +112,30 @@ public class Backend implements Writable {
     }
 
     public long getTotalCapacityB() {
-        ImmutableMap<String, DiskInfo> disks = disksRef;
         long totalCapacityB = 0L;
-        for (DiskInfo diskInfo : disks.values()) {
-            if (diskInfo.getState() == DiskState.ONLINE) {
+        for (DiskInfo diskInfo : disksRef.values()) {
+            if (diskInfo.canReadWrite()) {
                 totalCapacityB += diskInfo.getTotalCapacityB();
             }
         }
         return totalCapacityB;
     }
 
+    public long getDataTotalCapacityB() {
+        long dataTotalCapacityB = 0L;
+        for (DiskInfo diskInfo : disksRef.values()) {
+            if (diskInfo.canReadWrite()) {
+                dataTotalCapacityB += diskInfo.getDataTotalCapacityB();
+            }
+        }
+        return dataTotalCapacityB;
+    }
+
     public long getAvailableCapacityB() {
         // when cluster init, disks is empty, return 1L.
-        ImmutableMap<String, DiskInfo> disks = disksRef;
         long availableCapacityB = 1L;
-        for (DiskInfo diskInfo : disks.values()) {
-            if (diskInfo.getState() == DiskState.ONLINE) {
+        for (DiskInfo diskInfo : disksRef.values()) {
+            if (diskInfo.canReadWrite()) {
                 availableCapacityB += diskInfo.getAvailableCapacityB();
             }
         }
@@ -329,10 +143,9 @@ public class Backend implements Writable {
     }
 
     public long getDataUsedCapacityB() {
-        ImmutableMap<String, DiskInfo> disks = disksRef;
         long dataUsedCapacityB = 0L;
-        for (DiskInfo diskInfo : disks.values()) {
-            if (diskInfo.getState() == DiskState.ONLINE) {
+        for (DiskInfo diskInfo : disksRef.values()) {
+            if (diskInfo.canReadWrite()) {
                 dataUsedCapacityB += diskInfo.getDataUsedCapacityB();
             }
         }
@@ -340,10 +153,9 @@ public class Backend implements Writable {
     }
 
     public double getMaxDiskUsedPct() {
-        ImmutableMap<String, DiskInfo> disks = disksRef;
         double maxPct = 0.0;
-        for (DiskInfo diskInfo : disks.values()) {
-            if (diskInfo.getState() == DiskState.ONLINE) {
+        for (DiskInfo diskInfo : disksRef.values()) {
+            if (diskInfo.canReadWrite()) {
                 double percent = diskInfo.getUsedPct();
                 if (percent > maxPct) {
                     maxPct = percent;
@@ -353,14 +165,14 @@ public class Backend implements Writable {
         return maxPct;
     }
 
-    public boolean diskExceedLimitByStorageMedium(TStorageMedium storageMedium) {
+    // For create table and the storageMedium should be specified
+    public boolean checkDiskExceedLimitForCreate(TStorageMedium storageMedium) {
         if (getDiskNumByStorageMedium(storageMedium) <= 0) {
             return true;
         }
-        ImmutableMap<String, DiskInfo> diskInfos = disksRef;
         boolean exceedLimit = true;
-        for (DiskInfo diskInfo : diskInfos.values()) {
-            if (diskInfo.getState() == DiskState.ONLINE && diskInfo.getStorageMedium() == storageMedium &&
+        for (DiskInfo diskInfo : disksRef.values()) {
+            if (diskInfo.canCreateTablet() && diskInfo.getStorageMedium() == storageMedium &&
                     !diskInfo.exceedLimit(true)) {
                 exceedLimit = false;
                 break;
@@ -369,14 +181,14 @@ public class Backend implements Writable {
         return exceedLimit;
     }
 
-    public boolean diskExceedLimit() {
+    // For create table
+    public boolean checkDiskExceedLimitForCreate() {
         if (getDiskNum() <= 0) {
             return true;
         }
-        ImmutableMap<String, DiskInfo> diskInfos = disksRef;
         boolean exceedLimit = true;
-        for (DiskInfo diskInfo : diskInfos.values()) {
-            if (diskInfo.getState() == DiskState.ONLINE && !diskInfo.exceedLimit(true)) {
+        for (DiskInfo diskInfo : disksRef.values()) {
+            if (diskInfo.canCreateTablet() && !diskInfo.exceedLimit(true)) {
                 exceedLimit = false;
                 break;
             }
@@ -384,21 +196,26 @@ public class Backend implements Writable {
         return exceedLimit;
     }
 
-    public String getPathByPathHash(long pathHash) {
+    // For data load
+    public boolean checkDiskExceedLimit() {
+        if (getDiskNum() <= 0) {
+            return true;
+        }
+        boolean exceedLimit = true;
         for (DiskInfo diskInfo : disksRef.values()) {
-            if (diskInfo.getPathHash() == pathHash) {
-                return diskInfo.getRootPath();
+            if (diskInfo.canReadWrite() && !diskInfo.exceedLimit(true)) {
+                exceedLimit = false;
+                break;
             }
         }
-        return null;
+        return exceedLimit;
     }
 
     public void updateDisks(Map<String, TDisk> backendDisks) {
-        ImmutableMap<String, DiskInfo> disks = disksRef;
         // The very first time to init the path info
         if (!initPathInfo) {
             boolean allPathHashUpdated = true;
-            for (DiskInfo diskInfo : disks.values()) {
+            for (DiskInfo diskInfo : disksRef.values()) {
                 if (diskInfo.getPathHash() == 0) {
                     allPathHashUpdated = false;
                     break;
@@ -406,7 +223,8 @@ public class Backend implements Writable {
             }
             if (allPathHashUpdated) {
                 initPathInfo = true;
-                Catalog.getCurrentSystemInfo().updatePathInfo(new ArrayList<>(disks.values()), Lists.newArrayList());
+                GlobalStateMgr.getCurrentSystemInfo()
+                        .updatePathInfo(new ArrayList<>(disksRef.values()), Lists.newArrayList());
             }
         }
 
@@ -426,12 +244,12 @@ public class Backend implements Writable {
             long diskAvailableCapacityB = tDisk.getDisk_available_capacity();
             boolean isUsed = tDisk.isUsed();
 
-            DiskInfo diskInfo = disks.get(rootPath);
+            DiskInfo diskInfo = disksRef.get(rootPath);
             if (diskInfo == null) {
                 diskInfo = new DiskInfo(rootPath);
                 addedDisks.add(diskInfo);
                 isChanged = true;
-                LOG.info("add new disk info. backendId: {}, rootPath: {}", id, rootPath);
+                LOG.info("add new disk info. backendId: {}, rootPath: {}", getId(), rootPath);
             }
             newDiskInfos.put(rootPath, diskInfo);
 
@@ -446,35 +264,100 @@ public class Backend implements Writable {
                 diskInfo.setStorageMedium(tDisk.getStorage_medium());
             }
 
-            if (isUsed) {
-                if (diskInfo.setState(DiskState.ONLINE)) {
-                    isChanged = true;
-                }
-            } else {
-                if (diskInfo.setState(DiskState.OFFLINE)) {
-                    isChanged = true;
+            // if the disk state is decommissioned/disable, ignore the report state from BE,
+            // because these states is set by user.
+            if (diskInfo.getState() != DiskState.DECOMMISSIONED && diskInfo.getState() != DiskState.DISABLED) {
+                if (isUsed) {
+                    if (diskInfo.setState(DiskState.ONLINE)) {
+                        isChanged = true;
+                    }
+                } else {
+                    if (diskInfo.setState(DiskState.OFFLINE)) {
+                        isChanged = true;
+                    }
                 }
             }
-            LOG.debug("update disk info. backendId: {}, diskInfo: {}", id, diskInfo.toString());
+            LOG.debug("update disk info. backendId: {}, diskInfo: {}", getId(), diskInfo.toString());
         }
 
         // remove not exist rootPath in backend
-        for (DiskInfo diskInfo : disks.values()) {
+        for (DiskInfo diskInfo : disksRef.values()) {
             String rootPath = diskInfo.getRootPath();
             if (!backendDisks.containsKey(rootPath)) {
                 removedDisks.add(diskInfo);
                 isChanged = true;
-                LOG.warn("remove not exist rootPath. backendId: {}, rootPath: {}", id, rootPath);
+                LOG.warn("remove not exist rootPath. backendId: {}, rootPath: {}", getId(), rootPath);
             }
         }
 
         if (isChanged) {
             // update disksRef
-            disksRef = ImmutableMap.copyOf(newDiskInfos);
-            Catalog.getCurrentSystemInfo().updatePathInfo(addedDisks, removedDisks);
+            disksRef = new ConcurrentHashMap<>(newDiskInfos);
+            GlobalStateMgr.getCurrentSystemInfo().updatePathInfo(addedDisks, removedDisks);
             // log disk changing
-            Catalog.getCurrentCatalog().getEditLog().logBackendStateChange(this);
+            GlobalStateMgr.getCurrentState().getEditLog().logBackendStateChange(this);
         }
+    }
+
+    public void decommissionDisk(String rootPath) throws DdlException {
+        DiskInfo diskInfo = disksRef.get(rootPath);
+        if (diskInfo == null) {
+            throw new DdlException("Disk: " + rootPath + " does not exist");
+        }
+        if (diskInfo.getState() == DiskState.DISABLED) {
+            throw new DdlException("Disk " + rootPath + " is in DISABLED state, can not decommission");
+        }
+        diskInfo.setState(DiskState.DECOMMISSIONED);
+        LOG.info("disk {} is set to DECOMMISSIONED", rootPath);
+    }
+
+    public void cancelDecommissionDisk(String rootPath) throws DdlException {
+        DiskInfo diskInfo = disksRef.get(rootPath);
+        if (diskInfo == null) {
+            throw new DdlException("Disk: " + rootPath + " does not exist");
+        }
+        if (diskInfo.getState() == DiskState.DECOMMISSIONED) {
+            diskInfo.setState(DiskState.ONLINE);
+            LOG.info("disk {} is recovered to ONLINE, previous state is DECOMMISSIONED", rootPath);
+        }
+    }
+
+    public void disableDisk(String rootPath) throws DdlException {
+        DiskInfo diskInfo = disksRef.get(rootPath);
+        if (diskInfo == null) {
+            throw new DdlException("Disk: " + rootPath + " does not exist");
+        }
+        if (diskInfo.getState() == DiskState.DECOMMISSIONED) {
+            throw new DdlException("Disk " + rootPath + " is in DECOMMISSIONED state, can not disable");
+        }
+        diskInfo.setState(DiskState.DISABLED);
+        LOG.info("disk {} is set to DISABLED", rootPath);
+    }
+
+    public void cancelDisableDisk(String rootPath) throws DdlException {
+        DiskInfo diskInfo = disksRef.get(rootPath);
+        if (diskInfo == null) {
+            throw new DdlException("Disk: " + rootPath + " does not exist");
+        }
+        if (diskInfo.getState() == DiskState.DISABLED) {
+            diskInfo.setState(DiskState.ONLINE);
+            LOG.info("disk {} is recovered to ONLINE, previous state is DISABLED", rootPath);
+        }
+    }
+
+    public void setStorageMediumForAllDisks(TStorageMedium m) {
+        for (DiskInfo diskInfo : disksRef.values()) {
+            diskInfo.setStorageMedium(m);
+        }
+    }
+
+    public BackendStatus getBackendStatus() {
+        return backendStatus;
+    }
+
+    @Override
+    public boolean isSetStoragePath() {
+        return true;
     }
 
     public static Backend read(DataInput in) throws IOException {
@@ -485,75 +368,65 @@ public class Backend implements Writable {
 
     @Override
     public void write(DataOutput out) throws IOException {
-        out.writeLong(id);
-        Text.writeString(out, host);
-        out.writeInt(heartbeatPort);
-        out.writeInt(bePort);
-        out.writeInt(httpPort);
-        out.writeInt(beRpcPort);
-        out.writeBoolean(isAlive.get());
-        out.writeBoolean(isDecommissioned.get());
-        out.writeLong(lastUpdateMs);
+        out.writeLong(getId());
+        Text.writeString(out, getHost());
+        out.writeInt(getHeartbeatPort());
+        out.writeInt(getBePort());
+        out.writeInt(getHttpPort());
+        out.writeInt(getBeRpcPort());
+        out.writeBoolean(getIsAlive().get());
+        out.writeBoolean(isDecommissioned());
+        out.writeLong(getLastUpdateMs());
 
-        out.writeLong(lastStartTime);
+        out.writeLong(getLastStartTime());
 
-        ImmutableMap<String, DiskInfo> disks = disksRef;
-        out.writeInt(disks.size());
-        for (Map.Entry<String, DiskInfo> entry : disks.entrySet()) {
+        out.writeInt(disksRef.size());
+        for (Map.Entry<String, DiskInfo> entry : disksRef.entrySet()) {
             Text.writeString(out, entry.getKey());
             entry.getValue().write(out);
         }
 
-        Text.writeString(out, ownerClusterName);
-        out.writeInt(backendState);
-        out.writeInt(decommissionType);
+        Text.writeString(out, SystemInfoService.DEFAULT_CLUSTER);
+        out.writeInt(getBackendState().ordinal());
+        out.writeInt(getDecommissionType().ordinal());
 
-        out.writeInt(brpcPort);
+        out.writeInt(getBrpcPort());
     }
 
     public void readFields(DataInput in) throws IOException {
-        id = in.readLong();
-        host = Text.readString(in);
-        heartbeatPort = in.readInt();
-        bePort = in.readInt();
-        httpPort = in.readInt();
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_31) {
-            beRpcPort = in.readInt();
-        }
-        isAlive.set(in.readBoolean());
+        setId(in.readLong());
+        setHost(Text.readString(in));
+        setHeartbeatPort(in.readInt());
+        setBePort(in.readInt());
+        setHttpPort(in.readInt());
+        setBeRpcPort(in.readInt());
+        setAlive(in.readBoolean());
+        setDecommissioned(in.readBoolean());
 
-        if (Catalog.getCurrentCatalogJournalVersion() >= 5) {
-            isDecommissioned.set(in.readBoolean());
-        }
+        setLastUpdateMs(in.readLong());
 
-        lastUpdateMs = in.readLong();
+        setLastStartTime(in.readLong());
 
-        if (Catalog.getCurrentCatalogJournalVersion() >= 2) {
-            lastStartTime = in.readLong();
-
-            Map<String, DiskInfo> disks = Maps.newHashMap();
-            int size = in.readInt();
-            for (int i = 0; i < size; i++) {
-                String rootPath = Text.readString(in);
-                DiskInfo diskInfo = DiskInfo.read(in);
-                disks.put(rootPath, diskInfo);
-            }
-
-            disksRef = ImmutableMap.copyOf(disks);
-        }
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_30) {
-            ownerClusterName = Text.readString(in);
-            backendState = in.readInt();
-            decommissionType = in.readInt();
-        } else {
-            ownerClusterName = SystemInfoService.DEFAULT_CLUSTER;
-            backendState = BackendState.using.ordinal();
-            decommissionType = DecommissionType.SystemDecommission.ordinal();
+        Map<String, DiskInfo> disks = Maps.newHashMap();
+        int size = in.readInt();
+        for (int i = 0; i < size; i++) {
+            String rootPath = Text.readString(in);
+            DiskInfo diskInfo = DiskInfo.read(in);
+            disks.put(rootPath, diskInfo);
         }
 
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_40) {
-            brpcPort = in.readInt();
-        }
+        disksRef = new ConcurrentHashMap<>(disks);
+        // ignore clusterName
+        Text.readString(in);
+        setBackendState(in.readInt());
+        setDecommissionType(in.readInt());
+
+        setBrpcPort(in.readInt());
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hashCode(getId());
     }
 
     @Override
@@ -567,99 +440,15 @@ public class Backend implements Writable {
 
         Backend backend = (Backend) obj;
 
-        return (id == backend.id) && (host.equals(backend.host)) && (heartbeatPort == backend.heartbeatPort)
-                && (bePort == backend.bePort) && (isAlive.get() == backend.isAlive.get());
+        return (getId() == backend.getId()) && (getHost().equals(backend.getHost()))
+                && (getHeartbeatPort() == backend.getHeartbeatPort())
+                && (getBePort() == backend.getBePort()) && (getIsAlive().get() == backend.getIsAlive().get());
     }
 
     @Override
     public String toString() {
-        return "Backend [id=" + id + ", host=" + host + ", heartbeatPort=" + heartbeatPort + ", alive=" +
-                isAlive.get() + "]";
-    }
-
-    public String getOwnerClusterName() {
-        return ownerClusterName;
-    }
-
-    public void setOwnerClusterName(String name) {
-        ownerClusterName = name;
-    }
-
-    public void clearClusterName() {
-        ownerClusterName = "";
-    }
-
-    public BackendState getBackendState() {
-        switch (backendState) {
-            case 0:
-                return BackendState.using;
-            case 1:
-                return BackendState.offline;
-            default:
-                return BackendState.free;
-        }
-    }
-
-    public void setDecommissionType(DecommissionType type) {
-        decommissionType = type.ordinal();
-    }
-
-    public DecommissionType getDecommissionType() {
-        if (decommissionType == DecommissionType.ClusterDecommission.ordinal()) {
-            return DecommissionType.ClusterDecommission;
-        }
-        return DecommissionType.SystemDecommission;
-    }
-
-    /**
-     * handle Backend's heartbeat response.
-     * return true if any port changed, or alive state is changed.
-     */
-    public boolean handleHbResponse(BackendHbResponse hbResponse) {
-        boolean isChanged = false;
-        if (hbResponse.getStatus() == HbStatus.OK) {
-            if (!this.version.equals(hbResponse.getVersion())) {
-                isChanged = true;
-                this.version = hbResponse.getVersion();
-            }
-
-            if (this.bePort != hbResponse.getBePort()) {
-                isChanged = true;
-                this.bePort = hbResponse.getBePort();
-            }
-
-            if (this.httpPort != hbResponse.getHttpPort()) {
-                isChanged = true;
-                this.httpPort = hbResponse.getHttpPort();
-            }
-
-            if (this.brpcPort != hbResponse.getBrpcPort()) {
-                isChanged = true;
-                this.brpcPort = hbResponse.getBrpcPort();
-            }
-
-            this.lastUpdateMs = hbResponse.getHbTime();
-            if (!isAlive.get()) {
-                isChanged = true;
-                this.lastStartTime = hbResponse.getHbTime();
-                LOG.info("{} is alive, last start time: {}", this.toString(), hbResponse.getHbTime());
-                this.isAlive.set(true);
-            } else if (this.lastStartTime <= 0) {
-                this.lastStartTime = hbResponse.getHbTime();
-            }
-
-            heartbeatErrMsg = "";
-        } else {
-            if (isAlive.compareAndSet(true, false)) {
-                isChanged = true;
-                LOG.info("{} is dead,", this.toString());
-            }
-
-            heartbeatErrMsg = hbResponse.getMsg() == null ? "Unknown error" : hbResponse.getMsg();
-            lastMissingHeartbeatTime = System.currentTimeMillis();
-        }
-
-        return isChanged;
+        return "Backend [id=" + getId() + ", host=" + getHost() + ", heartbeatPort=" + getHeartbeatPort()
+                + ", alive=" + getIsAlive().get() + "]";
     }
 
     public void setTabletMaxCompactionScore(long compactionScore) {
@@ -674,8 +463,45 @@ public class Backend implements Writable {
         return disksRef.values().stream().filter(v -> v.getStorageMedium() == storageMedium).count();
     }
 
+    public int getAvailableBackendStorageTypeCnt() {
+        if (!getIsAlive().get()) {
+            return 0;
+        }
+        ImmutableMap<String, DiskInfo> disks = this.getDisks();
+        Set<TStorageMedium> set = Sets.newHashSet();
+        for (DiskInfo diskInfo : disks.values()) {
+            if (diskInfo.canCreateTablet()) {
+                set.add(diskInfo.getStorageMedium());
+            }
+        }
+        return set.size();
+    }
+
     private int getDiskNum() {
         return disksRef.size();
+    }
+
+    public List<String> getDisabledDisks() {
+        return disksRef.values()
+                .stream()
+                .filter(diskInfo -> diskInfo.getState() == DiskState.DISABLED)
+                .map(DiskInfo::getRootPath)
+                .collect(Collectors.toList());
+    }
+
+    public List<String> getDecommissionedDisks() {
+        return disksRef.values()
+                .stream()
+                .filter(diskInfo -> diskInfo.getState() == DiskState.DECOMMISSIONED)
+                .map(DiskInfo::getRootPath)
+                .collect(Collectors.toList());
+    }
+
+    public boolean isDiskDecommissioned(long pathHash) {
+        return disksRef.values()
+                .stream()
+                .anyMatch(diskInfo -> (pathHash == diskInfo.getPathHash())
+                        && diskInfo.getState() == DiskState.DECOMMISSIONED);
     }
 
     /**
@@ -685,7 +511,7 @@ public class Backend implements Writable {
      * BackendStatus status = Backend.getBackendStatus();
      * status.newItem = xxx;
      */
-    public class BackendStatus {
+    public static class BackendStatus {
         // this will be output as json, so not using FeConstants.null_string;
         public String lastSuccessReportTabletsTime = "N/A";
     }

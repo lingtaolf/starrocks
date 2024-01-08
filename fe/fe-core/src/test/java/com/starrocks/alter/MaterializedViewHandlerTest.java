@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/alter/MaterializedViewHandlerTest.java
 
@@ -21,9 +34,8 @@
 
 package com.starrocks.alter;
 
+import com.google.api.client.util.Sets;
 import com.google.common.collect.Lists;
-import com.starrocks.analysis.CreateMaterializedViewStmt;
-import com.starrocks.analysis.MVColumnItem;
 import com.starrocks.catalog.AggregateType;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
@@ -33,6 +45,8 @@ import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Type;
 import com.starrocks.common.jmockit.Deencapsulation;
+import com.starrocks.sql.ast.CreateMaterializedViewStmt;
+import com.starrocks.sql.ast.MVColumnItem;
 import mockit.Expectations;
 import mockit.Injectable;
 import org.junit.Assert;
@@ -133,7 +147,7 @@ public class MaterializedViewHandlerTest {
                 result = OlapTable.OlapTableState.NORMAL;
                 olapTable.getIndexIdByName(baseIndexName);
                 result = baseIndexId;
-                olapTable.getPartitions();
+                olapTable.getPhysicalPartitions();
                 result = Lists.newArrayList(partition);
                 partition.getIndex(baseIndexId);
                 result = materializedIndex;
@@ -177,9 +191,9 @@ public class MaterializedViewHandlerTest {
     public void testInvalidAggregateType(@Injectable CreateMaterializedViewStmt createMaterializedViewStmt,
                                          @Injectable OlapTable olapTable, @Injectable Database db) {
         final String mvName = "mv1";
-        final String columnName = "mv_k1";
-        Column baseColumn = new Column(columnName, Type.INT, false, AggregateType.SUM, "", "");
-        MVColumnItem mvColumnItem = new MVColumnItem(columnName, Type.BIGINT);
+        final String mvColumName = "mv_sum_k1";
+        MVColumnItem mvColumnItem = new MVColumnItem(mvColumName, Type.BIGINT, AggregateType.SUM, false, null, true,
+                Sets.newHashSet());
         mvColumnItem.setIsKey(true);
         mvColumnItem.setAggregationType(null, false);
         new Expectations() {
@@ -192,8 +206,6 @@ public class MaterializedViewHandlerTest {
                 result = Lists.newArrayList(mvColumnItem);
                 createMaterializedViewStmt.getMVKeysType();
                 result = KeysType.AGG_KEYS;
-                olapTable.getColumn(columnName);
-                result = baseColumn;
                 olapTable.getKeysType();
                 result = KeysType.AGG_KEYS;
             }
@@ -236,7 +248,9 @@ public class MaterializedViewHandlerTest {
         final String mvName = "mv1";
         final String columnName1 = "k1";
         Column baseColumn1 = new Column(columnName1, Type.VARCHAR, false, AggregateType.NONE, "", "");
-        MVColumnItem mvColumnItem = new MVColumnItem(columnName1, Type.VARCHAR);
+        MVColumnItem mvColumnItem = new MVColumnItem(columnName1, Type.VARCHAR, AggregateType.NONE, false, null, true,
+                Sets.newHashSet());
+
         mvColumnItem.setIsKey(true);
         mvColumnItem.setAggregationType(null, false);
         new Expectations() {
@@ -275,8 +289,7 @@ public class MaterializedViewHandlerTest {
                                            @Injectable OlapTable olapTable, @Injectable Database db) {
         final String mvName = "mv1";
         final String columnName1 = "k1";
-        Column baseColumn1 = new Column(columnName1, Type.VARCHAR, true, null, "", "");
-        MVColumnItem mvColumnItem = new MVColumnItem(columnName1, Type.VARCHAR);
+        MVColumnItem mvColumnItem = new MVColumnItem(columnName1, Type.BIGINT, null, false, null, true, Sets.newHashSet());
         mvColumnItem.setIsKey(false);
         mvColumnItem.setAggregationType(AggregateType.SUM, false);
         List<String> partitionColumnNames = Lists.newArrayList();
@@ -322,7 +335,7 @@ public class MaterializedViewHandlerTest {
                 result = 1L;
                 olapTable.getSchemaHashByIndexId(1L);
                 result = 1;
-                olapTable.getPartitions();
+                olapTable.getPhysicalPartitions();
                 result = Lists.newArrayList(partition);
                 partition.getIndex(1L);
                 result = materializedIndex;

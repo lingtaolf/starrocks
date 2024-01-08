@@ -1,11 +1,23 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "formats/csv/array_converter.h"
 
 #include "column/array_column.h"
 #include "common/logging.h"
 
-namespace starrocks::vectorized::csv {
+namespace starrocks::csv {
 
 Status ArrayConverter::write_string(OutputStream* os, const Column& column, size_t row_num,
                                     const Options& options) const {
@@ -31,30 +43,33 @@ Status ArrayConverter::write_quoted_string(OutputStream* os, const Column& colum
     return write_string(os, column, row_num, options);
 }
 
-bool ArrayConverter::read_string(Column* column, Slice s, const Options& options) const {
-    if (s.size < 2) {
+bool ArrayConverter::read_string(Column* column, const Slice& s, const Options& options) const {
+    if (_array_reader == nullptr) {
+        _array_reader = ArrayReader::create_array_reader(options);
+    }
+
+    if (!_array_reader->validate(s)) {
         return false;
     }
-    if (s[0] != '[' || s[s.size - 1] != ']') {
-        return false;
-    }
-    s.remove_prefix(1);
-    s.remove_suffix(1);
 
     auto* array = down_cast<ArrayColumn*>(column);
     auto* offsets = array->offsets_column().get();
     auto* elements = array->elements_column().get();
 
     std::vector<Slice> fields;
-    if (!s.empty() && !_split_array_elements(s, &fields)) {
+    if (!s.empty() && !_array_reader->split_array_elements(s, fields)) {
         return false;
     }
     size_t old_size = elements->size();
     Options sub_options = options;
-    sub_options.invalid_field_as_null = false;
+    if (options.array_format_type != ArrayFormatType::kHive) {
+        // For broker load, invalid_field_as_null is always false for array's element
+        sub_options.invalid_field_as_null = false;
+    }
+    sub_options.array_hive_nested_level++;
     DCHECK_EQ(old_size, offsets->get_data().back());
     for (const auto& f : fields) {
-        if (!_element_converter->read_quoted_string(elements, f, sub_options)) {
+        if (!_array_reader->read_quoted_string(_element_converter, elements, f, sub_options)) {
             elements->resize(old_size);
             return false;
         }
@@ -63,32 +78,8 @@ bool ArrayConverter::read_string(Column* column, Slice s, const Options& options
     return true;
 }
 
-bool ArrayConverter::read_quoted_string(Column* column, Slice s, const Options& options) const {
+bool ArrayConverter::read_quoted_string(Column* column, const Slice& s, const Options& options) const {
     return read_string(column, s, options);
 }
 
-bool ArrayConverter::_split_array_elements(Slice s, std::vector<Slice>* elements) const {
-    bool in_quote = false;
-    int array_nest_level = 0;
-    elements->push_back(s);
-    for (size_t i = 0; i < s.size; i++) {
-        char c = s[i];
-        // TODO(zhuming): handle escaped double quotes
-        if (c == '"') {
-            in_quote = !in_quote;
-        } else if (!in_quote && c == '[') {
-            array_nest_level++;
-        } else if (!in_quote && c == ']') {
-            array_nest_level--;
-        } else if (!in_quote && array_nest_level == 0 && c == ',') {
-            elements->back().remove_suffix(s.size - i);
-            elements->push_back(Slice(s.data + i + 1, s.size - i - 1));
-        }
-    }
-    if (array_nest_level != 0 || in_quote) {
-        return false;
-    }
-    return true;
-}
-
-} // namespace starrocks::vectorized::csv
+} // namespace starrocks::csv

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/persist/FsBrokerTest.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -22,12 +18,10 @@
 package com.starrocks.persist;
 
 import com.starrocks.catalog.FsBroker;
-import com.starrocks.common.FeMetaVersion;
-import com.starrocks.meta.MetaContext;
 import com.starrocks.system.BrokerHbResponse;
+import com.starrocks.system.HeartbeatResponse;
 import org.junit.AfterClass;
 import org.junit.Assert;
-import org.junit.BeforeClass;
 import org.junit.Test;
 
 import java.io.DataInputStream;
@@ -41,13 +35,6 @@ public class FsBrokerTest {
     private static String fileName1 = "./FsBrokerTest1";
     private static String fileName2 = "./FsBrokerTest2";
 
-    @BeforeClass
-    public static void setup() {
-        MetaContext context = new MetaContext();
-        context.setMetaVersion(FeMetaVersion.VERSION_73);
-        context.setThreadLocalInfo();
-    }
-
     @AfterClass
     public static void tear() {
         new File(fileName1).delete();
@@ -55,7 +42,7 @@ public class FsBrokerTest {
     }
 
     @Test
-    public void testHearbeatOk() throws Exception {
+    public void testHeartbeatOk() throws Exception {
         // 1. Write objects to file
         File file = new File(fileName1);
         file.createNewFile();
@@ -64,7 +51,7 @@ public class FsBrokerTest {
         FsBroker fsBroker = new FsBroker("127.0.0.1", 8118);
         long time = System.currentTimeMillis();
         BrokerHbResponse hbResponse = new BrokerHbResponse("broker", "127.0.0.1", 8118, time);
-        fsBroker.handleHbResponse(hbResponse);
+        fsBroker.handleHbResponse(hbResponse, false);
         fsBroker.write(dos);
         dos.flush();
         dos.close();
@@ -92,7 +79,7 @@ public class FsBrokerTest {
         FsBroker fsBroker = new FsBroker("127.0.0.1", 8118);
         long time = System.currentTimeMillis();
         BrokerHbResponse hbResponse = new BrokerHbResponse("broker", "127.0.0.1", 8118, "got exception");
-        fsBroker.handleHbResponse(hbResponse);
+        fsBroker.handleHbResponse(hbResponse, false);
         fsBroker.write(dos);
         dos.flush();
         dos.close();
@@ -108,5 +95,20 @@ public class FsBrokerTest {
         Assert.assertEquals(-1, readBroker.lastStartTime);
         Assert.assertEquals(-1, readBroker.lastUpdateTime);
         dis.close();
+    }
+
+    @Test
+    public void testBrokerAlive() throws Exception {
+
+        FsBroker fsBroker = new FsBroker("127.0.0.1", 8118);
+        long time = System.currentTimeMillis();
+        BrokerHbResponse hbResponse = new BrokerHbResponse("broker", "127.0.0.1", 8118, "got exception");
+
+        hbResponse.aliveStatus = HeartbeatResponse.AliveStatus.ALIVE;
+        fsBroker.handleHbResponse(hbResponse, true);
+        Assert.assertTrue(fsBroker.isAlive);
+        hbResponse.aliveStatus = HeartbeatResponse.AliveStatus.NOT_ALIVE;
+        fsBroker.handleHbResponse(hbResponse, true);
+        Assert.assertFalse(fsBroker.isAlive);
     }
 }

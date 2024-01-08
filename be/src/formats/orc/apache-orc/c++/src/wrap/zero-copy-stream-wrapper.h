@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/wrap/zero-copy-stream-wrapper.h
-
 /*
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +12,7 @@
  * limitations under the License.
  */
 
-#ifndef ZERO_COPY_STREAM_WRAPPER_HH
-#define ZERO_COPY_STREAM_WRAPPER_HH
+#pragma once
 
 #include "Adaptor.hh"
 
@@ -36,5 +31,3 @@ DIAGNOSTIC_IGNORE("-Wreserved-id-macro")
 #include <google/protobuf/io/zero_copy_stream.h>
 
 DIAGNOSTIC_POP
-
-#endif

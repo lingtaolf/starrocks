@@ -30,21 +30,34 @@ usage() {
   echo "
 Usage: $0 <options>
   Optional options:
-     --clean    clean and build ut
-     --run    build and run ut
+     --test [TEST_NAME]         run specific test
+     --filter [TEST_NAME]       skip run specific test,
+                                multiple tests separated by commas and enclosed in quotation marks
+     --dry-run                  dry-run unit tests
+     --coverage                 run coverage statistic tasks
+     --dumpcase [PATH]          run dump case and save to path
 
   Eg.
-    $0                      build and run ut
-    $0 --coverage           build and run coverage statistic
-    $0 --run xxx            build and run the specified class
+    $0                                            run all unit tests
+    $0 --test com.starrocks.utframe.Demo          run demo test
+    $0 --filter com.starrocks.utframe.Demo#Test0  skip run demo test0
+    $0 --dry-run                                  dry-run unit tests
+    $0 --coverage                                 run coverage statistic tasks
+    $0 --dumpcase /home/disk1/                    run dump case and save to path
   "
   exit 1
 }
 
+# -l run only used for compatibility
 OPTS=$(getopt \
   -n $0 \
   -o '' \
+  -l 'test:' \
+  -l 'filter:' \
+  -l 'dry-run' \
   -l 'coverage' \
+  -l 'dumpcase' \
+  -l 'help' \
   -l 'run' \
   -- "$@")
 
@@ -54,30 +67,35 @@ fi
 
 eval set -- "$OPTS"
 
-RUN=
-COVERAGE=
-if [ $# == 1 ] ; then
-    #default
-    RUN=0
-    COVERAGE=0
-else
-    RUN=0
-    COVERAGE=0
-    while true; do 
-        case "$1" in
-            --coverage) COVERAGE=1 ; shift ;;
-            --run) RUN=1 ; shift ;;
-            --) shift ;  break ;;
-            *) ehco "Internal error" ; exit 1 ;;
-        esac
-    done
+HELP=0
+DRY_RUN=0
+RUN_SPECIFIED_TEST=0
+TEST_NAME=*
+FILTER_TEST=""
+COVERAGE=0
+DUMPCASE=0
+while true; do
+    case "$1" in
+        --coverage) COVERAGE=1 ; shift ;;
+        --test) RUN_SPECIFIED_TEST=1; TEST_NAME=$2; shift 2;;
+        --filter) FILTER_TEST=$2; shift 2;;
+        --run) shift ;; # only used for compatibility
+        --dumpcase) DUMPCASE=1; shift ;;
+        --dry-run) DRY_RUN=1 ; shift ;;
+        --help) HELP=1 ; shift ;;
+        --) shift ;  break ;;
+        *) echo "Internal error" ; exit 1 ;;
+    esac
+done
+
+if [ ${HELP} -eq 1 ]; then
+    usage
+    exit 0
 fi
 
-echo "Build Frontend UT"
-
-echo "******************************"
-echo "    Runing StarRocksFE Unittest    "
-echo "******************************"
+echo "*********************************"
+echo "  Starting to Run FE Unit Tests  "
+echo "*********************************"
 
 cd ${STARROCKS_HOME}/fe/
 mkdir -p build/compile
@@ -98,18 +116,33 @@ fi
 
 mkdir ut_ports
 
+if [[ ${DUMPCASE} -ne 1 ]]; then
+    DUMP_FILTER_TEST="com.starrocks.sql.dump.QueryDumpRegressionTest,com.starrocks.sql.dump.QueryDumpCaseRewriter"
+
+    if [[ $FILTER_TEST != "" ]];then
+        FILTER_TEST="${FILTER_TEST},${DUMP_FILTER_TEST}"
+    else
+        FILTER_TEST="${DUMP_FILTER_TEST}"
+    fi
+
+    FILTER_TEST=`echo $FILTER_TEST | sed -E 's/([^,]+)/!\1/g'`
+    TEST_NAME="$TEST_NAME,$FILTER_TEST"
+fi
+
 if [ ${COVERAGE} -eq 1 ]; then
-    echo "Run coverage statistic"
+    echo "Run coverage statistic tasks"
     ant cover-test
+elif [ ${DUMPCASE} -eq 1 ]; then
+    ${MVN_CMD} test -DfailIfNoTests=false -DtrimStackTrace=false -D test=com.starrocks.sql.dump.QueryDumpRegressionTest -D dumpJsonConfig=$1
 else
-    if [ ${RUN} -eq 1 ]; then
-        echo "Run the specified class: $1"
-        # eg:
-        # sh run-fe-ut.sh --run com.starrocks.utframe.Demo
-        # sh run-fe-ut.sh --run com.starrocks.utframe.Demo#testCreateDbAndTable+test2
-        ${MVN_CMD} test -DfailIfNoTests=false -D test=$1
-    else    
-        echo "Run Frontend UT"
-        ${MVN_CMD} test -DfailIfNoTests=false 
-    fi 
+    if [ $DRY_RUN -eq 0 ]; then
+        if [ ${RUN_SPECIFIED_TEST} -eq 1 ]; then
+            echo "Run test: $TEST_NAME"
+        else
+            echo "Run All Frontend Unittests"
+        fi
+
+        # set trimStackTrace to false to show full stack when debugging specified class or case
+        ${MVN_CMD} test -DfailIfNoTests=false -DtrimStackTrace=false -D test="$TEST_NAME"
+    fi
 fi

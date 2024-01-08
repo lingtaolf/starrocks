@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/sargs/ExpressionTree.cc
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -38,18 +34,18 @@ ExpressionTree::ExpressionTree(Operator op, std::initializer_list<TreeNode> chil
 }
 
 ExpressionTree::ExpressionTree(size_t leaf)
-        : mOperator(Operator::LEAF), mChildren(), mLeaf(leaf), mConstant(TruthValue::YES_NO_NULL) {
+        : mOperator(Operator::LEAF), mLeaf(leaf), mConstant(TruthValue::YES_NO_NULL) {
     // PASS
 }
 
 ExpressionTree::ExpressionTree(TruthValue constant)
-        : mOperator(Operator::CONSTANT), mChildren(), mLeaf(UNUSED_LEAF), mConstant(constant) {
+        : mOperator(Operator::CONSTANT), mLeaf(UNUSED_LEAF), mConstant(constant) {
     // PASS
 }
 
 ExpressionTree::ExpressionTree(const ExpressionTree& other)
         : mOperator(other.mOperator), mLeaf(other.mLeaf), mConstant(other.mConstant) {
-    for (TreeNode child : other.mChildren) {
+    for (const TreeNode& child : other.mChildren) {
         mChildren.emplace_back(std::make_shared<ExpressionTree>(*child));
     }
 }
@@ -89,7 +85,7 @@ void ExpressionTree::setLeaf(size_t leaf) {
     mLeaf = leaf;
 }
 
-void ExpressionTree::addChild(TreeNode child) {
+void ExpressionTree::addChild(const TreeNode& child) {
     mChildren.push_back(child);
 }
 

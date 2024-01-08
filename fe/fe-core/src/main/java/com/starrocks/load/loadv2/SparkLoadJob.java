@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/load/loadv2/SparkLoadJob.java
 
@@ -31,14 +44,13 @@ import com.starrocks.analysis.BrokerDesc;
 import com.starrocks.analysis.CastExpr;
 import com.starrocks.analysis.DescriptorTable;
 import com.starrocks.analysis.Expr;
-import com.starrocks.analysis.ResourceDesc;
 import com.starrocks.analysis.SlotDescriptor;
 import com.starrocks.analysis.SlotRef;
 import com.starrocks.analysis.TupleDescriptor;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.FsBroker;
+import com.starrocks.catalog.LocalTablet;
 import com.starrocks.catalog.MaterializedIndex;
 import com.starrocks.catalog.MaterializedIndex.IndexExtState;
 import com.starrocks.catalog.OlapTable;
@@ -55,7 +67,6 @@ import com.starrocks.common.Config;
 import com.starrocks.common.DataQualityException;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.DuplicatedRequestException;
-import com.starrocks.common.FeMetaVersion;
 import com.starrocks.common.LabelAlreadyUsedException;
 import com.starrocks.common.LoadException;
 import com.starrocks.common.MetaNotFoundException;
@@ -64,16 +75,23 @@ import com.starrocks.common.UserException;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.util.LogBuilder;
 import com.starrocks.common.util.LogKey;
+import com.starrocks.lake.LakeTablet;
 import com.starrocks.load.EtlJobType;
 import com.starrocks.load.EtlStatus;
 import com.starrocks.load.FailMsg;
 import com.starrocks.load.loadv2.dpp.DppResult;
 import com.starrocks.load.loadv2.etl.EtlJobConfig;
+import com.starrocks.meta.lock.LockType;
+import com.starrocks.meta.lock.Locker;
 import com.starrocks.metric.TableMetricsEntity;
 import com.starrocks.metric.TableMetricsRegistry;
 import com.starrocks.qe.OriginStatement;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.service.FrontendOptions;
+import com.starrocks.sql.ast.LoadStmt;
+import com.starrocks.sql.ast.ResourceDesc;
 import com.starrocks.system.Backend;
+import com.starrocks.system.ComputeNode;
 import com.starrocks.task.AgentBatchTask;
 import com.starrocks.task.AgentTaskExecutor;
 import com.starrocks.task.AgentTaskQueue;
@@ -81,14 +99,19 @@ import com.starrocks.task.PushTask;
 import com.starrocks.thrift.TBrokerRangeDesc;
 import com.starrocks.thrift.TBrokerScanRange;
 import com.starrocks.thrift.TBrokerScanRangeParams;
+import com.starrocks.thrift.TColumn;
 import com.starrocks.thrift.TDescriptorTable;
 import com.starrocks.thrift.TFileFormatType;
 import com.starrocks.thrift.TFileType;
+import com.starrocks.thrift.THdfsProperties;
 import com.starrocks.thrift.TNetworkAddress;
 import com.starrocks.thrift.TPriority;
 import com.starrocks.thrift.TPushType;
+import com.starrocks.thrift.TReportExecStatusParams;
+import com.starrocks.thrift.TTabletType;
 import com.starrocks.thrift.TUniqueId;
 import com.starrocks.transaction.BeginTransactionException;
+import com.starrocks.transaction.CommitRateExceededException;
 import com.starrocks.transaction.TabletCommitInfo;
 import com.starrocks.transaction.TabletQuorumFailedException;
 import com.starrocks.transaction.TransactionState;
@@ -102,9 +125,12 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+
+import static com.starrocks.catalog.Replica.ReplicaState.NORMAL;
 
 /**
  * There are 4 steps in SparkLoadJob:
@@ -118,31 +144,38 @@ public class SparkLoadJob extends BulkLoadJob {
 
     // --- members below need persist ---
     // create from resourceDesc when job created
+    @SerializedName("spkr")
     private SparkResource sparkResource;
     // members below updated when job state changed to etl
+    @SerializedName("etlt")
     private long etlStartTimestamp = -1;
     // for spark yarn
+    @SerializedName("appi")
     private String appId = "";
     // spark job outputPath
+    @SerializedName("etlo")
     private String etlOutputPath = "";
     // members below updated when job state changed to loading
     // { tableId.partitionId.indexId.bucket.schemaHash -> (etlFilePath, etlFileSize) }
+    @SerializedName("tbtm")
     private Map<String, Pair<String, Long>> tabletMetaToFileInfo = Maps.newHashMap();
+    @SerializedName("spkh")
+    private SparkLoadAppHandle sparkLoadAppHandle = new SparkLoadAppHandle();
 
     // --- members below not persist ---
     private ResourceDesc resourceDesc;
-    // for spark standalone
-    private SparkLoadAppHandle sparkLoadAppHandle = new SparkLoadAppHandle();
     // for straggler wait long time to commit transaction
     private long quorumFinishTimestamp = -1;
+    // spark load wait yarn response timeout
+    protected long sparkLoadSubmitTimeoutSecond = Config.spark_load_submit_timeout_second;
     // below for push task
-    private Map<Long, Set<Long>> tableToLoadPartitions = Maps.newHashMap();
-    private Map<Long, PushBrokerReaderParams> indexToPushBrokerReaderParams = Maps.newHashMap();
-    private Map<Long, Integer> indexToSchemaHash = Maps.newHashMap();
-    private Map<Long, Map<Long, PushTask>> tabletToSentReplicaPushTask = Maps.newHashMap();
-    private Set<Long> finishedReplicas = Sets.newHashSet();
-    private Set<Long> quorumTablets = Sets.newHashSet();
-    private Set<Long> fullTablets = Sets.newHashSet();
+    private final Map<Long, Set<Long>> tableToLoadPartitions = Maps.newHashMap();
+    private final Map<Long, PushBrokerReaderParams> indexToPushBrokerReaderParams = Maps.newHashMap();
+    private final Map<Long, Integer> indexToSchemaHash = Maps.newHashMap();
+    private final Map<Long, Map<Long, PushTask>> tabletToSentReplicaPushTask = Maps.newHashMap();
+    private final Set<Long> finishedReplicas = Sets.newHashSet();
+    private final Set<Long> quorumTablets = Sets.newHashSet();
+    private final Set<Long> fullTablets = Sets.newHashSet();
 
     // only for log replay
     public SparkLoadJob() {
@@ -162,19 +195,25 @@ public class SparkLoadJob extends BulkLoadJob {
     protected void setJobProperties(Map<String, String> properties) throws DdlException {
         super.setJobProperties(properties);
 
+        if (properties.containsKey(LoadStmt.SPARK_LOAD_SUBMIT_TIMEOUT)) {
+            try {
+                sparkLoadSubmitTimeoutSecond = Long.parseLong(properties.get(LoadStmt.SPARK_LOAD_SUBMIT_TIMEOUT));
+            } catch (NumberFormatException e) {
+                throw new DdlException("spark_load_submit_timeout is not LONG", e);
+            }
+        }
+
         // set spark resource and broker desc
         setResourceInfo();
     }
 
     /**
      * merge system conf with load stmt
-     *
-     * @throws DdlException
      */
     private void setResourceInfo() throws DdlException {
         // spark resource
         String resourceName = resourceDesc.getName();
-        Resource oriResource = Catalog.getCurrentCatalog().getResourceMgr().getResource(resourceName);
+        Resource oriResource = GlobalStateMgr.getCurrentState().getResourceMgr().getResource(resourceName);
         if (oriResource == null) {
             throw new DdlException("Resource does not exist. name: " + resourceName);
         }
@@ -183,13 +222,17 @@ public class SparkLoadJob extends BulkLoadJob {
 
         // broker desc
         Map<String, String> brokerProperties = sparkResource.getBrokerPropertiesWithoutPrefix();
-        brokerDesc = new BrokerDesc(sparkResource.getBroker(), brokerProperties);
+        if (sparkResource.hasBroker()) {
+            brokerDesc = new BrokerDesc(sparkResource.getBroker(), brokerProperties);
+        } else {
+            brokerDesc = new BrokerDesc(brokerProperties);
+        }
     }
 
     @Override
     public void beginTxn()
             throws LabelAlreadyUsedException, BeginTransactionException, AnalysisException, DuplicatedRequestException {
-        transactionId = Catalog.getCurrentGlobalTransactionMgr()
+        transactionId = GlobalStateMgr.getCurrentGlobalTransactionMgr()
                 .beginTransaction(dbId, Lists.newArrayList(fileGroupAggInfo.getAllTableIds()), label, null,
                         new TxnCoordinator(TxnSourceType.FE, FrontendOptions.getLocalHostAddress()),
                         LoadJobSourceType.FRONTEND, id, timeoutSecond);
@@ -202,7 +245,7 @@ public class SparkLoadJob extends BulkLoadJob {
                 sparkResource, brokerDesc);
         task.init();
         idToTasks.put(task.getSignature(), task);
-        submitTask(Catalog.getCurrentCatalog().getPendingLoadTaskScheduler(), task);
+        submitTask(GlobalStateMgr.getCurrentState().getPendingLoadTaskScheduler(), task);
     }
 
     @Override
@@ -260,10 +303,7 @@ public class SparkLoadJob extends BulkLoadJob {
     private boolean checkState(JobState expectState) {
         readLock();
         try {
-            if (state == expectState) {
-                return true;
-            }
-            return false;
+            return state == expectState;
         } finally {
             readUnlock();
         }
@@ -322,12 +362,16 @@ public class SparkLoadJob extends BulkLoadJob {
         if (dppResult != null) {
             // update load statistic and counters when spark etl job finished
             // fe gets these infos from spark dpp, so we use dummy load id and dummy backend id here
-            loadStatistic.fileNum = (int) dppResult.fileNumber;
-            loadStatistic.totalFileSizeB = dppResult.fileSize;
+            loadingStatus.setLoadFileInfo((int) dppResult.fileNumber, dppResult.fileSize);
             TUniqueId dummyId = new TUniqueId(0, 0);
             long dummyBackendId = -1L;
-            loadStatistic.initLoad(dummyId, Sets.newHashSet(dummyId), Lists.newArrayList(dummyBackendId));
-            loadStatistic.updateLoadProgress(dummyBackendId, dummyId, dummyId, dppResult.scannedRows, true);
+            loadingStatus.getLoadStatistic()
+                    .initLoad(dummyId, Sets.newHashSet(dummyId), Lists.newArrayList(dummyBackendId));
+            TReportExecStatusParams params = new TReportExecStatusParams();
+            params.setDone(true);
+            params.setSource_load_rows(dppResult.scannedRows);
+            loadingStatus.getLoadStatistic()
+                    .updateLoadProgress(params);
 
             Map<String, String> counters = loadingStatus.getCounters();
             counters.put(DPP_NORMAL_ALL, String.valueOf(dppResult.normalRows));
@@ -414,7 +458,7 @@ public class SparkLoadJob extends BulkLoadJob {
 
     private Set<Long> submitPushTasks() throws UserException {
         // check db exist
-        Database db = null;
+        Database db;
         try {
             db = getDb();
         } catch (MetaNotFoundException e) {
@@ -429,7 +473,8 @@ public class SparkLoadJob extends BulkLoadJob {
         AgentBatchTask batchTask = new AgentBatchTask();
         boolean hasLoadPartitions = false;
         Set<Long> totalTablets = Sets.newHashSet();
-        db.readLock();
+        Locker locker = new Locker();
+        locker.lockDatabase(db, LockType.READ);
         try {
             writeLock();
             try {
@@ -458,12 +503,17 @@ public class SparkLoadJob extends BulkLoadJob {
                         }
 
                         hasLoadPartitions = true;
-                        int quorumReplicaNum = table.getPartitionInfo().getQuorumNum(partitionId);
+                        int quorumReplicaNum = table.getPartitionInfo().getQuorumNum(partitionId, table.writeQuorum());
 
                         List<MaterializedIndex> indexes = partition.getMaterializedIndices(IndexExtState.ALL);
                         for (MaterializedIndex index : indexes) {
                             long indexId = index.getId();
                             int schemaHash = indexToSchemaHash.get(indexId);
+
+                            List<TColumn> columnsDesc = new ArrayList<TColumn>();
+                            for (Column column : table.getSchemaByIndexId(indexId)) {
+                                columnsDesc.add(column.toThrift());
+                            }
 
                             int bucket = 0;
                             for (Tablet tablet : index.getTablets()) {
@@ -471,73 +521,55 @@ public class SparkLoadJob extends BulkLoadJob {
                                 totalTablets.add(tabletId);
                                 String tabletMetaStr = String.format("%d.%d.%d.%d.%d", tableId, partitionId,
                                         indexId, bucket++, schemaHash);
-                                Set<Long> tabletAllReplicas = Sets.newHashSet();
+
                                 Set<Long> tabletFinishedReplicas = Sets.newHashSet();
-                                for (Replica replica : tablet.getReplicas()) {
-                                    long replicaId = replica.getId();
-                                    tabletAllReplicas.add(replicaId);
-                                    if (!tabletToSentReplicaPushTask.containsKey(tabletId)
-                                            || !tabletToSentReplicaPushTask.get(tabletId).containsKey(replicaId)) {
+                                Set<Long> tabletAllReplicas = Sets.newHashSet();
+                                PushBrokerReaderParams params = getPushBrokerReaderParams(table, indexId);
+
+                                if (tablet instanceof LocalTablet) {
+                                    for (Replica replica : ((LocalTablet) tablet).getImmutableReplicas()) {
+                                        long replicaId = replica.getId();
+                                        tabletAllReplicas.add(replicaId);
                                         long backendId = replica.getBackendId();
-                                        long taskSignature = Catalog.getCurrentGlobalTransactionMgr()
-                                                .getTransactionIDGenerator().getNextTransactionId();
-
-                                        PushBrokerReaderParams params = getPushBrokerReaderParams(table, indexId);
-                                        // deep copy TBrokerScanRange because filePath and fileSize will be updated
-                                        // in different tablet push task
-                                        TBrokerScanRange tBrokerScanRange =
-                                                new TBrokerScanRange(params.tBrokerScanRange);
-                                        // update filePath fileSize
-                                        TBrokerRangeDesc tBrokerRangeDesc = tBrokerScanRange.getRanges().get(0);
-                                        tBrokerRangeDesc.setPath("");
-                                        tBrokerRangeDesc.setFile_size(-1);
-                                        if (tabletMetaToFileInfo.containsKey(tabletMetaStr)) {
-                                            Pair<String, Long> fileInfo = tabletMetaToFileInfo.get(tabletMetaStr);
-                                            tBrokerRangeDesc.setPath(fileInfo.first);
-                                            tBrokerRangeDesc.setFile_size(fileInfo.second);
-                                        }
-
-                                        // update broker address
-                                        Backend backend = Catalog.getCurrentCatalog().getCurrentSystemInfo()
+                                        Backend backend = GlobalStateMgr.getCurrentSystemInfo()
                                                 .getBackend(backendId);
-                                        FsBroker fsBroker = Catalog.getCurrentCatalog().getBrokerMgr().getBroker(
-                                                brokerDesc.getName(), backend.getHost());
-                                        tBrokerScanRange.getBroker_addresses().add(
-                                                new TNetworkAddress(fsBroker.ip, fsBroker.port));
 
-                                        LOG.debug(
-                                                "push task for replica {}, broker {}:{}, backendId {}, filePath {}, fileSize {}",
-                                                replicaId, fsBroker.ip, fsBroker.port, backendId, tBrokerRangeDesc.path,
-                                                tBrokerRangeDesc.file_size);
+                                        pushTask(backendId, tableId, partitionId, indexId, tabletId,
+                                                replicaId, schemaHash, params, batchTask, tabletMetaStr,
+                                                backend, replica, tabletFinishedReplicas,
+                                                TTabletType.TABLET_TYPE_DISK, columnsDesc);
+                                    }
 
-                                        PushTask pushTask = new PushTask(backendId, dbId, tableId, partitionId,
-                                                indexId, tabletId, replicaId, schemaHash,
-                                                0, id, TPushType.LOAD_V2,
-                                                TPriority.NORMAL, transactionId, taskSignature,
-                                                tBrokerScanRange, params.tDescriptorTable,
-                                                params.useVectorized);
-                                        if (AgentTaskQueue.addTask(pushTask)) {
-                                            batchTask.addTask(pushTask);
-                                            if (!tabletToSentReplicaPushTask.containsKey(tabletId)) {
-                                                tabletToSentReplicaPushTask.put(tabletId, Maps.newHashMap());
-                                            }
-                                            tabletToSentReplicaPushTask.get(tabletId).put(replicaId, pushTask);
+                                    if (tabletAllReplicas.size() == 0) {
+                                        LOG.error("invalid situation. tablet is empty. id: {}", tabletId);
+                                    }
+
+                                    // check tablet push states
+                                    if (tabletFinishedReplicas.size() >= quorumReplicaNum) {
+                                        quorumTablets.add(tabletId);
+                                        if (tabletFinishedReplicas.size() == tabletAllReplicas.size()) {
+                                            fullTablets.add(tabletId);
                                         }
                                     }
 
-                                    if (finishedReplicas.contains(replicaId) && replica.getLastFailedVersion() < 0) {
-                                        tabletFinishedReplicas.add(replicaId);
+                                } else {
+                                    // lake tablet
+                                    long backendId = ((LakeTablet) tablet).getPrimaryComputeNodeId();
+                                    // TODO: need to refactor after be split into cn + dn
+                                    ComputeNode backend = GlobalStateMgr.getCurrentSystemInfo().
+                                            getBackendOrComputeNode(backendId);
+                                    if (backend == null) {
+                                        LOG.warn("replica {} not exists", backendId);
+                                        continue;
                                     }
-                                }
 
-                                if (tabletAllReplicas.size() == 0) {
-                                    LOG.error("invalid situation. tablet is empty. id: {}", tabletId);
-                                }
+                                    pushTask(backend.getId(), tableId, partitionId, indexId, tabletId,
+                                            tabletId, schemaHash, params, batchTask, tabletMetaStr,
+                                            backend, new Replica(tabletId, backendId, -1, NORMAL),
+                                            tabletFinishedReplicas, TTabletType.TABLET_TYPE_LAKE, columnsDesc);
 
-                                // check tablet push states
-                                if (tabletFinishedReplicas.size() >= quorumReplicaNum) {
-                                    quorumTablets.add(tabletId);
-                                    if (tabletFinishedReplicas.size() == tabletAllReplicas.size()) {
+                                    if (tabletFinishedReplicas.contains(tabletId)) {
+                                        quorumTablets.add(tabletId);
                                         fullTablets.add(tabletId);
                                     }
                                 }
@@ -564,7 +596,73 @@ public class SparkLoadJob extends BulkLoadJob {
                 writeUnlock();
             }
         } finally {
-            db.readUnlock();
+            locker.unLockDatabase(db, LockType.READ);
+        }
+    }
+
+    private void pushTask(long backendId, long tableId, long partitionId, long indexId,
+                          long tabletId, long replicaId, int schemaHash,
+                          PushBrokerReaderParams params,
+                          AgentBatchTask batchTask,
+                          String tabletMetaStr,
+                          ComputeNode backend, Replica replica, Set<Long> tabletFinishedReplicas,
+                          TTabletType tabletType, List<TColumn> columnDesc)
+            throws AnalysisException {
+
+        if (!tabletToSentReplicaPushTask.containsKey(tabletId)
+                || !tabletToSentReplicaPushTask.get(tabletId).containsKey(replicaId)) {
+            long taskSignature = GlobalStateMgr.getCurrentGlobalTransactionMgr()
+                    .getTransactionIDGenerator().getNextTransactionId();
+            // deep copy TBrokerScanRange because filePath and fileSize will be updated
+            // in different tablet push task
+            // update filePath fileSize
+            TBrokerScanRange tBrokerScanRange =
+                    new TBrokerScanRange(params.tBrokerScanRange);
+            TBrokerRangeDesc tBrokerRangeDesc = tBrokerScanRange.getRanges().get(0);
+            tBrokerRangeDesc.setPath("");
+            tBrokerRangeDesc.setStart_offset(0);
+            tBrokerRangeDesc.setSize(0);
+            tBrokerRangeDesc.setFile_size(-1);
+            if (tabletMetaToFileInfo.containsKey(tabletMetaStr)) {
+                Pair<String, Long> fileInfo = tabletMetaToFileInfo.get(tabletMetaStr);
+                tBrokerRangeDesc.setPath(fileInfo.first);
+                tBrokerRangeDesc.setStart_offset(0);
+                tBrokerRangeDesc.setSize(fileInfo.second);
+                tBrokerRangeDesc.setFile_size(fileInfo.second);
+            }
+
+            // update broker address
+            if (brokerDesc.hasBroker()) {
+                FsBroker fsBroker = GlobalStateMgr.getCurrentState().getBrokerMgr().getBroker(
+                        brokerDesc.getName(), backend.getHost());
+                tBrokerScanRange.getBroker_addresses().add(
+                        new TNetworkAddress(fsBroker.ip, fsBroker.port));
+                LOG.debug("push task for replica {}, broker {}:{}, backendId {}," +
+                                "filePath {}, fileSize {}", replicaId, fsBroker.ip, fsBroker.port,
+                        backend.getId(), tBrokerRangeDesc.path, tBrokerRangeDesc.file_size);
+            } else {
+                LOG.debug("push task for replica {}, backendId {}, filePath {}, fileSize {}",
+                        replicaId, backend.getId(), tBrokerRangeDesc.path,
+                        tBrokerRangeDesc.file_size);
+            }
+
+            PushTask pushTask = new PushTask(backendId, dbId, tableId, partitionId,
+                    indexId, tabletId, replicaId, schemaHash,
+                    0, id, TPushType.LOAD_V2,
+                    TPriority.NORMAL, transactionId, taskSignature,
+                    tBrokerScanRange, params.tDescriptorTable,
+                    timezone, tabletType, columnDesc);
+            if (AgentTaskQueue.addTask(pushTask)) {
+                batchTask.addTask(pushTask);
+                if (!tabletToSentReplicaPushTask.containsKey(tabletId)) {
+                    tabletToSentReplicaPushTask.put(tabletId, Maps.newHashMap());
+                }
+                tabletToSentReplicaPushTask.get(tabletId).put(replicaId, pushTask);
+            }
+        }
+
+        if (finishedReplicas.contains(replicaId) && replica.getLastFailedVersion() < 0) {
+            tabletFinishedReplicas.add(replicaId);
         }
     }
 
@@ -619,7 +717,7 @@ public class SparkLoadJob extends BulkLoadJob {
             }
 
             // if all replicas are finished or stay in quorum finished for long time, try to commit it.
-            long stragglerTimeout = Config.load_straggler_wait_second * 1000;
+            long stragglerTimeout = Config.load_straggler_wait_second * 1000L;
             if ((quorumFinishTimestamp > 0 && System.currentTimeMillis() - quorumFinishTimestamp > stragglerTimeout)
                     || fullTablets.containsAll(totalTablets)) {
                 canCommitJob = true;
@@ -640,16 +738,18 @@ public class SparkLoadJob extends BulkLoadJob {
                 .add("msg", "Load job try to commit txn")
                 .build());
         Database db = getDb();
-        db.writeLock();
+        Locker locker = new Locker();
+        locker.lockDatabase(db, LockType.WRITE);
         try {
-            Catalog.getCurrentGlobalTransactionMgr().commitTransaction(
-                    dbId, transactionId, commitInfos,
+            GlobalStateMgr.getCurrentGlobalTransactionMgr().commitTransaction(
+                    dbId, transactionId, commitInfos, Lists.newArrayList(),
                     new LoadJobFinalOperation(id, loadingStatus, progress, loadStartTimestamp,
                             finishTimestamp, state, failMsg));
-        } catch (TabletQuorumFailedException e) {
+        } catch (TabletQuorumFailedException | CommitRateExceededException e) {
             // retry in next loop
+            LOG.info("Failed commit for txn {}, will retry. Error: {}", transactionId, e.getMessage());
         } finally {
-            db.writeUnlock();
+            locker.unLockDatabase(db, LockType.WRITE);
         }
     }
 
@@ -695,7 +795,6 @@ public class SparkLoadJob extends BulkLoadJob {
                 }
             }
             // clear job infos that not persist
-            sparkLoadAppHandle = null;
             resourceDesc = null;
             tableToLoadPartitions.clear();
             indexToPushBrokerReaderParams.clear();
@@ -713,20 +812,20 @@ public class SparkLoadJob extends BulkLoadJob {
     public void afterVisible(TransactionState txnState, boolean txnOperated) {
         super.afterVisible(txnState, txnOperated);
         // collect table-level metrics after spark load job finished
-        Database db = Catalog.getCurrentCatalog().getDb(dbId);
+        Database db = GlobalStateMgr.getCurrentState().getDb(dbId);
         if (null == db) {
             return;
         }
         loadingStatus.travelTableCounters(kv -> {
             TableMetricsEntity entity = TableMetricsRegistry.getInstance().getMetricsEntity(kv.getKey());
             if (kv.getValue().containsKey(TableMetricsEntity.TABLE_LOAD_BYTES)) {
-                entity.COUNTER_SPARK_LOAD_BYTES_TOTAL.increase(kv.getValue().get(TableMetricsEntity.TABLE_LOAD_BYTES));
+                entity.counterSparkLoadBytesTotal.increase(kv.getValue().get(TableMetricsEntity.TABLE_LOAD_BYTES));
             }
             if (kv.getValue().containsKey(TableMetricsEntity.TABLE_LOAD_ROWS)) {
-                entity.COUNTER_SPARK_LOAD_ROWS_TOTAL.increase(kv.getValue().get(TableMetricsEntity.TABLE_LOAD_ROWS));
+                entity.counterSparkLoadRowsTotal.increase(kv.getValue().get(TableMetricsEntity.TABLE_LOAD_ROWS));
             }
             if (kv.getValue().containsKey(TableMetricsEntity.TABLE_LOAD_FINISHED)) {
-                entity.COUNTER_SPARK_LOAD_FINISHED_TOTAL
+                entity.counterSparkLoadFinishedTotal
                         .increase(kv.getValue().get(TableMetricsEntity.TABLE_LOAD_FINISHED));
             }
         });
@@ -746,7 +845,7 @@ public class SparkLoadJob extends BulkLoadJob {
     }
 
     @Override
-    protected String getResourceName() {
+    public String getResourceName() {
         return sparkResource.getName();
     }
 
@@ -760,11 +859,17 @@ public class SparkLoadJob extends BulkLoadJob {
     }
 
     public void clearSparkLauncherLog() {
+        if (sparkLoadAppHandle == null) {
+            return;
+        }
+
         String logPath = sparkLoadAppHandle.getLogPath();
         if (!Strings.isNullOrEmpty(logPath)) {
             File file = new File(logPath);
             if (file.exists()) {
-                file.delete();
+                if (!file.delete()) {
+                    LOG.warn("Failed to delete file, filepath={}", file.getAbsolutePath());
+                }
             }
         }
     }
@@ -788,9 +893,7 @@ public class SparkLoadJob extends BulkLoadJob {
     public void readFields(DataInput in) throws IOException {
         super.readFields(in);
         sparkResource = (SparkResource) Resource.read(in);
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_91) {
-            sparkLoadAppHandle = SparkLoadAppHandle.read(in);
-        }
+        sparkLoadAppHandle = SparkLoadAppHandle.read(in);
         etlStartTimestamp = in.readLong();
         appId = Text.readString(in);
         etlOutputPath = Text.readString(in);
@@ -809,7 +912,7 @@ public class SparkLoadJob extends BulkLoadJob {
         SparkLoadJobStateUpdateInfo info = new SparkLoadJobStateUpdateInfo(
                 id, state, transactionId, sparkLoadAppHandle, etlStartTimestamp, appId, etlOutputPath,
                 loadStartTimestamp, tabletMetaToFileInfo);
-        Catalog.getCurrentCatalog().getEditLog().logUpdateLoadJob(info);
+        GlobalStateMgr.getCurrentState().getEditLog().logUpdateLoadJob(info);
     }
 
     @Override
@@ -895,12 +998,10 @@ public class SparkLoadJob extends BulkLoadJob {
     private static class PushBrokerReaderParams {
         TBrokerScanRange tBrokerScanRange;
         TDescriptorTable tDescriptorTable;
-        boolean useVectorized;
 
         public PushBrokerReaderParams() {
             this.tBrokerScanRange = new TBrokerScanRange();
             this.tDescriptorTable = null;
-            this.useVectorized = Config.enable_vectorized_file_load;
         }
 
         public void init(List<Column> columns, BrokerDesc brokerDesc) throws UserException {
@@ -912,11 +1013,7 @@ public class SparkLoadJob extends BulkLoadJob {
                 SlotDescriptor destSlotDesc = descTable.addSlotDescriptor(destTupleDesc);
                 destSlotDesc.setIsMaterialized(true);
                 destSlotDesc.setColumn(column);
-                if (column.isAllowNull()) {
-                    destSlotDesc.setIsNullable(true);
-                } else {
-                    destSlotDesc.setIsNullable(false);
-                }
+                destSlotDesc.setIsNullable(column.isAllowNull());
             }
             initTBrokerScanRange(descTable, destTupleDesc, columns, brokerDesc);
             initTDescriptorTable(descTable);
@@ -927,7 +1024,15 @@ public class SparkLoadJob extends BulkLoadJob {
             // scan range params
             TBrokerScanRangeParams params = new TBrokerScanRangeParams();
             params.setStrict_mode(false);
-            params.setProperties(brokerDesc.getProperties());
+            if (brokerDesc.hasBroker()) {
+                params.setProperties(brokerDesc.getProperties());
+                params.setUse_broker(true);
+            } else {
+                THdfsProperties hdfsProperties = new THdfsProperties();
+                params.setHdfs_properties(hdfsProperties);
+                params.setHdfs_read_buffer_size_kb(Config.hdfs_read_buffer_size_kb);
+                params.setUse_broker(false);
+            }
             TupleDescriptor srcTupleDesc = descTable.createTupleDescriptor();
             Map<String, SlotDescriptor> srcSlotDescByName = Maps.newHashMap();
             for (Column column : columns) {
@@ -935,24 +1040,13 @@ public class SparkLoadJob extends BulkLoadJob {
                 srcSlotDesc.setIsMaterialized(true);
                 srcSlotDesc.setIsNullable(true);
                 Type type = column.getType();
-                if (useVectorized) {
-                    if (type.isLargeIntType() || type.isBoolean() || type.isBitmapType() || type.isHllType()) {
-                        // largeint, boolean, bitmap, hll type using varchar in spark dpp parquet file
-                        srcSlotDesc.setType(ScalarType.createType(PrimitiveType.VARCHAR));
-                        srcSlotDesc.setColumn(new Column(column.getName(), Type.VARCHAR));
-                    } else {
-                        srcSlotDesc.setType(type);
-                        srcSlotDesc.setColumn(new Column(column.getName(), type));
-                    }
+                if (type.isLargeIntType() || type.isBoolean() || type.isBitmapType() || type.isHllType()) {
+                    // largeint, boolean, bitmap, hll type using varchar in spark dpp parquet file
+                    srcSlotDesc.setType(ScalarType.createType(PrimitiveType.VARCHAR));
+                    srcSlotDesc.setColumn(new Column(column.getName(), Type.VARCHAR));
                 } else {
-                    if (type.isBitmapType() || type.isHllType()) {
-                        // VARCHAR to BITMAP|HLL cast is disabled, so use origin type.
-                        srcSlotDesc.setType(type);
-                        srcSlotDesc.setColumn(new Column(column.getName(), type));
-                    } else {
-                        srcSlotDesc.setType(ScalarType.createType(PrimitiveType.VARCHAR));
-                        srcSlotDesc.setColumn(new Column(column.getName(), Type.VARCHAR));
-                    }
+                    srcSlotDesc.setType(type);
+                    srcSlotDesc.setColumn(new Column(column.getName(), type));
                 }
                 params.addToSrc_slot_ids(srcSlotDesc.getId().asInt());
                 srcSlotDescByName.put(column.getName(), srcSlotDesc);
@@ -968,7 +1062,6 @@ public class SparkLoadJob extends BulkLoadJob {
                 destSidToSrcSidWithoutTrans.put(destSlotDesc.getId().asInt(), srcSlotDesc.getId().asInt());
                 Expr expr = new SlotRef(srcSlotDesc);
                 expr = castToSlot(destSlotDesc, expr);
-                expr.setUseVectorized(useVectorized);
                 params.putToExpr_of_dest_slot(destSlotDesc.getId().asInt(), expr.treeToThrift());
             }
             params.setDest_sid_to_src_sid_without_trans(destSidToSrcSidWithoutTrans);
@@ -998,7 +1091,7 @@ public class SparkLoadJob extends BulkLoadJob {
                 // so we cast VARCHAR to TINYINT first, then cast TINYINT to BOOLEAN
                 return new CastExpr(Type.BOOLEAN, new CastExpr(Type.TINYINT, expr));
             } else if (dstType.isScalarType()) {
-                if (useVectorized && (dstType.isBitmapType() || dstType.isHllType()) && srcType.isVarchar()) {
+                if ((dstType.isBitmapType() || dstType.isHllType()) && srcType.isVarchar()) {
                     // there is no cast VARCHAR to BITMAP|HLL function,
                     // bitmap and hll data will be converted from varchar in be push.
                     return expr;

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/wrap/orc-proto-wrapper.hh
-
 /*
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +12,7 @@
  * limitations under the License.
  */
 
-#ifndef ORC_PROTO_WRAPPER_HH
-#define ORC_PROTO_WRAPPER_HH
+#pragma once
 
 #include "Adaptor.hh"
 
@@ -47,5 +42,3 @@ DIAGNOSTIC_IGNORE(4800) // forcing value to bool 'true' or 'false'
 #include "orc_proto.pb.h"
 
 DIAGNOSTIC_POP
-
-#endif

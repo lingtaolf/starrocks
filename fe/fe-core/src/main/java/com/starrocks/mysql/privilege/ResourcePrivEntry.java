@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/mysql/privilege/ResourcePrivEntry.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,10 +17,13 @@
 
 package com.starrocks.mysql.privilege;
 
+import com.starrocks.analysis.ResourcePattern;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.CaseSensibility;
 import com.starrocks.common.PatternMatcher;
 import com.starrocks.common.io.Text;
+import com.starrocks.sql.analyzer.AstToStringBuilder;
+import com.starrocks.sql.ast.GrantPrivilegeStmt;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -40,12 +39,17 @@ public class ResourcePrivEntry extends PrivEntry {
     protected ResourcePrivEntry() {
     }
 
-    protected ResourcePrivEntry(PatternMatcher hostPattern, String origHost, PatternMatcher resourcePattern,
-                                String origResource,
-                                PatternMatcher userPattern, String user, boolean isDomain, PrivBitSet privSet) {
-        super(hostPattern, origHost, userPattern, user, isDomain, privSet);
-        this.resourcePattern = resourcePattern;
+    protected ResourcePrivEntry(String origHost, String user, boolean isDomain, PrivBitSet privSet, String origResource) {
+        super(origHost, user, isDomain, privSet);
         this.origResource = origResource;
+    }
+
+    @Override
+    protected void analyse() throws AnalysisException {
+        super.analyse();
+
+        resourcePattern = PatternMatcher.createMysqlPattern(origResource.equals(ANY_RESOURCE) ? "%" : origResource,
+                CaseSensibility.RESOURCE.getCaseSensibility());
         if (origResource.equals(ANY_RESOURCE)) {
             isAnyResource = true;
         }
@@ -54,16 +58,10 @@ public class ResourcePrivEntry extends PrivEntry {
     public static ResourcePrivEntry create(String host, String resourceName, String user, boolean isDomain,
                                            PrivBitSet privs)
             throws AnalysisException {
-        PatternMatcher hostPattern = PatternMatcher.createMysqlPattern(host, CaseSensibility.HOST.getCaseSensibility());
-        PatternMatcher resourcePattern =
-                PatternMatcher.createMysqlPattern(resourceName.equals(ANY_RESOURCE) ? "%" : resourceName,
-                        CaseSensibility.RESOURCE.getCaseSensibility());
-        PatternMatcher userPattern = PatternMatcher.createMysqlPattern(user, CaseSensibility.USER.getCaseSensibility());
-        if (privs.containsNodePriv() || privs.containsDbTablePriv()) {
-            throw new AnalysisException("Resource privilege can not contains node or db table privileges: " + privs);
-        }
-        return new ResourcePrivEntry(hostPattern, host, resourcePattern, resourceName, userPattern, user, isDomain,
-                privs);
+
+        ResourcePrivEntry resourcePrivEntry = new ResourcePrivEntry(host, user, isDomain, privs, resourceName);
+        resourcePrivEntry.analyse();
+        return resourcePrivEntry;
     }
 
     public PatternMatcher getResourcePattern() {
@@ -81,17 +79,17 @@ public class ResourcePrivEntry extends PrivEntry {
         }
 
         ResourcePrivEntry otherEntry = (ResourcePrivEntry) other;
-        int res = origHost.compareTo(otherEntry.origHost);
+        int res = otherEntry.origHost.compareTo(origHost);
         if (res != 0) {
-            return -res;
+            return res;
         }
 
-        res = origResource.compareTo(otherEntry.origResource);
+        res = otherEntry.origResource.compareTo(origResource);
         if (res != 0) {
-            return -res;
+            return res;
         }
 
-        return -origUser.compareTo(otherEntry.origUser);
+        return otherEntry.realOrigUser.compareTo(realOrigUser);
     }
 
     @Override
@@ -101,7 +99,7 @@ public class ResourcePrivEntry extends PrivEntry {
         }
 
         ResourcePrivEntry otherEntry = (ResourcePrivEntry) other;
-        if (origHost.equals(otherEntry.origHost) && origUser.equals(otherEntry.origUser)
+        if (origHost.equals(otherEntry.origHost) && realOrigUser.equals(otherEntry.realOrigUser)
                 && origResource.equals(otherEntry.origResource) && isDomain == otherEntry.isDomain) {
             return true;
         }
@@ -112,7 +110,7 @@ public class ResourcePrivEntry extends PrivEntry {
     public String toString() {
         StringBuilder sb = new StringBuilder();
         sb.append("resource priv. host: ").append(origHost).append(", resource: ").append(origResource);
-        sb.append(", user: ").append(origUser);
+        sb.append(", user: ").append(realOrigUser);
         sb.append(", priv: ").append(privSet).append(", set by resolver: ").append(isSetByDomainResolver);
         return sb.toString();
     }
@@ -132,12 +130,12 @@ public class ResourcePrivEntry extends PrivEntry {
     public void readFields(DataInput in) throws IOException {
         super.readFields(in);
         origResource = Text.readString(in);
-        try {
-            resourcePattern =
-                    PatternMatcher.createMysqlPattern(origResource, CaseSensibility.RESOURCE.getCaseSensibility());
-        } catch (AnalysisException e) {
-            throw new IOException(e);
-        }
-        isAnyResource = origResource.equals(ANY_RESOURCE);
+    }
+
+    @Override
+    public String toGrantSQL() {
+        GrantPrivilegeStmt stmt = new GrantPrivilegeStmt(null, "RESOURCE", getUserIdent(), false);
+        stmt.setAnalysedResource(privSet, new ResourcePattern(origResource));
+        return AstToStringBuilder.toString(stmt);
     }
 }

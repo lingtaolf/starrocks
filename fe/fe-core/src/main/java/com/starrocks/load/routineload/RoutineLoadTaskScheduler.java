@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/load/routineload/RoutineLoadTaskScheduler.java
 
@@ -24,7 +37,6 @@ package com.starrocks.load.routineload;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Queues;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.common.ClientPool;
 import com.starrocks.common.Config;
 import com.starrocks.common.InternalErrorCode;
@@ -32,11 +44,12 @@ import com.starrocks.common.LoadException;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.common.UserException;
 import com.starrocks.common.util.DebugUtil;
+import com.starrocks.common.util.FrontendDaemon;
 import com.starrocks.common.util.LogBuilder;
 import com.starrocks.common.util.LogKey;
-import com.starrocks.common.util.MasterDaemon;
 import com.starrocks.load.routineload.RoutineLoadJob.JobState;
-import com.starrocks.system.Backend;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.system.ComputeNode;
 import com.starrocks.thrift.BackendService;
 import com.starrocks.thrift.TNetworkAddress;
 import com.starrocks.thrift.TRoutineLoadTask;
@@ -60,27 +73,27 @@ import java.util.concurrent.TimeUnit;
  * <p>
  * The scheduler will be blocked in step3 till the queue receive a new task
  */
-public class RoutineLoadTaskScheduler extends MasterDaemon {
+public class RoutineLoadTaskScheduler extends FrontendDaemon {
 
     private static final Logger LOG = LogManager.getLogger(RoutineLoadTaskScheduler.class);
 
     private static final long BACKEND_SLOT_UPDATE_INTERVAL_MS = 10000; // 10s
     private static final long SLOT_FULL_SLEEP_MS = 10000; // 10s
 
-    private final RoutineLoadManager routineLoadManager;
+    private final RoutineLoadMgr routineLoadManager;
     private final LinkedBlockingQueue<RoutineLoadTaskInfo> needScheduleTasksQueue = Queues.newLinkedBlockingQueue();
     private final ScheduledExecutorService scheduledExecutorService = Executors.newSingleThreadScheduledExecutor();
-    private final ExecutorService threadPool = Executors.newFixedThreadPool(10);
+    private final ExecutorService threadPool = Executors.newCachedThreadPool();
 
     private long lastBackendSlotUpdateTime = -1;
 
     @VisibleForTesting
     public RoutineLoadTaskScheduler() {
         super("Routine load task scheduler", 0);
-        this.routineLoadManager = Catalog.getCurrentCatalog().getRoutineLoadManager();
+        this.routineLoadManager = GlobalStateMgr.getCurrentState().getRoutineLoadMgr();
     }
 
-    public RoutineLoadTaskScheduler(RoutineLoadManager routineLoadManager) {
+    public RoutineLoadTaskScheduler(RoutineLoadMgr routineLoadManager) {
         super("Routine load task scheduler", 0);
         this.routineLoadManager = routineLoadManager;
     }
@@ -168,16 +181,21 @@ public class RoutineLoadTaskScheduler extends MasterDaemon {
         }
 
         try {
-            // for kafka routine load, readyToExecute means there is new data in kafka stream
+            // for kafka/pulsar routine load, readyToExecute means there is new data in kafka/pulsar stream
             if (!routineLoadTaskInfo.readyToExecute()) {
                 String msg = "";
-                if (routineLoadTaskInfo instanceof KafkaTaskInfo) {
-                    msg = String.format("there is no new data in kafka, wait for %d seconds to schedule again",
+                if (routineLoadTaskInfo instanceof KafkaTaskInfo || routineLoadTaskInfo instanceof PulsarTaskInfo) {
+                    msg = String.format("there is no new data in kafka/pulsar, wait for %d seconds to schedule again",
                             routineLoadTaskInfo.getTaskScheduleIntervalMs() / 1000);
                 }
+                // The job keeps up with source.
+                routineLoadManager.getJob(routineLoadTaskInfo.getJobId()).updateSubstateStable();
                 delayPutToQueue(routineLoadTaskInfo, msg);
                 return;
             }
+            // Update the job state is the job is too slow.
+            routineLoadManager.getJob(routineLoadTaskInfo.getJobId()).updateSubstate();
+
         } catch (RoutineLoadPauseException e) {
             String msg = "fe abort task with reason: check task ready to execute failed, " + e.getMessage();
             routineLoadManager.getJob(routineLoadTaskInfo.getJobId()).updateState(
@@ -252,6 +270,10 @@ public class RoutineLoadTaskScheduler extends MasterDaemon {
                 LOG.debug("send kafka routine load task {} with partition offset: {}, job: {}",
                         tRoutineLoadTask.label, tRoutineLoadTask.kafka_load_info.partition_begin_offset,
                         tRoutineLoadTask.getJob_id());
+            } else if (tRoutineLoadTask.isSetPulsar_load_info()) {
+                LOG.debug("send pulsar routine load task {} with partitions: {}, job: {}",
+                        tRoutineLoadTask.label, tRoutineLoadTask.pulsar_load_info.partitions,
+                        tRoutineLoadTask.getJob_id());
             }
         } catch (LoadException e) {
             // submit task failed (such as TOO_MANY_TASKS error), but txn has already begun.
@@ -302,12 +324,13 @@ public class RoutineLoadTaskScheduler extends MasterDaemon {
     }
 
     private void submitTask(long beId, TRoutineLoadTask tTask) throws LoadException {
-        Backend backend = Catalog.getCurrentSystemInfo().getBackend(beId);
-        if (backend == null) {
+        // TODO: need to refactor after be split into cn + dn
+        ComputeNode node = GlobalStateMgr.getCurrentSystemInfo().getBackendOrComputeNode(beId);
+        if (node == null) {
             throw new LoadException("failed to send tasks to backend " + beId + " because not exist");
         }
 
-        TNetworkAddress address = new TNetworkAddress(backend.getHost(), backend.getBePort());
+        TNetworkAddress address = new TNetworkAddress(node.getHost(), node.getBePort());
 
         boolean ok = false;
         BackendService.Client client = null;

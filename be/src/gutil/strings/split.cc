@@ -4,10 +4,9 @@
 
 #include "gutil/strings/split.h"
 
-#include <assert.h>
-#include <stdlib.h>
-#include <string.h>
-
+#include <cassert>
+#include <cstdlib>
+#include <cstring>
 #include <iterator>
 using std::back_insert_iterator;
 using std::iterator_traits;
@@ -21,8 +20,6 @@ using std::unordered_set;
 
 #include "gutil/hash/hash.h"
 #include "gutil/integral_types.h"
-#include "gutil/logging-inl.h"
-#include "gutil/macros.h"
 #include "gutil/strings/ascii_ctype.h"
 #include "gutil/strings/util.h"
 #include "gutil/strtoint.h"
@@ -30,8 +27,7 @@ using std::unordered_set;
 // Implementations for some of the Split2 API. Much of the Split2 API is
 // templated so it exists in header files, either strings/split.h or
 // strings/split_iternal.h.
-namespace strings {
-namespace delimiter {
+namespace strings::delimiter {
 
 namespace {
 
@@ -46,7 +42,7 @@ StringPiece GenericFind(StringPiece text, StringPiece delimiter, FindPolicy find
     if (delimiter.empty() && text.length() > 0) {
         // Special case for empty string delimiters: always return a zero-length
         // StringPiece referring to the item at position 1.
-        return StringPiece(text.begin() + 1, 0);
+        return {text.begin() + 1, 0};
     }
     int found_pos = StringPiece::npos;
     StringPiece found(text.end(), 0); // By default, not found
@@ -93,8 +89,7 @@ StringPiece AnyOf::Find(StringPiece text) const {
     return GenericFind(text, delimiters_, AnyOfPolicy());
 }
 
-} // namespace delimiter
-} // namespace strings
+} // namespace strings::delimiter
 
 //
 // ==================== LEGACY SPLIT FUNCTIONS ====================
@@ -153,7 +148,7 @@ void AppendToImpl(vector<string>* container, Splitter splitter) {
 template <typename Map, typename Splitter>
 void AppendToMap(Map* m, Splitter splitter) {
     Map tmp = splitter; // Calls implicit conversion operator.
-    for (typename Map::const_iterator it = tmp.begin(); it != tmp.end(); ++it) {
+    for (auto it = tmp.begin(); it != tmp.end(); ++it) {
         (*m)[it->first] = it->second;
     }
 }
@@ -471,7 +466,7 @@ string SplitOneStringToken(const char** source, const char* delim) {
     assert(source);
     assert(delim);
     if (!*source) {
-        return string();
+        return {};
     }
     const char* begin = *source;
     // Optimize the common case where delim is a single character.
@@ -736,8 +731,8 @@ void SplitCSVLineWithDelimiterForStrings(const string& line, char delimiter, vec
     char* cline = strndup_with_new(line.c_str(), line.size());
     vector<char*> v;
     SplitCSVLineWithDelimiter(cline, delimiter, &v);
-    for (vector<char*>::const_iterator ci = v.begin(); ci != v.end(); ++ci) {
-        cols->push_back(*ci);
+    for (auto ci : v) {
+        cols->push_back(ci);
     }
     delete[] cline;
 }
@@ -748,7 +743,7 @@ namespace {
 // Helper class used by SplitStructuredLineInternal.
 class ClosingSymbolLookup {
 public:
-    explicit ClosingSymbolLookup(const char* symbol_pairs) : closing_(), valid_closing_() {
+    explicit ClosingSymbolLookup(const char* symbol_pairs) {
         // Initialize the opening/closing arrays.
         for (const char* symbol = symbol_pairs; *symbol != 0; ++symbol) {
             unsigned char opening = *symbol;
@@ -772,11 +767,12 @@ public:
 private:
     // Maps an opening character to its closing. If the entry contains 0,
     // the character is not in the opening set.
-    char closing_[256];
+    char closing_[256]{};
     // Valid closing characters.
-    bool valid_closing_[256];
+    bool valid_closing_[256]{};
 
-    DISALLOW_COPY_AND_ASSIGN(ClosingSymbolLookup);
+    ClosingSymbolLookup(const ClosingSymbolLookup&) = delete;
+    const ClosingSymbolLookup& operator=(const ClosingSymbolLookup&) = delete;
 };
 
 char* SplitStructuredLineInternal(char* line, char delimiter, const char* symbol_pairs, vector<char*>* cols,

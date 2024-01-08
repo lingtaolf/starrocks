@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/http/rest/BootstrapFinishAction.java
 
@@ -23,13 +36,14 @@ package com.starrocks.http.rest;
 
 import com.google.common.base.Strings;
 import com.google.gson.Gson;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
+import com.starrocks.common.Version;
 import com.starrocks.http.ActionController;
 import com.starrocks.http.BaseRequest;
 import com.starrocks.http.BaseResponse;
 import com.starrocks.http.IllegalArgException;
+import com.starrocks.server.GlobalStateMgr;
 import io.netty.handler.codec.http.HttpMethod;
 
 /*
@@ -45,6 +59,8 @@ public class BootstrapFinishAction extends RestBaseAction {
     public static final String REPLAYED_JOURNAL_ID = "replayedJournalId";
     public static final String QUERY_PORT = "queryPort";
     public static final String RPC_PORT = "rpcPort";
+    public static final String FE_START_TIME = "feStartTime";
+    public static final String FE_VERSION = "feVersion";
 
     public BootstrapFinishAction(ActionController controller) {
         super(controller);
@@ -56,7 +72,7 @@ public class BootstrapFinishAction extends RestBaseAction {
 
     @Override
     public void execute(BaseRequest request, BaseResponse response) throws DdlException {
-        boolean isReady = Catalog.getCurrentCatalog().isReady();
+        boolean isReady = GlobalStateMgr.getCurrentState().isReady();
 
         // to json response
         BootstrapResult result = null;
@@ -68,32 +84,35 @@ public class BootstrapFinishAction extends RestBaseAction {
                 // cluster id or token is provided, return more info
                 int clusterId = 0;
                 try {
-                    clusterId = Integer.valueOf(clusterIdStr);
+                    clusterId = Integer.parseInt(clusterIdStr);
                 } catch (NumberFormatException e) {
                     result.status = ActionStatus.FAILED;
                     result.msg = "invalid cluster id format: " + clusterIdStr;
                 }
 
                 if (result.status == ActionStatus.OK) {
-                    if (clusterId != Catalog.getCurrentCatalog().getClusterId()) {
+                    if (clusterId != GlobalStateMgr.getCurrentState().getClusterId()) {
                         result.status = ActionStatus.FAILED;
-                        result.msg = "invalid cluster id: " + Catalog.getCurrentCatalog().getClusterId();
+                        result.msg = "invalid cluster id: " + GlobalStateMgr.getCurrentState().getClusterId();
                     }
                 }
 
                 if (result.status == ActionStatus.OK) {
-                    if (!token.equals(Catalog.getCurrentCatalog().getToken())) {
+                    if (!token.equals(GlobalStateMgr.getCurrentState().getToken())) {
                         result.status = ActionStatus.FAILED;
-                        result.msg = "invalid token: " + Catalog.getCurrentCatalog().getToken();
+                        result.msg = "invalid token: " + GlobalStateMgr.getCurrentState().getToken();
                     }
                 }
 
                 if (result.status == ActionStatus.OK) {
                     // cluster id and token are valid, return replayed journal id
-                    long replayedJournalId = Catalog.getCurrentCatalog().getReplayedJournalId();
+                    long replayedJournalId = GlobalStateMgr.getCurrentState().getReplayedJournalId();
+                    long feStartTime = GlobalStateMgr.getCurrentState().getFeStartTime();
                     result.setMaxReplayedJournal(replayedJournalId);
                     result.setQueryPort(Config.query_port);
                     result.setRpcPort(Config.rpc_port);
+                    result.setFeStartTime(feStartTime);
+                    result.setFeVersion(Version.STARROCKS_VERSION + "-" + Version.STARROCKS_COMMIT_HASH);
                 }
             }
         } else {
@@ -110,6 +129,8 @@ public class BootstrapFinishAction extends RestBaseAction {
         private long replayedJournalId = 0;
         private int queryPort = 0;
         private int rpcPort = 0;
+        private long feStartTime = 0;
+        private String feVersion;
 
         public BootstrapResult() {
             super();
@@ -141,6 +162,22 @@ public class BootstrapFinishAction extends RestBaseAction {
 
         public int getRpcPort() {
             return rpcPort;
+        }
+
+        public long getFeStartTime() {
+            return feStartTime;
+        }
+
+        public void setFeStartTime(long feStartTime) {
+            this.feStartTime = feStartTime;
+        }
+
+        public String getFeVersion() {
+            return feVersion;
+        }
+
+        public void setFeVersion(String feVersion) {
+            this.feVersion = feVersion;
         }
 
         @Override

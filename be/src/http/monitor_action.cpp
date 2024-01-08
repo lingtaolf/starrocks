@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/http/monitor_action.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,12 +17,9 @@
 
 #include "http/monitor_action.h"
 
-#include <sstream>
-
 #include "common/status.h"
 #include "http/http_channel.h"
 #include "http/http_request.h"
-#include "http/http_response.h"
 #include "http/http_status.h"
 #include "http/rest_monitor_iface.h"
 
@@ -34,7 +27,7 @@ namespace starrocks {
 
 const std::string MODULE_KEY = "module";
 
-MonitorAction::MonitorAction() {}
+MonitorAction::MonitorAction() = default;
 
 void MonitorAction::register_module(const std::string& name, RestMonitorIface* module) {
     _module_by_name.insert(std::make_pair(name, module));

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/orc/tree/main/c++/include/orc/Reader.hh
 
@@ -21,8 +34,7 @@
  */
 
 // clang-format off
-#ifndef ORC_READER_HH
-#define ORC_READER_HH
+#pragma once
 
 #include "orc/BloomFilter.hh"
 #include "orc/Common.hh"
@@ -31,27 +43,50 @@
 #include "orc/sargs/SearchArgument.hh"
 #include "orc/Type.hh"
 #include "orc/Vector.hh"
-
+#include <atomic>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <vector>
+// clang-format on
 
 namespace orc {
 
-  // classes that hold data members so we can maintain binary compatibility
-  struct ReaderOptionsPrivate;
-  struct RowReaderOptionsPrivate;
+/**
+   * Expose the reader metrics including the latency and
+   * number of calls of the decompression/decoding/IO modules.
+   */
+struct ReaderMetrics {
+    std::atomic<uint64_t> ReaderCall{0};
+    // ReaderInclusiveLatencyUs contains the latency of
+    // the decompression/decoding/IO modules.
+    std::atomic<uint64_t> ReaderInclusiveLatencyUs{0};
+    std::atomic<uint64_t> DecompressionCall{0};
+    std::atomic<uint64_t> DecompressionLatencyUs{0};
+    std::atomic<uint64_t> DecodingCall{0};
+    std::atomic<uint64_t> DecodingLatencyUs{0};
+    std::atomic<uint64_t> ByteDecodingCall{0};
+    std::atomic<uint64_t> ByteDecodingLatencyUs{0};
+    std::atomic<uint64_t> IOCount{0};
+    std::atomic<uint64_t> IOBlockingLatencyUs{0};
+    std::atomic<uint64_t> SelectedRowGroupCount{0};
+    std::atomic<uint64_t> EvaluatedRowGroupCount{0};
+};
+ReaderMetrics* getDefaultReaderMetrics();
 
-  /**
+// classes that hold data members so we can maintain binary compatibility
+struct ReaderOptionsPrivate;
+struct RowReaderOptionsPrivate;
+
+/**
    * Options for creating a Reader.
    */
-  class ReaderOptions {
-  private:
+class ReaderOptions {
+private:
     ORC_UNIQUE_PTR<ReaderOptionsPrivate> privateBits;
 
-  public:
+public:
     ReaderOptions();
     ReaderOptions(const ReaderOptions&);
     ReaderOptions(ReaderOptions&);
@@ -82,6 +117,13 @@ namespace orc {
     ReaderOptions& setMemoryPool(MemoryPool& pool);
 
     /**
+     * Set the reader metrics.
+     *
+     * When set to nullptr, the reader metrics will be disabled.
+     */
+    ReaderOptions& setReaderMetrics(ReaderMetrics* metrics);
+
+    /**
      * Set the location of the tail as defined by the logical length of the
      * file.
      */
@@ -107,16 +149,21 @@ namespace orc {
      * Get the memory allocator.
      */
     MemoryPool* getMemoryPool() const;
-  };
 
-  /**
+    /**
+     * Get the reader metrics.
+     */
+    ReaderMetrics* getReaderMetrics() const;
+};
+
+/**
    * Options for creating a RowReader.
    */
-  class RowReaderOptions {
-  private:
+class RowReaderOptions {
+private:
     ORC_UNIQUE_PTR<RowReaderOptionsPrivate> privateBits;
 
-  public:
+public:
     RowReaderOptions();
     RowReaderOptions(const RowReaderOptions&);
     RowReaderOptions(RowReaderOptions&);
@@ -201,7 +248,6 @@ namespace orc {
      * Set search argument for predicate push down
      */
     RowReaderOptions& searchArgument(std::unique_ptr<SearchArgument> sargs);
-    RowReaderOptions& rowReaderFilter(std::shared_ptr<RowReaderFilter> filter);
 
     /**
      * Should enable encoding block mode
@@ -262,7 +308,6 @@ namespace orc {
      * Get search argument for predicate push down
      */
     std::shared_ptr<SearchArgument> getSearchArgument() const;
-    std::shared_ptr<RowReaderFilter> getRowReaderFilter() const;
 
     /**
      * Set desired timezone to return data of timestamp type
@@ -274,20 +319,24 @@ namespace orc {
      */
     const std::string& getTimezoneName() const;
 
+    RowReaderOptions& rowReaderFilter(std::shared_ptr<RowReaderFilter> filter);
+    std::shared_ptr<RowReaderFilter> getRowReaderFilter() const;
     RowReaderOptions& useWriterTimezone();
     bool getUseWriterTimezone() const;
+    RowReaderOptions& includeLazyLoadColumnNames(const std::list<std::string>& include);
+    RowReaderOptions& includeLazyLoadColumnIndexes(const std::list<uint64_t>& include);
+    const std::list<std::string>& getLazyLoadColumnNames() const;
+    const std::list<uint64_t>& getLazyLoadColumnIndexes() const;
+};
 
-  };
+class RowReader;
 
-
-  class RowReader;
-
-  /**
+/**
    * The interface for reading ORC file meta-data and constructing RowReaders.
    * This is an an abstract class that will be subclassed as necessary.
    */
-  class Reader {
-  public:
+class Reader {
+public:
     virtual ~Reader();
 
     /**
@@ -302,6 +351,12 @@ namespace orc {
      * @return the number of rows
      */
     virtual uint64_t getNumberOfRows() const = 0;
+
+    /**
+     * Get the software instance and version that wrote this file.
+     * @return a user-facing string that specifies the software version
+     */
+    virtual std::string getSoftwareVersion() const = 0;
 
     /**
      * Get the user metadata keys.
@@ -371,8 +426,8 @@ namespace orc {
      * @param stripeIndex the index of the stripe (0 to N-1) to get information about
      * @return the information about that stripe
      */
-    virtual ORC_UNIQUE_PTR<StripeInformation>
-    getStripe(uint64_t stripeIndex) const = 0;
+    virtual ORC_UNIQUE_PTR<StripeInformation> getStripe(uint64_t stripeIndex) const = 0;
+    virtual const orc::proto::StripeInformation& getStripeInOrcFormat(uint64_t stripeIndex) const = 0;
 
     /**
      * Get the number of stripe statistics in the file.
@@ -385,8 +440,7 @@ namespace orc {
      * @param stripeIndex the index of the stripe (0 to N-1) to get statistics about
      * @return the statistics about that stripe
      */
-    virtual ORC_UNIQUE_PTR<StripeStatistics>
-    getStripeStatistics(uint64_t stripeIndex) const = 0;
+    virtual ORC_UNIQUE_PTR<StripeStatistics> getStripeStatistics(uint64_t stripeIndex) const = 0;
 
     /**
      * Get the length of the data stripes in the file.
@@ -429,13 +483,18 @@ namespace orc {
      * @param columnId id of the column
      * @return the information about the column
      */
-    virtual ORC_UNIQUE_PTR<ColumnStatistics>
-    getColumnStatistics(uint32_t columnId) const = 0;
+    virtual ORC_UNIQUE_PTR<ColumnStatistics> getColumnStatistics(uint32_t columnId) const = 0;
 
     /**
      * Check if the file has correct column statistics.
      */
     virtual bool hasCorrectStatistics() const = 0;
+
+    /**
+     * Get metrics of the reader
+     * @return the accumulated reader metrics to current state.
+     */
+    virtual const ReaderMetrics* getReaderMetrics() const = 0;
 
     /**
      * Get the serialized file tail.
@@ -481,7 +540,7 @@ namespace orc {
      *        all stripes are considered).
      * @return upper bound on memory use by all columns
      */
-    virtual uint64_t getMemoryUse(int stripeIx=-1) = 0;
+    virtual uint64_t getMemoryUse(int stripeIx = -1) = 0;
 
     /**
      * @param include Column Field Ids
@@ -489,7 +548,7 @@ namespace orc {
      *        all stripes are considered).
      * @return upper bound on memory use by selected columns
      */
-    virtual uint64_t getMemoryUseByFieldId(const std::list<uint64_t>& include, int stripeIx=-1) = 0;
+    virtual uint64_t getMemoryUseByFieldId(const std::list<uint64_t>& include, int stripeIx = -1) = 0;
 
     /**
      * @param names Column Names
@@ -497,7 +556,7 @@ namespace orc {
      *        all stripes are considered).
      * @return upper bound on memory use by selected columns
      */
-    virtual uint64_t getMemoryUseByName(const std::list<std::string>& names, int stripeIx=-1) = 0;
+    virtual uint64_t getMemoryUseByName(const std::list<std::string>& names, int stripeIx = -1) = 0;
 
     /**
      * @param include Column Type Ids
@@ -505,25 +564,32 @@ namespace orc {
      *        all stripes are considered).
      * @return upper bound on memory use by selected columns
      */
-    virtual uint64_t getMemoryUseByTypeId(const std::list<uint64_t>& include, int stripeIx=-1) = 0;
+    virtual uint64_t getMemoryUseByTypeId(const std::list<uint64_t>& include, int stripeIx = -1) = 0;
 
     /**
-     * Get BloomFiters of all selected columns in the specified stripe
+     * Get BloomFilters of all selected columns in the specified stripe
      * @param stripeIndex index of the stripe to be read for bloom filters.
      * @param included index of selected columns to return (if not specified,
      *        all columns that have bloom filters are considered).
      * @return map of bloom filters with the key standing for the index of column.
      */
-    virtual std::map<uint32_t, BloomFilterIndex>
-    getBloomFilters(uint32_t stripeIndex, const std::set<uint32_t>& included) const = 0;
-  };
+    virtual std::map<uint32_t, BloomFilterIndex> getBloomFilters(uint32_t stripeIndex,
+                                                                 const std::set<uint32_t>& included) const = 0;
+};
 
-  /**
+/**
    * The interface for reading rows in ORC files.
    * This is an an abstract class that will be subclassed as necessary.
    */
-  class RowReader {
-  public:
+class RowReader {
+public:
+    struct ReadPosition {
+        bool start_new_stripe = false;
+        uint64_t stripe_index = 0;
+        uint64_t num_values = 0;
+        uint64_t row_in_stripe = 0;
+    };
+
     virtual ~RowReader();
     /**
      * Get the selected type of the rows in the file. The file's row type
@@ -538,25 +604,31 @@ namespace orc {
     /**
      * Get the selected columns of the file.
      */
-    virtual const std::vector<bool> getSelectedColumns() const = 0;
+    virtual const std::vector<bool>& getSelectedColumns() const = 0;
+    virtual const std::vector<bool>& getLazyLoadColumns() const = 0;
 
     /**
      * Create a row batch for reading the selected columns of this file.
      * @param size the number of rows to read
      * @return a new ColumnVectorBatch to read into
      */
-    virtual ORC_UNIQUE_PTR<ColumnVectorBatch> createRowBatch(uint64_t size
-                                                             ) const = 0;
+    virtual ORC_UNIQUE_PTR<ColumnVectorBatch> createRowBatch(uint64_t size) const = 0;
 
     /**
      * Read the next row batch from the current position.
      * Caller must look at numElements in the row batch to determine how
      * many rows were read.
      * @param data the row batch to read into.
+     * @param pos about position information.
      * @return true if a non-zero number of rows were read or false if the
      *   end of the file was reached.
      */
-    virtual bool next(ColumnVectorBatch& data) = 0;
+    // This function is for backward comptiability.
+    bool next(ColumnVectorBatch& data);
+    virtual bool next(ColumnVectorBatch& data, ReadPosition* pos) = 0;
+
+    virtual void lazyLoadSeekTo(uint64_t rowInStripe) = 0;
+    virtual void lazyLoadNext(ColumnVectorBatch& data, uint64_t numValues) = 0;
 
     /**
      * Get the row number of the first row in the previously read batch.
@@ -569,8 +641,5 @@ namespace orc {
      * @param rowNumber the next row the reader should return
      */
     virtual void seekToRow(uint64_t rowNumber) = 0;
-
-  };
-}
-
-#endif
+};
+} // namespace orc

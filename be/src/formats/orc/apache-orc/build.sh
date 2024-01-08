@@ -1,5 +1,3 @@
-# This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
-
 #!/bin/bash
 
 set -e
@@ -31,6 +29,7 @@ ${CMAKE_CMD} .. \
     -DBUILD_LIBHDFSPP=OFF \
     -DBUILD_TOOLS=ON \
     -DBUILD_CPP_TESTS=ON \
+    -DSTOP_BUILD_ON_WARNING=OFF \
     -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
 
 make -j ${PARALLEL}

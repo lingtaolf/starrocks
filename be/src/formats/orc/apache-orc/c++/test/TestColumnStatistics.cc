@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/test/TestColumnStatistics.cc
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -108,6 +104,12 @@ TEST(ColumnStatistics, intColumnStatistics) {
     EXPECT_EQ(std::numeric_limits<int64_t>::min() + 500, other->getSum());
     intStats->merge(*other);
     EXPECT_FALSE(intStats->hasSum());
+
+    std::unique_ptr<IntegerColumnStatisticsImpl> intStats2(new IntegerColumnStatisticsImpl());
+    intStats2->update(1, 1);
+    EXPECT_TRUE(intStats2->hasSum());
+    intStats2->update(std::numeric_limits<int64_t>::max(), 3);
+    EXPECT_FALSE(intStats2->hasSum());
 }
 
 TEST(ColumnStatistics, doubleColumnStatistics) {

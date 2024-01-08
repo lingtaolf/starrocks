@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/test/TestStripeIndexStatistics.cc
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -36,8 +32,9 @@ TEST(TestStripeIndexStatistics, testIndexStatistics) {
         ss << "../../../examples";
     }
     ss << "/orc_index_int_string.orc";
-    std::unique_ptr<orc::Reader> reader = createReader(readLocalFile(ss.str().c_str()), ReaderOptions());
-
+    orc::ReaderOptions readerOpts;
+    std::unique_ptr<orc::Reader> reader =
+            createReader(readLocalFile(ss.str().c_str(), readerOpts.getReaderMetrics()), readerOpts);
     std::unique_ptr<orc::StripeStatistics> stripeStats = reader->getStripeStatistics(0);
     EXPECT_EQ(3, stripeStats->getNumberOfRowIndexStats(0));
     EXPECT_EQ(3, stripeStats->getNumberOfRowIndexStats(1));

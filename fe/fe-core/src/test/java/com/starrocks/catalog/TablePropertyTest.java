@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/catalog/TablePropertyTest.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,6 +17,8 @@
 
 package com.starrocks.catalog;
 
+import com.starrocks.common.util.PropertyAnalyzer;
+import com.starrocks.persist.OperationType;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Test;
@@ -76,4 +74,27 @@ public class TablePropertyTest {
         Assert.assertEquals(readDynamicPartitionProperty.getTimeUnit(), dynamicPartitionProperty.getTimeUnit());
         in.close();
     }
+
+
+    @Test
+    public void testBuildDataCachePartitionDuration() throws IOException {
+        // 1. Write objects to file
+        File file = new File(fileName);
+        file.createNewFile();
+        DataOutputStream out = new DataOutputStream(new FileOutputStream(file));
+
+        HashMap<String, String> properties = new HashMap<>();
+        properties.put(PropertyAnalyzer.PROPERTIES_DATACACHE_PARTITION_DURATION, "3 month");
+        TableProperty tableProperty = new TableProperty(properties);
+        tableProperty.write(out);
+        out.flush();
+        out.close();
+
+        // 2. Read objects from file
+        DataInputStream in = new DataInputStream(new FileInputStream(file));
+        TableProperty readTableProperty = TableProperty.read(in);
+        Assert.assertNotNull(readTableProperty.buildProperty(OperationType.OP_ALTER_TABLE_PROPERTIES));
+        in.close();
+    }
+
 }

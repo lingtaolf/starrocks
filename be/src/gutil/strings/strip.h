@@ -4,11 +4,9 @@
 // This file contains functions that remove a defined part from the string,
 // i.e., strip the string.
 
-#ifndef STRINGS_STRIP_H_
-#define STRINGS_STRIP_H_
+#pragma once
 
-#include <stddef.h>
-
+#include <cstddef>
 #include <string>
 using std::string;
 
@@ -134,7 +132,7 @@ inline const char* StripLeadingWhiteSpace(const char* line) {
     while (ascii_isspace(*line)) ++line;
 
     if ('\0' == *line) // end of line, no non-whitespace
-        return NULL;
+        return nullptr;
 
     return line;
 }
@@ -257,5 +255,3 @@ int memrm(char* str, int strlen, char c);
 // ----------------------------------------------------------------------
 int strrmm(char* str, const char* chars);
 int strrmm(string* str, const string& chars);
-
-#endif // STRINGS_STRIP_H_

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/planner/RepeatNodeTest.java
 
@@ -31,9 +44,11 @@ import com.starrocks.analysis.SlotRef;
 import com.starrocks.analysis.TableName;
 import com.starrocks.analysis.TupleDescriptor;
 import com.starrocks.analysis.TupleId;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.thrift.TExplainLevel;
 import com.starrocks.thrift.TPlanNode;
 import com.starrocks.thrift.TPlanNodeType;
+import com.starrocks.utframe.UtFrameUtils;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -50,6 +65,7 @@ public class RepeatNodeTest {
     private TupleDescriptor virtualTuple;
     private List<Set<SlotId>> groupingIdList = new ArrayList<>();
     private List<List<Long>> groupingList = new ArrayList<>();
+    private ConnectContext connectContext;
 
     @Before
     public void setUp() throws Exception {
@@ -79,6 +95,7 @@ public class RepeatNodeTest {
         groupingList.add(Arrays.asList(0L, 7L, 3L, 5L, 1L, 6L, 2L, 4L));
         DescriptorTable descTable = new DescriptorTable();
         TupleDescriptor tuple = descTable.createTupleDescriptor("DstTable");
+        connectContext = UtFrameUtils.createDefaultCtx();
         node = new RepeatNode(new PlanNodeId(1),
                 new OlapScanNode(new PlanNodeId(0), tuple, "null"), groupingIdList, virtualTuple, groupingList);
 

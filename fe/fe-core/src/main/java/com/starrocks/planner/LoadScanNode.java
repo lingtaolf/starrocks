@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/planner/LoadScanNode.java
 
@@ -52,9 +65,6 @@ public abstract class LoadScanNode extends ScanNode {
             dstDescMap.put(slotDescriptor.getColumn().getName(), slotDescriptor);
         }
 
-        // substitute SlotRef in filter expression
-        // where expr must be equal first to transfer some predicates(eg: BetweenPredicate to BinaryPredicate)
-        whereExpr = analyzer.getExprRewriter().rewrite(whereExpr, analyzer);
         List<SlotRef> slots = Lists.newArrayList();
         whereExpr.collect(SlotRef.class, slots);
 
@@ -62,18 +72,21 @@ public abstract class LoadScanNode extends ScanNode {
         for (SlotRef slot : slots) {
             SlotDescriptor slotDesc = dstDescMap.get(slot.getColumnName());
             if (slotDesc == null) {
-                throw new UserException("unknown column reference in where statement, reference="
-                        + slot.getColumnName());
+                throw new UserException("unknown column in where statement. "
+                        + "the column '" + slot.getColumnName() + "' in where clause must be in the target table.");
             }
             smap.getLhs().add(slot);
-            smap.getRhs().add(new SlotRef(slotDesc));
+            SlotRef slotRef = new SlotRef(slotDesc);
+            slotRef.setColumnName(slot.getColumnName());
+            smap.getRhs().add(slotRef);
         }
         whereExpr = whereExpr.clone(smap);
-        whereExpr.analyze(analyzer);
+        whereExpr = Expr.analyzeAndCastFold(whereExpr);
+
         if (!whereExpr.getType().isBoolean()) {
             throw new UserException("where statement is not a valid statement return bool");
         }
-        addConjuncts(whereExpr.getConjuncts());
+        addConjuncts(Expr.extractConjuncts(whereExpr));
     }
 
     protected void checkBitmapCompatibility(Analyzer analyzer, SlotDescriptor slotDesc, Expr expr)

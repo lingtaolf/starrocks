@@ -1,98 +1,76 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package com.starrocks.sql.optimizer.operator.logical;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.HiveTable;
-import com.starrocks.catalog.PartitionKey;
 import com.starrocks.catalog.Table;
-import com.starrocks.catalog.Type;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.OperatorVisitor;
+import com.starrocks.sql.optimizer.operator.ScanOperatorPredicates;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 public class LogicalHiveScanOperator extends LogicalScanOperator {
-    private Table.TableType tableType;
-    // id -> partition key
-    private final Map<Long, PartitionKey> idToPartitionKey = Maps.newHashMap();
-    private Collection<Long> selectedPartitionIds = Lists.newArrayList();
-
-    // partitionConjuncts contains partition filters.
-    private final List<ScalarOperator> partitionConjuncts = Lists.newArrayList();
-    // After partition pruner prune, conjuncts that are not evaled will be send to backend.
-    private final List<ScalarOperator> noEvalPartitionConjuncts = Lists.newArrayList();
-    // nonPartitionConjuncts contains non-partition filters, and will be sent to backend.
-    private final List<ScalarOperator> nonPartitionConjuncts = Lists.newArrayList();
-    // List of conjuncts for min/max values that are used to skip data when scanning Parquet/Orc files.
-    private final List<ScalarOperator> minMaxConjuncts = new ArrayList<>();
-    // Map of columnRefOperator to column which column in minMaxConjuncts
-    private final Map<ColumnRefOperator, Column> minMaxColumnRefMap = Maps.newHashMap();
-    private final ImmutableMap<Column, Integer> columnToIds;
-    private final Set<String> partitionColumns = Sets.newHashSet();
+    private ScanOperatorPredicates predicates = new ScanOperatorPredicates();
+    private boolean hasUnknownColumn;
 
     public LogicalHiveScanOperator(Table table,
-                                   Table.TableType tableType,
-                                   List<ColumnRefOperator> outputColumns,
-                                   Map<ColumnRefOperator, Column> columnRefMap,
-                                   ImmutableMap<Column, Integer> columnToIds) {
-        super(OperatorType.LOGICAL_HIVE_SCAN, table, outputColumns, columnRefMap);
-        this.columnToIds = columnToIds;
-        this.tableType = tableType;
+                                   Map<ColumnRefOperator, Column> colRefToColumnMetaMap,
+                                   Map<Column, ColumnRefOperator> columnMetaToColRefMap,
+                                   long limit,
+                                   ScalarOperator predicate) {
+        super(OperatorType.LOGICAL_HIVE_SCAN,
+                table,
+                colRefToColumnMetaMap,
+                columnMetaToColRefMap,
+                limit,
+                predicate, null);
 
+        Preconditions.checkState(table instanceof HiveTable);
         HiveTable hiveTable = (HiveTable) table;
         partitionColumns.addAll(hiveTable.getPartitionColumnNames());
     }
 
-    public Map<Column, Integer> getColumnToIds() {
-        return columnToIds;
+    private LogicalHiveScanOperator() {
+        super(OperatorType.LOGICAL_HIVE_SCAN);
     }
 
-    public Table.TableType getTableType() {
-        return tableType;
+    @Override
+    public ScanOperatorPredicates getScanOperatorPredicates() {
+        return this.predicates;
     }
 
-    public Map<Long, PartitionKey> getIdToPartitionKey() {
-        return idToPartitionKey;
+    @Override
+    public void setScanOperatorPredicates(ScanOperatorPredicates predicates) {
+        this.predicates = predicates;
     }
 
-    public List<ScalarOperator> getPartitionConjuncts() {
-        return partitionConjuncts;
+    public boolean hasUnknownColumn() {
+        return hasUnknownColumn;
     }
 
-    public List<ScalarOperator> getNoEvalPartitionConjuncts() {
-        return noEvalPartitionConjuncts;
+    public void setHasUnknownColumn(boolean hasUnknownColumn) {
+        this.hasUnknownColumn = hasUnknownColumn;
     }
 
-    public List<ScalarOperator> getNonPartitionConjuncts() {
-        return nonPartitionConjuncts;
-    }
-
-    public Collection<Long> getSelectedPartitionIds() {
-        return selectedPartitionIds;
-    }
-
-    public void setSelectedPartitionIds(Collection<Long> selectedPartitionIds) {
-        this.selectedPartitionIds = selectedPartitionIds;
-    }
-
-    public List<ScalarOperator> getMinMaxConjuncts() {
-        return minMaxConjuncts;
-    }
-
-    public Map<ColumnRefOperator, Column> getMinMaxColumnRefMap() {
-        return minMaxColumnRefMap;
+    public boolean isEmptyOutputRows() {
+        return !table.isUnPartitioned() && predicates.getSelectedPartitionIds().isEmpty();
     }
 
     @Override
@@ -100,40 +78,21 @@ public class LogicalHiveScanOperator extends LogicalScanOperator {
         return visitor.visitLogicalHiveScan(this, context);
     }
 
-    @Override
-    public void tryExtendOutputColumns(Set<ColumnRefOperator> newOutputColumns) {
-        if (outputColumns.size() == 0) {
-            return;
-        }
-        // make sure there is at least one materialized column in new output columns.
-        if (newOutputColumns.stream().anyMatch(x -> !partitionColumns.contains(x.getName()))) {
-            return;
+    public static class Builder
+            extends LogicalScanOperator.Builder<LogicalHiveScanOperator, LogicalHiveScanOperator.Builder> {
+
+        @Override
+        protected LogicalHiveScanOperator newInstance() {
+            return new LogicalHiveScanOperator();
         }
 
-        // if not, we have to choose one materialized column from scan operator output columns
-        // with the minimal cost.
-        int smallestIndex = -1;
-        int smallestColumnLength = Integer.MAX_VALUE;
-        for (int index = 0; index < outputColumns.size(); ++index) {
-            ColumnRefOperator columnRefOperator = outputColumns.get(index);
-            if (partitionColumns.contains(columnRefOperator.getName())) {
-                continue;
-            }
-            // at least this is a materialized column.
-            if (smallestIndex == -1) {
-                smallestIndex = index;
-            }
-            Type columnType = outputColumns.get(index).getType();
-            // better this materialized column is a scalar type to save cost.
-            if (columnType.isScalarType()) {
-                int columnLength = columnType.getSlotSize();
-                if (columnLength < smallestColumnLength) {
-                    smallestIndex = index;
-                    smallestColumnLength = columnLength;
-                }
-            }
+        @Override
+        public LogicalHiveScanOperator.Builder withOperator(LogicalHiveScanOperator scanOperator) {
+            super.withOperator(scanOperator);
+
+            builder.predicates = scanOperator.predicates.clone();
+            builder.partitionColumns = scanOperator.partitionColumns;
+            return this;
         }
-        Preconditions.checkArgument(smallestIndex != -1);
-        newOutputColumns.add(outputColumns.get(smallestIndex));
     }
 }

@@ -1,27 +1,21 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/simd/simd.h
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
 #ifdef __SSE2__
 #include <emmintrin.h>
@@ -92,6 +86,70 @@ inline size_t count_nonzero(const std::vector<uint8_t>& list) {
 
 inline size_t count_nonzero(const std::vector<int8_t>& list) {
     return count_nonzero(list.data(), list.size());
+}
+
+// NOTE: memchr is much faster than a plain SIMD implementation
+template <class T>
+inline static size_t find_byte(const std::vector<T>& list, size_t start, size_t count, T byte) {
+    if (start >= list.size()) {
+        return start;
+    }
+    count = std::min(count, list.size() - start);
+    const void* p = std::memchr((const void*)(list.data() + start), byte, count);
+    if (p == nullptr) {
+        return start + count;
+    }
+    return (T*)p - list.data();
+}
+
+template <class T>
+inline static size_t find_byte(const std::vector<T>& list, size_t start, T byte) {
+    if (start >= list.size()) {
+        return start;
+    }
+    const void* p = std::memchr((const void*)(list.data() + start), byte, list.size() - start);
+    if (p == nullptr) {
+        return list.size();
+    }
+    return (T*)p - list.data();
+}
+
+// Find position for zero byte, return size of list if not found
+inline size_t find_zero(const std::vector<uint8_t>& list, size_t start) {
+    return find_byte<uint8_t>(list, start, 0);
+}
+
+inline size_t find_nonzero(const std::vector<uint8_t>& list, size_t start) {
+    return find_byte<uint8_t>(list, start, 1);
+}
+
+inline size_t find_nonzero(const std::vector<uint8_t>& list, size_t start, size_t count) {
+    return find_byte<uint8_t>(list, start, count, 1);
+}
+
+inline size_t find_zero(const std::vector<int8_t>& list, size_t start) {
+    return find_byte<int8_t>(list, start, 0);
+}
+
+inline size_t find_zero(const std::vector<uint8_t>& list, size_t start, size_t count) {
+    return find_byte<uint8_t>(list, start, count, 0);
+}
+
+inline bool contain_zero(const std::vector<uint8_t>& list) {
+    return find_zero(list, 0) < list.size();
+}
+
+inline bool contain_nonzero(const std::vector<uint8_t>& list) {
+    return find_nonzero(list, 0) < list.size();
+}
+
+inline bool contain_nonzero(const std::vector<uint8_t>& list, size_t start) {
+    return find_nonzero(list, start) < list.size();
+}
+
+inline bool contain_nonzero(const std::vector<uint8_t>& list, size_t start, size_t count) {
+    size_t pos = find_nonzero(list, start, count);
+    return pos < list.size() && pos < start + count;
 }
 
 } // namespace SIMD

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/plugin/PluginMgr.java
 
@@ -25,21 +38,27 @@ import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import com.starrocks.analysis.InstallPluginStmt;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.UserException;
 import com.starrocks.common.io.Writable;
 import com.starrocks.common.util.PrintableMap;
+import com.starrocks.persist.metablock.SRMetaBlockEOFException;
+import com.starrocks.persist.metablock.SRMetaBlockException;
+import com.starrocks.persist.metablock.SRMetaBlockID;
+import com.starrocks.persist.metablock.SRMetaBlockReader;
+import com.starrocks.persist.metablock.SRMetaBlockWriter;
 import com.starrocks.plugin.PluginInfo.PluginType;
 import com.starrocks.plugin.PluginLoader.PluginStatus;
 import com.starrocks.qe.AuditLogBuilder;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.InstallPluginStmt;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.DataInputStream;
 import java.io.DataOutput;
+import java.io.DataOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.util.Collections;
@@ -134,10 +153,10 @@ public class PluginMgr implements Writable {
             }
             plugins[info.getTypeId()].put(info.getName(), pluginLoader);
 
-            Catalog.getCurrentCatalog().getEditLog().logInstallPlugin(info);
+            GlobalStateMgr.getCurrentState().getEditLog().logInstallPlugin(info);
             LOG.info("install plugin {}", info.getName());
             return info;
-        } catch (IOException | UserException e) {
+        } catch (Throwable e) {
             pluginLoader.uninstall();
             throw e;
         }
@@ -222,7 +241,7 @@ public class PluginMgr implements Writable {
             pluginLoader.setStatus(PluginStatus.INSTALLED);
         } catch (IOException | UserException e) {
             pluginLoader.setStatus(PluginStatus.ERROR, e.getMessage());
-            throw e;
+            LOG.warn("fail to load plugin", e);
         } finally {
             // this is a replay process, so whether it is successful or not, add it's name.
             addDynamicPluginNameIfAbsent(info.getName());
@@ -327,6 +346,42 @@ public class PluginMgr implements Writable {
         out.writeInt(size);
         for (PluginInfo pc : list) {
             pc.write(out);
+        }
+    }
+
+    public long loadPlugins(DataInputStream dis, long checksum) throws IOException {
+        readFields(dis);
+        LOG.info("finished replay plugins from image");
+        return checksum;
+    }
+
+    public long savePlugins(DataOutputStream dos, long checksum) throws IOException {
+        write(dos);
+        return checksum;
+    }
+
+    public void save(DataOutputStream dos) throws IOException, SRMetaBlockException {
+        List<PluginInfo> pluginInfos = getAllDynamicPluginInfo();
+
+        int numJson = 1 + pluginInfos.size();
+        SRMetaBlockWriter writer = new SRMetaBlockWriter(dos, SRMetaBlockID.PLUGIN_MGR, numJson);
+        writer.writeJson(pluginInfos.size());
+        for (PluginInfo pluginInfo : pluginInfos) {
+            writer.writeJson(pluginInfo);
+        }
+
+        writer.close();
+    }
+
+    public void load(SRMetaBlockReader reader) throws IOException, SRMetaBlockException, SRMetaBlockEOFException {
+        try {
+            int pluginInfoSize = reader.readInt();
+            for (int i = 0; i < pluginInfoSize; ++i) {
+                PluginInfo pluginInfo = reader.readJson(PluginInfo.class);
+                replayLoadDynamicPlugin(pluginInfo);
+            }
+        } catch (UserException e) {
+            throw new RuntimeException(e);
         }
     }
 }

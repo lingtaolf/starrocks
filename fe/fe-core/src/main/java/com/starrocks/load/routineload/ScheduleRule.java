@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/load/routineload/ScheduleRule.java
 
@@ -20,9 +33,9 @@
 // under the License.
 package com.starrocks.load.routineload;
 
-import com.starrocks.catalog.Catalog;
 import com.starrocks.common.Config;
 import com.starrocks.common.InternalErrorCode;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.system.SystemInfoService;
 
 /**
@@ -30,10 +43,10 @@ import com.starrocks.system.SystemInfoService;
  */
 public class ScheduleRule {
 
-    private static int deadBeCount(String clusterName) {
-        SystemInfoService systemInfoService = Catalog.getCurrentSystemInfo();
-        int total = systemInfoService.getClusterBackendIds(clusterName, false).size();
-        int alive = systemInfoService.getClusterBackendIds(clusterName, true).size();
+    private static int deadBeCount() {
+        SystemInfoService systemInfoService = GlobalStateMgr.getCurrentSystemInfo();
+        int total = systemInfoService.getTotalBackendNumber();
+        int alive = systemInfoService.getAliveBackendNumber();
         return total - alive;
     }
 
@@ -56,7 +69,7 @@ public class ScheduleRule {
          * Handle all backends are down.
          */
         if (jobRoutine.pauseReason != null && jobRoutine.pauseReason.getCode() == InternalErrorCode.REPLICA_FEW_ERR) {
-            int dead = deadBeCount(jobRoutine.clusterName);
+            int dead = deadBeCount();
             if (dead > Config.max_tolerable_backend_down_num) {
                 return false;
             }
@@ -69,13 +82,13 @@ public class ScheduleRule {
                 long current = System.currentTimeMillis();
                 if (current - jobRoutine.firstResumeTimestamp < Config.period_of_auto_resume_min * 60000) {
                     if (jobRoutine.autoResumeCount >= 3) {
-                        jobRoutine.autoResumeLock = true;// locked Auto Resume RoutineLoadJob
+                        jobRoutine.autoResumeLock = true; // locked Auto Resume RoutineLoadJob
                         return false;
                     }
                     jobRoutine.autoResumeCount++;
                     return true;
                 } else {
-                    /**
+                    /*
                      * for example:
                      *       the first resume time at 10:01
                      *       the second resume time at 10:03

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/runtime/load_path_mgr.cpp
 
@@ -28,20 +41,26 @@
 #include <boost/algorithm/string/join.hpp>
 #include <string>
 
-#include "env/env.h"
+#include "common/config.h"
+#include "fs/fs.h"
+#include "fs/fs_util.h"
 #include "gen_cpp/Types_types.h"
+#include "runtime/base_load_path_mgr.h"
 #include "runtime/exec_env.h"
 #include "storage/olap_define.h"
 #include "storage/storage_engine.h"
-#include "util/file_utils.h"
+#include "util/thread.h"
 
 namespace starrocks {
 
 static const uint32_t MAX_SHARD_NUM = 1024;
 static const std::string SHARD_PREFIX = "__shard_";
 
-LoadPathMgr::LoadPathMgr(ExecEnv* exec_env) : _exec_env(exec_env), _idx(0), _next_shard(0), _error_path_next_shard(0) {}
-
+LoadPathMgr::LoadPathMgr(ExecEnv* exec_env) : _exec_env(exec_env), _idx(0), _next_shard(0) {}
+LoadPathMgr::~LoadPathMgr() {
+    _stop.set_value(true);
+    pthread_join(_cleaner_id, nullptr);
+}
 Status LoadPathMgr::init() {
     _path_vec.clear();
     for (auto& path : _exec_env->store_paths()) {
@@ -51,19 +70,30 @@ Status LoadPathMgr::init() {
 
     // error log is saved in first root path
     _error_log_dir = _exec_env->store_paths()[0].path + ERROR_LOG_PREFIX;
+
     // check and make dir
-    RETURN_IF_ERROR(FileUtils::create_dir(_error_log_dir));
+    RETURN_IF_ERROR(fs::create_directories(_error_log_dir));
 
     _idx = 0;
-    pthread_create(&_cleaner_id, nullptr, LoadPathMgr::cleaner, this);
+    _stop_future = _stop.get_future();
+    if (pthread_create(&_cleaner_id, nullptr, LoadPathMgr::cleaner, this)) {
+        return Status::InternalError("Fail to create thread 'load_path_mgr'");
+    }
+    Thread::set_thread_name(_cleaner_id, "load_path_mgr");
     return Status::OK();
 }
 
 void* LoadPathMgr::cleaner(void* param) {
-    LoadPathMgr* mgr = (LoadPathMgr*)param;
+    auto* mgr = (LoadPathMgr*)param;
     while (true) {
-        sleep(3600); // clean every one hour
-        mgr->clean();
+        static constexpr auto one_hour = std::chrono::seconds(3600);
+        // clean every one hour
+        auto status = mgr->stop_future().wait_for(one_hour);
+        if (status == std::future_status::ready) {
+            return nullptr;
+        } else if (status == std::future_status::timeout) {
+            mgr->clean();
+        }
     }
     return nullptr;
 }
@@ -84,12 +114,12 @@ Status LoadPathMgr::allocate_dir(const std::string& db, const std::string& label
             path = _path_vec[_idx] + "/" + db + "/" + shard + "/" + label;
             _idx = (_idx + 1) % size;
         }
-        status = FileUtils::create_dir(path);
+        status = fs::create_directories(path);
         if (LIKELY(status.ok())) {
             *prefix = path;
             return Status::OK();
         } else {
-            LOG(WARNING) << "create dir failed:" << path << ", error msg:" << status.get_error_msg();
+            LOG(WARNING) << "create dir failed:" << path << ", error msg:" << status.message();
         }
     }
 
@@ -113,28 +143,15 @@ bool LoadPathMgr::is_too_old(time_t cur_time, const std::string& label_dir, int6
 
 void LoadPathMgr::get_load_data_path(std::vector<std::string>* data_paths) {
     data_paths->insert(data_paths->end(), _path_vec.begin(), _path_vec.end());
-    return;
 }
 
 const std::string ERROR_FILE_NAME = "error_log";
+const std::string REJECTED_RECORD_FILE_NAME = "rejected_record";
 
-Status LoadPathMgr::get_load_error_file_name(const std::string& db, const std::string& label,
-                                             const TUniqueId& fragment_instance_id, std::string* error_path) {
+Status LoadPathMgr::get_load_error_file_name(const TUniqueId& fragment_instance_id, std::string* error_path) {
     std::stringstream ss;
-    std::string shard = "";
-    {
-        std::lock_guard<std::mutex> l(_lock);
-        shard = SHARD_PREFIX + std::to_string(_error_path_next_shard++ % MAX_SHARD_NUM);
-    }
-    std::string shard_path = _error_log_dir + "/" + shard;
-    // check and create shard path
-    Status status = FileUtils::create_dir(shard_path);
-    if (!status.ok()) {
-        LOG(WARNING) << "create error sub path failed. path=" << shard_path;
-    }
     // add shard sub dir to file path
-    ss << shard << "/" << ERROR_FILE_NAME << "_" << db << "_" << label << "_" << std::hex << fragment_instance_id.hi
-       << "_" << fragment_instance_id.lo;
+    ss << ERROR_FILE_NAME << "_" << std::hex << fragment_instance_id.hi << "_" << fragment_instance_id.lo;
     *error_path = ss.str();
     return Status::OK();
 }
@@ -147,12 +164,29 @@ std::string LoadPathMgr::get_load_error_absolute_path(const std::string& file_pa
     return path;
 }
 
+std::string LoadPathMgr::get_load_rejected_record_absolute_path(const std::string& rejected_record_dir,
+                                                                const std::string& db, const std::string& label,
+                                                                const int64_t id,
+                                                                const TUniqueId& fragment_instance_id) {
+    std::string path;
+    if (rejected_record_dir.empty()) {
+        path = _exec_env->store_paths()[0].path + REJECTED_RECORD_PREFIX;
+    } else {
+        path = rejected_record_dir;
+    }
+
+    std::stringstream ss;
+    ss << path << "/" << db << "/" << label << "/" << id << "/" << std::hex << fragment_instance_id.hi << "_"
+       << fragment_instance_id.lo;
+    return ss.str();
+}
+
 void LoadPathMgr::process_path(time_t now, const std::string& path, int64_t reserve_hours) {
     if (!is_too_old(now, path, reserve_hours)) {
         return;
     }
     LOG(INFO) << "Going to remove path. path=" << path;
-    Status status = FileUtils::remove_all(path);
+    Status status = fs::remove_all(path);
     if (status.ok()) {
         LOG(INFO) << "Remove path success. path=" << path;
     } else {
@@ -161,10 +195,10 @@ void LoadPathMgr::process_path(time_t now, const std::string& path, int64_t rese
 }
 
 void LoadPathMgr::clean_one_path(const std::string& path) {
-    Env* env = Env::Default();
+    FileSystem* fs = FileSystem::Default();
 
     std::vector<std::string> dbs;
-    Status status = FileUtils::list_files(env, path, &dbs);
+    Status status = fs->get_children(path, &dbs);
     // path may not exist
     if (!status.ok() && !status.is_not_found()) {
         LOG(WARNING) << "scan one path to delete directory failed. path=" << path;
@@ -175,7 +209,7 @@ void LoadPathMgr::clean_one_path(const std::string& path) {
     for (auto& db : dbs) {
         std::string db_dir = path + "/" + db;
         std::vector<std::string> sub_dirs;
-        status = FileUtils::list_files(env, db_dir, &sub_dirs);
+        status = fs->get_children(db_dir, &sub_dirs);
         if (!status.ok()) {
             LOG(WARNING) << "scan db of trash dir failed, continue. dir=" << db_dir;
             continue;
@@ -188,7 +222,7 @@ void LoadPathMgr::clean_one_path(const std::string& path) {
                 // sub_dir starts with SHARD_PREFIX
                 // process shard sub dir
                 std::vector<std::string> labels;
-                Status status = FileUtils::list_files(env, sub_path, &labels);
+                Status status = fs->get_children(sub_path, &labels);
                 if (!status.ok()) {
                     LOG(WARNING) << "scan one path to delete directory failed. path=" << sub_path;
                     continue;
@@ -213,11 +247,11 @@ void LoadPathMgr::clean() {
 }
 
 void LoadPathMgr::clean_error_log() {
-    Env* env = Env::Default();
+    FileSystem* fs = FileSystem::Default();
 
     time_t now = time(nullptr);
     std::vector<std::string> sub_dirs;
-    Status status = FileUtils::list_files(env, _error_log_dir, &sub_dirs);
+    Status status = fs->get_children(_error_log_dir, &sub_dirs);
     if (!status.ok()) {
         LOG(WARNING) << "scan error_log dir failed. dir=" << _error_log_dir;
         return;
@@ -230,7 +264,7 @@ void LoadPathMgr::clean_error_log() {
             // sub_dir starts with SHARD_PREFIX
             // process shard sub dir
             std::vector<std::string> error_log_files;
-            Status status = FileUtils::list_files(env, sub_path, &error_log_files);
+            Status status = fs->get_children(sub_path, &error_log_files);
             if (!status.ok()) {
                 LOG(WARNING) << "scan one path to delete directory failed. path=" << sub_path;
                 continue;

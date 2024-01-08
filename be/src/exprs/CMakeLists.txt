@@ -1,112 +1,109 @@
-# This file is made available under Elastic License 2.0.
-# This file is based on code available under the Apache license here:
-#   https://github.com/apache/incubator-doris/blob/master/be/src/exprs/CMakeLists.txt
-
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
+# Copyright 2021-present StarRocks, Inc. All rights reserved.
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-# where to put generated libraries
+if (CLANG_TIDY_PATH)
+    set(CMAKE_CXX_CLANG_TIDY "${CLANG_TIDY_PATH}")
+endif()
+
 set(LIBRARY_OUTPUT_PATH "${BUILD_DIR}/src/exprs")
 
 # where to put generated binaries
 set(EXECUTABLE_OUTPUT_PATH "${BUILD_DIR}/src/exprs")
 
-add_library(Exprs
-  agg/aggregate_factory.cpp
-  table_function/table_function_factory.cpp
-  base64.cpp
-  encryption_functions.cpp
-  aggregate_functions.cpp
-  agg_fn_evaluator.cpp
+set(EXPR_FILES 
+  agg/factory/aggregate_factory.cpp
+  agg/factory/aggregate_resolver_approx.cpp
+  agg/factory/aggregate_resolver_avg.cpp
+  agg/factory/aggregate_resolver_minmaxany.cpp
+  agg/factory/aggregate_resolver_others.cpp
+  agg/factory/aggregate_resolver_sumcount.cpp
+  agg/factory/aggregate_resolver_stream.cpp
+  agg/factory/aggregate_resolver_utility.cpp
+  agg/factory/aggregate_resolver_variance.cpp
+  agg/factory/aggregate_resolver_window.cpp
+  jit/ir_helper.cpp
+  jit/jit_engine.cpp
+  jit/jit_expr.cpp
+  jit/jit_functions.cpp
   anyval_util.cpp
+  base64.cpp
+  binary_functions.cpp
+  expr_context.cpp
+  expr.cpp
+  function_context.cpp
+  table_function/table_function_factory.cpp
+  table_function/json_each.cpp
+  table_function/list_rowsets.cpp
   arithmetic_expr.cpp
+  array_element_expr.cpp
+  array_expr.cpp
+  array_functions.cpp
   binary_predicate.cpp
+  bitmap_functions.cpp
   case_expr.cpp
   cast_expr.cpp
-  cast_functions.cpp
+  cast_expr_array.cpp
+  cast_expr_json.cpp
+  cast_nested.cpp
+  column_ref.cpp
+  placeholder_ref.cpp
+  dictmapping_expr.cpp
   compound_predicate.cpp
-  conditional_functions.cpp
-  conditional_functions_ir.cpp
-  decimal_operators.cpp
-  decimalv2_operators.cpp
-  time_operators.cpp
+  condition_expr.cpp
+  encryption_functions.cpp
   es_functions.cpp
-  hash_functions.cpp
-  literal.cpp
-  expr.cpp
-  expr_ir.cpp
-  expr_context.cpp
-  in_predicate.cpp
-  new_in_predicate.cpp
-  is_null_predicate.cpp
-  like_predicate.cpp
-  math_functions.cpp
-  null_literal.cpp
-  scalar_fn_call.cpp
-  slot_ref.cpp
-  string_functions.cpp
-  timestamp_functions.cpp
-  tuple_is_null_predicate.cpp
-  udf_builtins.cpp
-  utility_functions.cpp
-  info_func.cpp
-  hybird_set.cpp
-  json_functions.cpp
-  operators.cpp
-  hll_hash_function.cpp
-  agg_fn.cc
-  new_agg_fn_evaluator.cc
-  bitmap_function.cpp
-  hll_function.cpp
-  percentile_function.cpp
+  find_in_set.cpp
+  function_call_expr.cpp
+  function_helper.cpp
+  geo_functions.cpp
   grouping_sets_functions.cpp
-  vectorized/arithmetic_expr.cpp
-  vectorized/array_expr.cpp
-  vectorized/array_element_expr.cpp
-  vectorized/array_functions.cpp
-  vectorized/compound_predicate.cpp
-  vectorized/binary_predicate.cpp
-  vectorized/literal.cpp
-  vectorized/cast_expr.cpp
-  vectorized/function_call_expr.cpp
-  vectorized/function_helper.cpp
-  vectorized/math_functions.cpp
-  vectorized/string_functions.cpp
-  vectorized/time_functions.cpp
-  vectorized/condition_expr.cpp
-  vectorized/like_predicate.cpp
-  vectorized/in_predicate.cpp
-  vectorized/case_expr.cpp
-  vectorized/is_null_predicate.cpp
-  vectorized/hyperloglog_functions.cpp
-  vectorized/bitmap_functions.cpp
-  vectorized/json_functions.cpp
-  vectorized/percentile_functions.cpp
-  vectorized/encryption_functions.cpp
-  vectorized/geo_functions.cpp
-  vectorized/find_in_set.cpp
-  vectorized/locate.cpp
-  vectorized/split.cpp
-  vectorized/split_part.cpp
-  vectorized/column_ref.cpp
-  vectorized/grouping_sets_functions.cpp
-  vectorized/es_functions.cpp
-  vectorized/utility_functions.cpp
-  vectorized/info_func.cpp
-  vectorized/runtime_filter.cpp
-  vectorized/runtime_filter_bank.cpp
+  hyperloglog_functions.cpp
+  in_const_predicate.cpp
+  info_func.cpp
+  in_predicate.cpp
+  is_null_predicate.cpp
+  json_functions.cpp
+  jsonpath.cpp
+  like_predicate.cpp
+  literal.cpp
+  locate.cpp
+  map_element_expr.cpp
+  map_functions.cpp
+  struct_functions.cpp
+  math_functions.cpp
+  percentile_functions.cpp
+  runtime_filter_bank.cpp
+  runtime_filter.cpp
+  split.cpp
+  split_part.cpp
+  str_to_map.cpp
+  string_functions.cpp
+  time_functions.cpp
+  utility_functions.cpp
+  agg/java_udaf_function.cpp
+  agg/java_window_function.cpp
+  table_function/java_udtf_function.cpp
+  java_function_call_expr.cpp
+  lambda_function.cpp
+  array_map_expr.cpp
+  subfield_expr.cpp
+  map_apply_expr.cpp
+  map_expr.cpp
+  substring_index.cpp
+  dict_query_expr.cpp
+  runtime_filter_layout.cpp
+  dictionary_get_expr.cpp
 )
+
+add_library(Exprs ${EXPR_FILES})

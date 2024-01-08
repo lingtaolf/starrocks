@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/io/OutputStream.cc
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -59,7 +55,7 @@ bool BufferedOutputStream::Next(void** buffer, int* size) {
 
 void BufferedOutputStream::BackUp(int count) {
     if (count >= 0) {
-        uint64_t unsignedCount = static_cast<uint64_t>(count);
+        auto unsignedCount = static_cast<uint64_t>(count);
         if (unsignedCount <= dataBuffer->size()) {
             dataBuffer->resize(dataBuffer->size() - unsignedCount);
         } else {
@@ -97,6 +93,10 @@ uint64_t BufferedOutputStream::flush() {
     return dataSize;
 }
 
+void BufferedOutputStream::suppress() {
+    dataBuffer->resize(0);
+}
+
 void AppendOnlyBufferedStream::write(const char* data, size_t size) {
     size_t dataOffset = 0;
     while (size > 0) {
@@ -127,7 +127,7 @@ uint64_t AppendOnlyBufferedStream::flush() {
 
 void AppendOnlyBufferedStream::recordPosition(PositionRecorder* recorder) const {
     uint64_t flushedSize = outStream->getSize();
-    uint64_t unflushedSize = static_cast<uint64_t>(bufferOffset);
+    auto unflushedSize = static_cast<uint64_t>(bufferOffset);
     if (outStream->isCompressed()) {
         // start of the compression chunk in the stream
         recorder->add(flushedSize);

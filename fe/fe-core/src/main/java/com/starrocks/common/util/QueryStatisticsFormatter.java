@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/util/QueryStatisticsFormatter.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -27,17 +23,30 @@ import java.util.Formatter;
 
 public class QueryStatisticsFormatter {
 
-    public static String getScanBytes(long scanBytes) {
-        final Pair<Double, String> pair = DebugUtil.getByteUint(scanBytes);
-        final Formatter fmt = new Formatter();
-        final StringBuilder builder = new StringBuilder();
-        builder.append(fmt.format("%.2f", pair.first)).append(" ").append(pair.second);
-        return builder.toString();
+    public static String getBytes(long bytes) {
+        final Pair<Double, String> pair = DebugUtil.getByteUint(bytes);
+        try (final Formatter fmt = new Formatter()) {
+            return fmt.format("%.3f", pair.first) + " " + pair.second;
+        }
     }
 
     public static String getRowsReturned(long rowsReturned) {
+        return rowsReturned + " rows";
+    }
+
+    public static String getSecondsFromNano(long nano) {
         final StringBuilder builder = new StringBuilder();
-        builder.append(rowsReturned).append(" Rows");
+        try (final Formatter fmt = new Formatter()) {
+            builder.append(fmt.format("%.3f", nano * 1.0 / 1000_000_000)).append(" s");
+        }
+        return builder.toString();
+    }
+
+    public static String getSecondsFromMilli(long milli) {
+        final StringBuilder builder = new StringBuilder();
+        try (final Formatter fmt = new Formatter()) {
+            builder.append(fmt.format("%.3f", milli * 1.0 / 1000)).append(" s");
+        }
         return builder.toString();
     }
 }

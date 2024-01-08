@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/analysis/StringLiteral.java
 
@@ -26,6 +39,7 @@ import com.starrocks.common.AnalysisException;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReport;
 import com.starrocks.common.io.Text;
+import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.thrift.TExprNode;
 import com.starrocks.thrift.TExprNodeType;
 import com.starrocks.thrift.TStringLiteral;
@@ -33,6 +47,7 @@ import com.starrocks.thrift.TStringLiteral;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
@@ -40,12 +55,16 @@ public class StringLiteral extends LiteralExpr {
     private String value;
 
     public StringLiteral() {
-        super();
+        super(NodePosition.ZERO);
         type = Type.VARCHAR;
     }
 
     public StringLiteral(String value) {
-        super();
+        this(value, NodePosition.ZERO);
+    }
+
+    public StringLiteral(String value, NodePosition pos) {
+        super(pos);
         this.value = value;
         type = Type.VARCHAR;
         analysisDone();
@@ -66,7 +85,9 @@ public class StringLiteral extends LiteralExpr {
         if (expr instanceof NullLiteral) {
             return 1;
         }
-
+        if (expr == MaxLiteral.MAX_VALUE) {
+            return -1;
+        }
         // compare string with utf-8 byte array, same with DM,BE,StorageEngine
         byte[] thisBytes = null;
         byte[] otherBytes = null;
@@ -100,7 +121,7 @@ public class StringLiteral extends LiteralExpr {
     }
 
     @Override
-    public Object getRealValue() {
+    public Object getRealObjectValue() {
         return value;
     }
 
@@ -115,7 +136,14 @@ public class StringLiteral extends LiteralExpr {
 
     @Override
     public String toSqlImpl() {
-        return "'" + value + "'";
+        String sql = value;
+        if (value != null) {
+            if (value.contains("\\")) {
+                sql = value.replace("\\", "\\\\");
+            }
+            sql = sql.replace("'", "\\'");
+        }
+        return "'" + sql + "'";
     }
 
     @Override
@@ -154,7 +182,7 @@ public class StringLiteral extends LiteralExpr {
      * @throws AnalysisException when entire given string cannot be transformed into a date
      */
     private LiteralExpr convertToDate(Type targetType) throws AnalysisException {
-        LiteralExpr newLiteral = null;
+        LiteralExpr newLiteral;
         try {
             newLiteral = new DateLiteral(value, targetType);
         } catch (AnalysisException e) {
@@ -214,14 +242,6 @@ public class StringLiteral extends LiteralExpr {
         return super.uncheckedCastTo(targetType);
     }
 
-    public Expr castToNontypedNumericLiteral() throws AnalysisException {
-        try {
-            return new DecimalLiteral(this.getValue());
-        } catch (Throwable e) {
-            return uncheckedCastTo(Type.DOUBLE);
-        }
-    }
-
     @Override
     public void write(DataOutput out) throws IOException {
         super.write(out);
@@ -241,6 +261,22 @@ public class StringLiteral extends LiteralExpr {
 
     @Override
     public int hashCode() {
-        return 31 * super.hashCode() + Objects.hashCode(value);
+        return Objects.hash(super.hashCode(), value);
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        return super.equals(obj);
+    }
+
+    @Override
+    public void parseMysqlParam(ByteBuffer data) {
+        int strLen = getParamLen(data);
+        if (strLen > data.remaining()) {
+            strLen = data.remaining();
+        }
+        byte[] bytes = new byte[strLen];
+        data.get(bytes);
+        value = new String(bytes);
     }
 }

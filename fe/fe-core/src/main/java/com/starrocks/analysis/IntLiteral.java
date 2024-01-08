@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/analysis/IntLiteral.java
 
@@ -25,6 +38,10 @@ import com.google.common.base.Preconditions;
 import com.starrocks.catalog.Type;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.NotImplementedException;
+import com.starrocks.sql.common.ErrorType;
+import com.starrocks.sql.common.StarRocksPlannerException;
+import com.starrocks.sql.optimizer.validate.ValidateException;
+import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.thrift.TExprNode;
 import com.starrocks.thrift.TExprNodeType;
 import com.starrocks.thrift.TIntLiteral;
@@ -35,6 +52,7 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Objects;
 
 public class IntLiteral extends LiteralExpr {
     public static final long TINY_INT_MIN = Byte.MIN_VALUE; // -2^7 ~ 2^7 - 1
@@ -44,7 +62,10 @@ public class IntLiteral extends LiteralExpr {
     public static final long INT_MIN = Integer.MIN_VALUE; // -2^31 ~ 2^31 - 1
     public static final long INT_MAX = Integer.MAX_VALUE;
     public static final long BIG_INT_MIN = Long.MIN_VALUE; // -2^63 ~ 2^63 - 1
+    public static final long BIG_INT_MAX = Long.MAX_VALUE;
     private long value;
+
+    private String stringValue = null;
 
     /**
      * C'tor forcing type, e.g., due to implicit cast
@@ -54,12 +75,16 @@ public class IntLiteral extends LiteralExpr {
     }
 
     public IntLiteral(long value) {
-        super();
+        this(value, NodePosition.ZERO);
+    }
+
+    public IntLiteral(long value, NodePosition pos) {
+        super(pos);
         init(value);
         analysisDone();
     }
 
-    public IntLiteral(long longValue, Type type) throws AnalysisException {
+    public IntLiteral(long longValue, Type type) {
         super();
         boolean valid = true;
         switch (type.getPrimitiveType()) {
@@ -87,7 +112,7 @@ public class IntLiteral extends LiteralExpr {
         }
 
         if (!valid) {
-            throw new AnalysisException("Number out of range[" + value + "]. type: " + type);
+            throw new ArithmeticException("Number out of range[" + longValue + "]. type: " + type);
         }
 
         this.value = longValue;
@@ -135,6 +160,7 @@ public class IntLiteral extends LiteralExpr {
 
         this.value = longValue;
         this.type = type;
+        this.stringValue = value;
         analysisDone();
     }
 
@@ -175,6 +201,28 @@ public class IntLiteral extends LiteralExpr {
                 break;
             case BIGINT:
                 value = BIG_INT_MIN;
+                break;
+            default:
+                Preconditions.checkState(false);
+        }
+
+        return new IntLiteral(value);
+    }
+
+    public static IntLiteral createMaxValue(Type type) {
+        long value = 0L;
+        switch (type.getPrimitiveType()) {
+            case TINYINT:
+                value = TINY_INT_MAX;
+                break;
+            case SMALLINT:
+                value = SMALL_INT_MAX;
+                break;
+            case INT:
+                value = INT_MAX;
+                break;
+            case BIGINT:
+                value = BIG_INT_MAX;
                 break;
             default:
                 Preconditions.checkState(false);
@@ -248,8 +296,20 @@ public class IntLiteral extends LiteralExpr {
     }
 
     @Override
-    public Object getRealValue() {
-        return getLongValue();
+    public Object getRealObjectValue() {
+        switch (type.getPrimitiveType()) {
+            case TINYINT:
+                return (byte) value;
+            case SMALLINT:
+                return (short) value;
+            case INT:
+                return (int) value;
+            case BIGINT:
+                return value;
+            default:
+                throw new StarRocksPlannerException("Error int literal type " + type.getPrimitiveType(),
+                        ErrorType.INTERNAL_ERROR);
+        }
     }
 
     public long getValue() {
@@ -258,7 +318,7 @@ public class IntLiteral extends LiteralExpr {
 
     @Override
     public String getStringValue() {
-        return Long.toString(value);
+        return stringValue != null ? stringValue : Long.toString(value);
     }
 
     @Override
@@ -332,6 +392,32 @@ public class IntLiteral extends LiteralExpr {
 
     @Override
     public int hashCode() {
-        return 31 * super.hashCode() + Long.hashCode(value);
+        // IntLiteral(0) equals to LargeIntLiteral(0), so their hash codes must equal.
+        return Objects.hash(getLongValue());
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        return super.equals(obj);
+    }
+
+    @Override
+    public void parseMysqlParam(ByteBuffer data) {
+        switch (type.getPrimitiveType()) {
+            case TINYINT:
+                value = data.get();
+                break;
+            case SMALLINT:
+                value = data.getChar();
+                break;
+            case INT:
+                value = data.getInt();
+                break;
+            case BIGINT:
+                value = data.getLong();
+                break;
+            default:
+                throw new ValidateException("unknown binary data for type:" + type.getPrimitiveType(), ErrorType.INTERNAL_ERROR);
+        }
     }
 }

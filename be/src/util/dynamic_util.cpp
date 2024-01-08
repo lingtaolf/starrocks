@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/util/dynamic_util.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -31,7 +27,7 @@ Status dynamic_lookup(void* handle, const char* symbol, void** fn_ptr) {
     *(void**)(fn_ptr) = dlsym(handle, symbol);
     char* error = dlerror();
 
-    if (error != NULL) {
+    if (error != nullptr) {
         std::stringstream ss;
         ss << "Unable to find " << symbol << "\ndlerror: " << error;
         return Status::InternalError(ss.str());
@@ -45,7 +41,7 @@ Status dynamic_open(const char* library, void** handle) {
 
     *handle = dlopen(library, flags);
 
-    if (*handle == NULL) {
+    if (*handle == nullptr) {
         std::stringstream ss;
         ss << "Unable to load " << library << "\ndlerror: " << dlerror();
         return Status::InternalError(ss.str());

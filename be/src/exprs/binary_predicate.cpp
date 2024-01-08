@@ -1,483 +1,368 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exprs/binary_predicate.cpp
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "exprs/binary_predicate.h"
 
-#include <sstream>
-
-#include "gen_cpp/Exprs_types.h"
-#include "runtime/datetime_value.h"
-#include "runtime/decimal_value.h"
-#include "runtime/decimalv2_value.h"
-#include "runtime/runtime_state.h"
-#include "runtime/string_value.h"
-#include "util/debug_util.h"
+#include "column/array_column.h"
+#include "column/column_builder.h"
+#include "column/column_viewer.h"
+#include "column/type_traits.h"
+#include "exprs/binary_function.h"
+#include "exprs/unary_function.h"
+#include "storage/column_predicate.h"
+#include "types/logical_type.h"
+#include "types/logical_type_infra.h"
 
 namespace starrocks {
 
-Expr* BinaryPredicate::from_thrift(const TExprNode& node) {
-    switch (node.opcode) {
-    case TExprOpcode::EQ: {
-        switch (node.child_type) {
-        case TPrimitiveType::BOOLEAN:
-            return new EqBooleanValPred(node);
-        case TPrimitiveType::TINYINT:
-            return new EqTinyIntValPred(node);
-        case TPrimitiveType::SMALLINT:
-            return new EqSmallIntValPred(node);
-        case TPrimitiveType::INT:
-            return new EqIntValPred(node);
-        case TPrimitiveType::BIGINT:
-            return new EqBigIntValPred(node);
-        case TPrimitiveType::LARGEINT:
-            return new EqLargeIntValPred(node);
-        case TPrimitiveType::FLOAT:
-            return new EqFloatValPred(node);
-        case TPrimitiveType::DOUBLE:
-            return new EqDoubleValPred(node);
-        case TPrimitiveType::CHAR:
-        case TPrimitiveType::VARCHAR:
-            return new EqStringValPred(node);
-        case TPrimitiveType::DATE:
-        case TPrimitiveType::DATETIME:
-            return new EqDateTimeValPred(node);
-        case TPrimitiveType::DECIMAL:
-            return new EqDecimalValPred(node);
-        case TPrimitiveType::DECIMALV2:
-            return new EqDecimalV2ValPred(node);
-        default:
-            return NULL;
+template <LogicalType ltype>
+struct PredicateCmpType {
+    using CmpType = RunTimeCppType<ltype>;
+};
+
+template <>
+struct PredicateCmpType<TYPE_JSON> {
+    using CmpType = JsonValue;
+};
+
+// The evaluator for LogicalType
+template <LogicalType ltype>
+using EvalEq = std::equal_to<typename PredicateCmpType<ltype>::CmpType>;
+template <LogicalType ltype>
+using EvalNe = std::not_equal_to<typename PredicateCmpType<ltype>::CmpType>;
+template <LogicalType ltype>
+using EvalLt = std::less<typename PredicateCmpType<ltype>::CmpType>;
+template <LogicalType ltype>
+using EvalLe = std::less_equal<typename PredicateCmpType<ltype>::CmpType>;
+template <LogicalType ltype>
+using EvalGt = std::greater<typename PredicateCmpType<ltype>::CmpType>;
+template <LogicalType ltype>
+using EvalGe = std::greater_equal<typename PredicateCmpType<ltype>::CmpType>;
+
+struct EvalCmpZero {
+    TExprOpcode::type op;
+
+    EvalCmpZero(TExprOpcode::type in_op) : op(in_op) {}
+
+    void eval(const std::vector<int8_t>& cmp_values, ColumnBuilder<TYPE_BOOLEAN>* output) {
+        auto cmp = build_comparator();
+        for (int8_t x : cmp_values) {
+            output->append(cmp(x));
         }
     }
-    case TExprOpcode::NE: {
-        switch (node.child_type) {
-        case TPrimitiveType::BOOLEAN:
-            return new NeBooleanValPred(node);
-        case TPrimitiveType::TINYINT:
-            return new NeTinyIntValPred(node);
-        case TPrimitiveType::SMALLINT:
-            return new NeSmallIntValPred(node);
-        case TPrimitiveType::INT:
-            return new NeIntValPred(node);
-        case TPrimitiveType::BIGINT:
-            return new NeBigIntValPred(node);
-        case TPrimitiveType::LARGEINT:
-            return new NeLargeIntValPred(node);
-        case TPrimitiveType::FLOAT:
-            return new NeFloatValPred(node);
-        case TPrimitiveType::DOUBLE:
-            return new NeDoubleValPred(node);
-        case TPrimitiveType::CHAR:
-        case TPrimitiveType::VARCHAR:
-            return new NeStringValPred(node);
-        case TPrimitiveType::DATE:
-        case TPrimitiveType::DATETIME:
-            return new NeDateTimeValPred(node);
-        case TPrimitiveType::DECIMAL:
-            return new NeDecimalValPred(node);
-        case TPrimitiveType::DECIMALV2:
-            return new NeDecimalV2ValPred(node);
+
+    std::function<bool(int)> build_comparator() {
+        switch (op) {
+        case TExprOpcode::EQ:
+            return [](int x) { return x == 0; };
+        case TExprOpcode::NE:
+            return [](int x) { return x != 0; };
+        case TExprOpcode::LE:
+            return [](int x) { return x <= 0; };
+        case TExprOpcode::LT:
+            return [](int x) { return x < 0; };
+        case TExprOpcode::GE:
+            return [](int x) { return x >= 0; };
+        case TExprOpcode::GT:
+            return [](int x) { return x > 0; };
+        case TExprOpcode::EQ_FOR_NULL:
+            return [](int x) { return x == 0; };
         default:
-            return NULL;
+            CHECK(false) << "illegal operation: " << op;
         }
     }
-    case TExprOpcode::LT: {
-        switch (node.child_type) {
-        case TPrimitiveType::BOOLEAN:
-            return new LtBooleanValPred(node);
-        case TPrimitiveType::TINYINT:
-            return new LtTinyIntValPred(node);
-        case TPrimitiveType::SMALLINT:
-            return new LtSmallIntValPred(node);
-        case TPrimitiveType::INT:
-            return new LtIntValPred(node);
-        case TPrimitiveType::BIGINT:
-            return new LtBigIntValPred(node);
-        case TPrimitiveType::LARGEINT:
-            return new LtLargeIntValPred(node);
-        case TPrimitiveType::FLOAT:
-            return new LtFloatValPred(node);
-        case TPrimitiveType::DOUBLE:
-            return new LtDoubleValPred(node);
-        case TPrimitiveType::CHAR:
-        case TPrimitiveType::VARCHAR:
-            return new LtStringValPred(node);
-        case TPrimitiveType::DATE:
-        case TPrimitiveType::DATETIME:
-            return new LtDateTimeValPred(node);
-        case TPrimitiveType::DECIMAL:
-            return new LtDecimalValPred(node);
-        case TPrimitiveType::DECIMALV2:
-            return new LtDecimalV2ValPred(node);
-        default:
-            return NULL;
+};
+
+// A wrapper for evaluator, to fit in the Expression framework
+template <typename CMP>
+struct BinaryPredFunc {
+    template <typename LType, typename RType, typename ResultType>
+    static inline ResultType apply(const LType& l, const RType& r) {
+        return CMP()(l, r);
+    }
+};
+
+template <LogicalType Type, typename OP>
+class VectorizedBinaryPredicate final : public Predicate {
+public:
+    explicit VectorizedBinaryPredicate(const TExprNode& node) : Predicate(node) {}
+    ~VectorizedBinaryPredicate() override = default;
+
+    Expr* clone(ObjectPool* pool) const override { return pool->add(new VectorizedBinaryPredicate(*this)); }
+
+    StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, ptr));
+        ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_checked(context, ptr));
+        return VectorizedStrictBinaryFunction<OP>::template evaluate<Type, TYPE_BOOLEAN>(l, r);
+    }
+};
+
+class ArrayPredicate final : public Predicate {
+public:
+    explicit ArrayPredicate(const TExprNode& node) : Predicate(node), _comparator(node.opcode) {}
+    ~ArrayPredicate() override = default;
+
+    Expr* clone(ObjectPool* pool) const override { return pool->add(new ArrayPredicate(*this)); }
+
+    StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, ptr));
+        ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_checked(context, ptr));
+
+        if (l->only_null() || r->only_null()) {
+            return ColumnHelper::create_const_null_column(l->size());
+        }
+
+        auto* data1 =
+                ColumnHelper::get_data_column(ColumnHelper::unpack_and_duplicate_const_column(l->size(), l).get());
+        auto* data2 =
+                ColumnHelper::get_data_column(ColumnHelper::unpack_and_duplicate_const_column(r->size(), r).get());
+
+        DCHECK(data1->is_array());
+        DCHECK(data2->is_array());
+        auto lhs_arr = down_cast<ArrayColumn&>(*data1);
+        auto rhs_arr = down_cast<ArrayColumn&>(*data2);
+
+        ColumnBuilder<TYPE_BOOLEAN> builder(l->size());
+        std::vector<int8_t> cmp_result;
+        lhs_arr.compare_column(rhs_arr, &cmp_result);
+
+        // Convert the compare result (-1, 0, 1) to the predicate result (true/false)
+        _comparator.eval(cmp_result, &builder);
+
+        ColumnPtr data_result = builder.build(false); // non-const columns as unfolded earlier
+
+        if (l->has_null() || r->has_null()) {
+            NullColumnPtr null_flags = FunctionHelper::union_nullable_column(l, r);
+            return FunctionHelper::merge_column_and_null_column(std::move(data_result), std::move(null_flags));
+        } else {
+            return data_result;
         }
     }
-    case TExprOpcode::LE: {
-        switch (node.child_type) {
-        case TPrimitiveType::BOOLEAN:
-            return new LeBooleanValPred(node);
-        case TPrimitiveType::TINYINT:
-            return new LeTinyIntValPred(node);
-        case TPrimitiveType::SMALLINT:
-            return new LeSmallIntValPred(node);
-        case TPrimitiveType::INT:
-            return new LeIntValPred(node);
-        case TPrimitiveType::BIGINT:
-            return new LeBigIntValPred(node);
-        case TPrimitiveType::LARGEINT:
-            return new LeLargeIntValPred(node);
-        case TPrimitiveType::FLOAT:
-            return new LeFloatValPred(node);
-        case TPrimitiveType::DOUBLE:
-            return new LeDoubleValPred(node);
-        case TPrimitiveType::CHAR:
-        case TPrimitiveType::VARCHAR:
-            return new LeStringValPred(node);
-        case TPrimitiveType::DATE:
-        case TPrimitiveType::DATETIME:
-            return new LeDateTimeValPred(node);
-        case TPrimitiveType::DECIMAL:
-            return new LeDecimalValPred(node);
-        case TPrimitiveType::DECIMALV2:
-            return new LeDecimalV2ValPred(node);
-        default:
-            return NULL;
+
+private:
+    EvalCmpZero _comparator;
+};
+
+template <bool is_equal>
+class CommonEqualsPredicate final : public Predicate {
+public:
+    explicit CommonEqualsPredicate(const TExprNode& node) : Predicate(node) {}
+    ~CommonEqualsPredicate() override = default;
+
+    Expr* clone(ObjectPool* pool) const override { return pool->add(new CommonEqualsPredicate(*this)); }
+
+    StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* chunk) override {
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, chunk));
+        ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_checked(context, chunk));
+
+        if (l->only_null() || r->only_null()) {
+            return ColumnHelper::create_const_null_column(l->size());
         }
-    }
-    case TExprOpcode::GT: {
-        switch (node.child_type) {
-        case TPrimitiveType::BOOLEAN:
-            return new GtBooleanValPred(node);
-        case TPrimitiveType::TINYINT:
-            return new GtTinyIntValPred(node);
-        case TPrimitiveType::SMALLINT:
-            return new GtSmallIntValPred(node);
-        case TPrimitiveType::INT:
-            return new GtIntValPred(node);
-        case TPrimitiveType::BIGINT:
-            return new GtBigIntValPred(node);
-        case TPrimitiveType::LARGEINT:
-            return new GtLargeIntValPred(node);
-        case TPrimitiveType::FLOAT:
-            return new GtFloatValPred(node);
-        case TPrimitiveType::DOUBLE:
-            return new GtDoubleValPred(node);
-        case TPrimitiveType::CHAR:
-        case TPrimitiveType::VARCHAR:
-            return new GtStringValPred(node);
-        case TPrimitiveType::DATE:
-        case TPrimitiveType::DATETIME:
-            return new GtDateTimeValPred(node);
-        case TPrimitiveType::DECIMAL:
-            return new GtDecimalValPred(node);
-        case TPrimitiveType::DECIMALV2:
-            return new GtDecimalV2ValPred(node);
-        default:
-            return NULL;
+        // a nullable column must not contain const columns
+        size_t lstep = l->is_constant() ? 0 : 1;
+        size_t rstep = r->is_constant() ? 0 : 1;
+
+        auto& const1 = FunctionHelper::get_data_column_of_const(l);
+        auto& const2 = FunctionHelper::get_data_column_of_const(r);
+
+        auto& data1 = FunctionHelper::get_data_column_of_nullable(const1);
+        auto& data2 = FunctionHelper::get_data_column_of_nullable(const2);
+
+        size_t size = l->size();
+        ColumnBuilder<TYPE_BOOLEAN> builder(size);
+        for (size_t i = 0, loff = 0, roff = 0; i < size; i++) {
+            if (l->is_null(loff) || r->is_null(roff)) {
+                builder.append_null();
+            } else {
+                auto res = data1->equals(loff, *(data2.get()), roff, false);
+                if (res == -1) {
+                    builder.append_null();
+                } else {
+                    builder.append(!(res ^ is_equal));
+                }
+            }
+
+            loff += lstep;
+            roff += rstep;
         }
+        return builder.build(ColumnHelper::is_all_const({l, r}));
     }
-    case TExprOpcode::GE: {
-        switch (node.child_type) {
-        case TPrimitiveType::BOOLEAN:
-            return new GeBooleanValPred(node);
-        case TPrimitiveType::TINYINT:
-            return new GeTinyIntValPred(node);
-        case TPrimitiveType::SMALLINT:
-            return new GeSmallIntValPred(node);
-        case TPrimitiveType::INT:
-            return new GeIntValPred(node);
-        case TPrimitiveType::BIGINT:
-            return new GeBigIntValPred(node);
-        case TPrimitiveType::LARGEINT:
-            return new GeLargeIntValPred(node);
-        case TPrimitiveType::FLOAT:
-            return new GeFloatValPred(node);
-        case TPrimitiveType::DOUBLE:
-            return new GeDoubleValPred(node);
-        case TPrimitiveType::CHAR:
-        case TPrimitiveType::VARCHAR:
-            return new GeStringValPred(node);
-        case TPrimitiveType::DATE:
-        case TPrimitiveType::DATETIME:
-            return new GeDateTimeValPred(node);
-        case TPrimitiveType::DECIMAL:
-            return new GeDecimalValPred(node);
-        case TPrimitiveType::DECIMALV2:
-            return new GeDecimalV2ValPred(node);
-        default:
-            return NULL;
-        }
-    }
-    case TExprOpcode::EQ_FOR_NULL: {
-        switch (node.child_type) {
-        case TPrimitiveType::BOOLEAN:
-            return new EqForNullBooleanValPred(node);
-        case TPrimitiveType::TINYINT:
-            return new EqForNullTinyIntValPred(node);
-        case TPrimitiveType::SMALLINT:
-            return new EqForNullSmallIntValPred(node);
-        case TPrimitiveType::INT:
-            return new EqForNullIntValPred(node);
-        case TPrimitiveType::BIGINT:
-            return new EqForNullBigIntValPred(node);
-        case TPrimitiveType::LARGEINT:
-            return new EqForNullLargeIntValPred(node);
-        case TPrimitiveType::FLOAT:
-            return new EqForNullFloatValPred(node);
-        case TPrimitiveType::DOUBLE:
-            return new EqForNullDoubleValPred(node);
-        case TPrimitiveType::CHAR:
-        case TPrimitiveType::VARCHAR:
-            return new EqForNullStringValPred(node);
-        case TPrimitiveType::DATE:
-        case TPrimitiveType::DATETIME:
-            return new EqForNullDateTimeValPred(node);
-        case TPrimitiveType::DECIMAL:
-            return new EqForNullDecimalValPred(node);
-        case TPrimitiveType::DECIMALV2:
-            return new EqForNullDecimalV2ValPred(node);
-        default:
-            return NULL;
-        }
-    }
-    default:
-        return NULL;
-    }
-    return NULL;
+};
+
+DEFINE_UNARY_FN_WITH_IMPL(isNullImpl, v) {
+    return v;
 }
 
-std::string BinaryPredicate::debug_string() const {
-    std::stringstream out;
-    out << "BinaryPredicate(" << Expr::debug_string() << ")";
-    return out.str();
-}
+class CommonNullSafeEqualsPredicate final : public Predicate {
+public:
+    explicit CommonNullSafeEqualsPredicate(const TExprNode& node) : Predicate(node) {}
+    ~CommonNullSafeEqualsPredicate() override = default;
 
-#define BINARY_PRED_FN(CLASS, TYPE, FN, OP, LLVM_PRED)                   \
-    BooleanVal CLASS::get_boolean_val(ExprContext* ctx, TupleRow* row) { \
-        TYPE v1 = _children[0]->FN(ctx, row);                            \
-        if (v1.is_null) {                                                \
-            return BooleanVal::null();                                   \
-        }                                                                \
-        TYPE v2 = _children[1]->FN(ctx, row);                            \
-        if (v2.is_null) {                                                \
-            return BooleanVal::null();                                   \
-        }                                                                \
-        return BooleanVal(v1.val OP v2.val);                             \
+    Expr* clone(ObjectPool* pool) const override { return pool->add(new CommonNullSafeEqualsPredicate(*this)); }
+
+    // if v1 null and v2 null = true
+    // if v1 null and v2 not null = false
+    // if v1 not null and v2 null = false
+    // if v1 not null and v2 not null = v1 OP v2
+    StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* chunk) override {
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, chunk));
+        ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_checked(context, chunk));
+
+        if (l->only_null() && r->only_null()) {
+            return ColumnHelper::create_const_column<TYPE_BOOLEAN>(true, l->size());
+        }
+
+        auto is_null_predicate = [&](const ColumnPtr& column) {
+            if (!column->is_nullable() || !column->has_null()) {
+                return ColumnHelper::create_const_column<TYPE_BOOLEAN>(false, column->size());
+            }
+            auto col = ColumnHelper::as_raw_column<NullableColumn>(column)->null_column();
+            return VectorizedStrictUnaryFunction<isNullImpl>::evaluate<TYPE_NULL, TYPE_BOOLEAN>(col);
+        };
+
+        if (l->only_null()) {
+            return is_null_predicate(r);
+        } else if (r->only_null()) {
+            return is_null_predicate(l);
+        }
+
+        auto& const1 = FunctionHelper::get_data_column_of_nullable(l);
+        auto& const2 = FunctionHelper::get_data_column_of_nullable(r);
+
+        size_t lstep = const1->is_constant() ? 0 : 1;
+        size_t rstep = const2->is_constant() ? 0 : 1;
+
+        auto& data1 = FunctionHelper::get_data_column_of_const(const1);
+        auto& data2 = FunctionHelper::get_data_column_of_const(const2);
+
+        size_t size = l->size();
+        ColumnBuilder<TYPE_BOOLEAN> builder(size);
+        for (size_t i = 0, loff = 0, roff = 0; i < size; i++) {
+            auto ln = l->is_null(loff);
+            auto rn = r->is_null(roff);
+            if (ln & rn) {
+                builder.append(true);
+            } else if (ln ^ rn) {
+                builder.append(false);
+            } else {
+                builder.append(data1->equals(loff, *(data2.get()), roff));
+            }
+
+            loff += lstep;
+            roff += rstep;
+        }
+        return builder.build(ColumnHelper::is_all_const({l, r}));
+    }
+};
+
+template <LogicalType Type, typename OP>
+class VectorizedNullSafeEqPredicate final : public Predicate {
+public:
+    explicit VectorizedNullSafeEqPredicate(const TExprNode& node) : Predicate(node) {}
+    ~VectorizedNullSafeEqPredicate() override = default;
+
+    Expr* clone(ObjectPool* pool) const override { return pool->add(new VectorizedNullSafeEqPredicate(*this)); }
+
+    // if v1 null and v2 null = true
+    // if v1 null and v2 not null = false
+    // if v1 not null and v2 null = false
+    // if v1 not null and v2 not null = v1 OP v2
+    StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, ptr));
+        ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_checked(context, ptr));
+
+        ColumnViewer<Type> v1(l);
+        ColumnViewer<Type> v2(r);
+        Columns list = {l, r};
+
+        size_t size = list[0]->size();
+        ColumnBuilder<TYPE_BOOLEAN> builder(size);
+        for (int row = 0; row < size; ++row) {
+            auto null1 = v1.is_null(row);
+            auto null2 = v2.is_null(row);
+
+            if (null1 & null2) {
+                // all null = true
+                builder.append(true);
+            } else if (null1 ^ null2) {
+                // one null = false
+                builder.append(false);
+            } else {
+                // all not null = value eq
+                using CppType = RunTimeCppType<Type>;
+                builder.append(OP::template apply<CppType, CppType, bool>(v1.value(row), v2.value(row)));
+            }
+        }
+
+        return builder.build(ColumnHelper::is_all_const(list));
+    }
+};
+
+struct BinaryPredicateBuilder {
+    template <LogicalType data_type>
+    Expr* operator()(const TExprNode& node) {
+        switch (node.opcode) {
+        case TExprOpcode::EQ:
+            return new VectorizedBinaryPredicate<data_type, BinaryPredFunc<EvalEq<data_type>>>(node);
+        case TExprOpcode::NE:
+            return new VectorizedBinaryPredicate<data_type, BinaryPredFunc<EvalNe<data_type>>>(node);
+        case TExprOpcode::LT:
+            return new VectorizedBinaryPredicate<data_type, BinaryPredFunc<EvalLt<data_type>>>(node);
+        case TExprOpcode::LE:
+            return new VectorizedBinaryPredicate<data_type, BinaryPredFunc<EvalLe<data_type>>>(node);
+        case TExprOpcode::GT:
+            return new VectorizedBinaryPredicate<data_type, BinaryPredFunc<EvalGt<data_type>>>(node);
+        case TExprOpcode::GE:
+            return new VectorizedBinaryPredicate<data_type, BinaryPredFunc<EvalGe<data_type>>>(node);
+        case TExprOpcode::EQ_FOR_NULL:
+            return new VectorizedNullSafeEqPredicate<data_type, BinaryPredFunc<EvalEq<data_type>>>(node);
+        default:
+            break;
+        }
+        return nullptr;
+    }
+};
+
+Expr* VectorizedBinaryPredicateFactory::from_thrift(const TExprNode& node) {
+    LogicalType type;
+    if (node.__isset.child_type_desc) {
+        type = TypeDescriptor::from_thrift(node.child_type_desc).type;
+    } else {
+        type = thrift_to_type(node.child_type);
     }
 
-// add '/**/' to pass codestyle check of cooder
-#define BINARY_PRED_INT_FNS(TYPE, FN)                                         \
-    BINARY_PRED_FN(Eq##TYPE##Pred, TYPE, FN, /**/ == /**/, CmpInst::ICMP_EQ)  \
-    BINARY_PRED_FN(Ne##TYPE##Pred, TYPE, FN, /**/ != /**/, CmpInst::ICMP_NE)  \
-    BINARY_PRED_FN(Lt##TYPE##Pred, TYPE, FN, /**/ < /**/, CmpInst::ICMP_SLT)  \
-    BINARY_PRED_FN(Le##TYPE##Pred, TYPE, FN, /**/ <= /**/, CmpInst::ICMP_SLE) \
-    BINARY_PRED_FN(Gt##TYPE##Pred, TYPE, FN, /**/ > /**/, CmpInst::ICMP_SGT)  \
-    BINARY_PRED_FN(Ge##TYPE##Pred, TYPE, FN, /**/ >= /**/, CmpInst::ICMP_SGE)
-
-BINARY_PRED_INT_FNS(BooleanVal, get_boolean_val);
-BINARY_PRED_INT_FNS(TinyIntVal, get_tiny_int_val);
-BINARY_PRED_INT_FNS(SmallIntVal, get_small_int_val);
-BINARY_PRED_INT_FNS(IntVal, get_int_val);
-BINARY_PRED_INT_FNS(BigIntVal, get_big_int_val);
-BINARY_PRED_INT_FNS(LargeIntVal, get_large_int_val);
-
-#define BINARY_PRED_FLOAT_FNS(TYPE, FN)                             \
-    BINARY_PRED_FN(Eq##TYPE##Pred, TYPE, FN, ==, CmpInst::FCMP_OEQ) \
-    BINARY_PRED_FN(Ne##TYPE##Pred, TYPE, FN, !=, CmpInst::FCMP_UNE) \
-    BINARY_PRED_FN(Lt##TYPE##Pred, TYPE, FN, <, CmpInst::FCMP_OLT)  \
-    BINARY_PRED_FN(Le##TYPE##Pred, TYPE, FN, <=, CmpInst::FCMP_OLE) \
-    BINARY_PRED_FN(Gt##TYPE##Pred, TYPE, FN, >, CmpInst::FCMP_OGT)  \
-    BINARY_PRED_FN(Ge##TYPE##Pred, TYPE, FN, >=, CmpInst::FCMP_OGE)
-
-BINARY_PRED_FLOAT_FNS(FloatVal, get_float_val);
-BINARY_PRED_FLOAT_FNS(DoubleVal, get_double_val);
-
-#define COMPLICATE_BINARY_PRED_FN(CLASS, TYPE, FN, STARROCKS_TYPE, FROM_FUNC, OP) \
-    BooleanVal CLASS::get_boolean_val(ExprContext* ctx, TupleRow* row) {          \
-        TYPE v1 = _children[0]->FN(ctx, row);                                     \
-        if (v1.is_null) {                                                         \
-            return BooleanVal::null();                                            \
-        }                                                                         \
-        TYPE v2 = _children[1]->FN(ctx, row);                                     \
-        if (v2.is_null) {                                                         \
-            return BooleanVal::null();                                            \
-        }                                                                         \
-        STARROCKS_TYPE pv1 = STARROCKS_TYPE::FROM_FUNC(v1);                       \
-        STARROCKS_TYPE pv2 = STARROCKS_TYPE::FROM_FUNC(v2);                       \
-        return BooleanVal(pv1 OP pv2);                                            \
+    if (type == TYPE_ARRAY) {
+        if (node.opcode == TExprOpcode::EQ) {
+            return new CommonEqualsPredicate<true>(node);
+        } else if (node.opcode == TExprOpcode::EQ_FOR_NULL) {
+            return new CommonNullSafeEqualsPredicate(node);
+        } else {
+            return new ArrayPredicate(node);
+        }
+    } else if (type == TYPE_MAP || type == TYPE_STRUCT) {
+        if (node.opcode == TExprOpcode::EQ) {
+            return new CommonEqualsPredicate<true>(node);
+        } else if (node.opcode == TExprOpcode::EQ_FOR_NULL) {
+            return new CommonNullSafeEqualsPredicate(node);
+        } else if (node.opcode == TExprOpcode::NE) {
+            return new CommonEqualsPredicate<false>(node);
+        } else {
+            return nullptr;
+        }
+    } else {
+        return type_dispatch_predicate<Expr*>(type, true, BinaryPredicateBuilder(), node);
     }
-
-#define COMPLICATE_BINARY_PRED_FNS(TYPE, FN, STARROCKS_TYPE, FROM_FUNC)                \
-    COMPLICATE_BINARY_PRED_FN(Eq##TYPE##Pred, TYPE, FN, STARROCKS_TYPE, FROM_FUNC, ==) \
-    COMPLICATE_BINARY_PRED_FN(Ne##TYPE##Pred, TYPE, FN, STARROCKS_TYPE, FROM_FUNC, !=) \
-    COMPLICATE_BINARY_PRED_FN(Lt##TYPE##Pred, TYPE, FN, STARROCKS_TYPE, FROM_FUNC, <)  \
-    COMPLICATE_BINARY_PRED_FN(Le##TYPE##Pred, TYPE, FN, STARROCKS_TYPE, FROM_FUNC, <=) \
-    COMPLICATE_BINARY_PRED_FN(Gt##TYPE##Pred, TYPE, FN, STARROCKS_TYPE, FROM_FUNC, >)  \
-    COMPLICATE_BINARY_PRED_FN(Ge##TYPE##Pred, TYPE, FN, STARROCKS_TYPE, FROM_FUNC, >=)
-
-COMPLICATE_BINARY_PRED_FNS(DecimalVal, get_decimal_val, DecimalValue, from_decimal_val)
-COMPLICATE_BINARY_PRED_FNS(DecimalV2Val, get_decimalv2_val, DecimalV2Value, from_decimal_val)
-
-#define DATETIME_BINARY_PRED_FN(CLASS, OP, LLVM_PRED)                    \
-    BooleanVal CLASS::get_boolean_val(ExprContext* ctx, TupleRow* row) { \
-        DateTimeVal v1 = _children[0]->get_datetime_val(ctx, row);       \
-        if (v1.is_null) {                                                \
-            return BooleanVal::null();                                   \
-        }                                                                \
-        DateTimeVal v2 = _children[1]->get_datetime_val(ctx, row);       \
-        if (v2.is_null) {                                                \
-            return BooleanVal::null();                                   \
-        }                                                                \
-        return BooleanVal(v1.packed_time OP v2.packed_time);             \
-    }
-
-#define DATETIME_BINARY_PRED_FNS()                                        \
-    DATETIME_BINARY_PRED_FN(Eq##DateTimeVal##Pred, ==, CmpInst::ICMP_EQ)  \
-    DATETIME_BINARY_PRED_FN(Ne##DateTimeVal##Pred, !=, CmpInst::ICMP_NE)  \
-    DATETIME_BINARY_PRED_FN(Lt##DateTimeVal##Pred, <, CmpInst::ICMP_SLT)  \
-    DATETIME_BINARY_PRED_FN(Le##DateTimeVal##Pred, <=, CmpInst::ICMP_SLE) \
-    DATETIME_BINARY_PRED_FN(Gt##DateTimeVal##Pred, >, CmpInst::ICMP_SGT)  \
-    DATETIME_BINARY_PRED_FN(Ge##DateTimeVal##Pred, >=, CmpInst::ICMP_SGE)
-
-DATETIME_BINARY_PRED_FNS()
-
-#define STRING_BINARY_PRED_FN(CLASS, OP)                                 \
-    BooleanVal CLASS::get_boolean_val(ExprContext* ctx, TupleRow* row) { \
-        StringVal v1 = _children[0]->get_string_val(ctx, row);           \
-        if (v1.is_null) {                                                \
-            return BooleanVal::null();                                   \
-        }                                                                \
-        StringVal v2 = _children[1]->get_string_val(ctx, row);           \
-        if (v2.is_null) {                                                \
-            return BooleanVal::null();                                   \
-        }                                                                \
-        StringValue pv1 = StringValue::from_string_val(v1);              \
-        StringValue pv2 = StringValue::from_string_val(v2);              \
-        return BooleanVal(pv1 OP pv2);                                   \
-    }
-
-#define STRING_BINARY_PRED_FNS()                   \
-    STRING_BINARY_PRED_FN(Ne##StringVal##Pred, !=) \
-    STRING_BINARY_PRED_FN(Lt##StringVal##Pred, <)  \
-    STRING_BINARY_PRED_FN(Le##StringVal##Pred, <=) \
-    STRING_BINARY_PRED_FN(Gt##StringVal##Pred, >)  \
-    STRING_BINARY_PRED_FN(Ge##StringVal##Pred, >=)
-
-STRING_BINARY_PRED_FNS()
-
-BooleanVal EqStringValPred::get_boolean_val(ExprContext* ctx, TupleRow* row) {
-    StringVal v1 = _children[0]->get_string_val(ctx, row);
-    if (v1.is_null) {
-        return BooleanVal::null();
-    }
-    StringVal v2 = _children[1]->get_string_val(ctx, row);
-    if (v2.is_null) {
-        return BooleanVal::null();
-    }
-    if (v1.len != v2.len) {
-        return BooleanVal(false);
-    }
-    return BooleanVal(string_compare((char*)v1.ptr, v1.len, (char*)v2.ptr, v2.len, v1.len) == 0);
-}
-
-#define BINARY_PRED_FOR_NULL_FN(CLASS, TYPE, FN, OP, LLVM_PRED)          \
-    BooleanVal CLASS::get_boolean_val(ExprContext* ctx, TupleRow* row) { \
-        TYPE v1 = _children[0]->FN(ctx, row);                            \
-        TYPE v2 = _children[1]->FN(ctx, row);                            \
-        if (v1.is_null && v2.is_null) {                                  \
-            return BooleanVal(true);                                     \
-        } else if (v1.is_null || v2.is_null) {                           \
-            return BooleanVal(false);                                    \
-        }                                                                \
-        return BooleanVal(v1.val OP v2.val);                             \
-    }
-
-// add '/**/' to pass codestyle check of cooder
-#define BINARY_PRED_FOR_NULL_INT_FNS(TYPE, FN) \
-    BINARY_PRED_FOR_NULL_FN(EqForNull##TYPE##Pred, TYPE, FN, /**/ == /**/, CmpInst::ICMP_EQ)
-
-BINARY_PRED_FOR_NULL_INT_FNS(BooleanVal, get_boolean_val);
-BINARY_PRED_FOR_NULL_INT_FNS(TinyIntVal, get_tiny_int_val);
-BINARY_PRED_FOR_NULL_INT_FNS(SmallIntVal, get_small_int_val);
-BINARY_PRED_FOR_NULL_INT_FNS(IntVal, get_int_val);
-BINARY_PRED_FOR_NULL_INT_FNS(BigIntVal, get_big_int_val);
-BINARY_PRED_FOR_NULL_INT_FNS(LargeIntVal, get_large_int_val);
-
-#define BINARY_PRED_FOR_NULL_FLOAT_FNS(TYPE, FN) \
-    BINARY_PRED_FOR_NULL_FN(EqForNull##TYPE##Pred, TYPE, FN, ==, CmpInst::FCMP_OEQ)
-
-BINARY_PRED_FOR_NULL_FLOAT_FNS(FloatVal, get_float_val);
-BINARY_PRED_FOR_NULL_FLOAT_FNS(DoubleVal, get_double_val);
-
-#define COMPLICATE_BINARY_FOR_NULL_PRED_FN(CLASS, TYPE, FN, STARROCKS_TYPE, FROM_FUNC, OP) \
-    BooleanVal CLASS::get_boolean_val(ExprContext* ctx, TupleRow* row) {                   \
-        TYPE v1 = _children[0]->FN(ctx, row);                                              \
-        TYPE v2 = _children[1]->FN(ctx, row);                                              \
-        if (v1.is_null && v2.is_null) {                                                    \
-            return BooleanVal(true);                                                       \
-        } else if (v1.is_null || v2.is_null) {                                             \
-            return BooleanVal(false);                                                      \
-        }                                                                                  \
-        STARROCKS_TYPE pv1 = STARROCKS_TYPE::FROM_FUNC(v1);                                \
-        STARROCKS_TYPE pv2 = STARROCKS_TYPE::FROM_FUNC(v2);                                \
-        return BooleanVal(pv1 OP pv2);                                                     \
-    }
-
-#define COMPLICATE_BINARY_FOR_NULL_PRED_FNS(TYPE, FN, STARROCKS_TYPE, FROM_FUNC) \
-    COMPLICATE_BINARY_FOR_NULL_PRED_FN(EqForNull##TYPE##Pred, TYPE, FN, STARROCKS_TYPE, FROM_FUNC, ==)
-
-COMPLICATE_BINARY_FOR_NULL_PRED_FNS(DecimalVal, get_decimal_val, DecimalValue, from_decimal_val)
-COMPLICATE_BINARY_FOR_NULL_PRED_FNS(DecimalV2Val, get_decimalv2_val, DecimalV2Value, from_decimal_val)
-
-#define DATETIME_BINARY_FOR_NULL_PRED_FN(CLASS, OP, LLVM_PRED)           \
-    BooleanVal CLASS::get_boolean_val(ExprContext* ctx, TupleRow* row) { \
-        DateTimeVal v1 = _children[0]->get_datetime_val(ctx, row);       \
-        DateTimeVal v2 = _children[1]->get_datetime_val(ctx, row);       \
-        if (v1.is_null && v2.is_null) {                                  \
-            return BooleanVal(true);                                     \
-        } else if (v1.is_null || v2.is_null) {                           \
-            return BooleanVal(false);                                    \
-        }                                                                \
-        return BooleanVal(v1.packed_time OP v2.packed_time);             \
-    }
-
-#define DATETIME_BINARY_FOR_NULL_PRED_FNS() \
-    DATETIME_BINARY_FOR_NULL_PRED_FN(EqForNull##DateTimeVal##Pred, ==, CmpInst::ICMP_EQ)
-
-DATETIME_BINARY_FOR_NULL_PRED_FNS()
-
-BooleanVal EqForNullStringValPred::get_boolean_val(ExprContext* ctx, TupleRow* row) {
-    StringVal v1 = _children[0]->get_string_val(ctx, row);
-    StringVal v2 = _children[1]->get_string_val(ctx, row);
-    if (v1.is_null && v2.is_null) {
-        return BooleanVal(true);
-    } else if (v1.is_null || v2.is_null) {
-        return BooleanVal(false);
-    }
-
-    if (v1.len != v2.len) {
-        return BooleanVal(false);
-    }
-    return BooleanVal(string_compare((char*)v1.ptr, v1.len, (char*)v2.ptr, v2.len, v1.len) == 0);
 }
 
 } // namespace starrocks

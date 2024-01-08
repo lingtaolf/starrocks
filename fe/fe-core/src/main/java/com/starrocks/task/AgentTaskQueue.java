@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/task/AgentTaskQueue.java
 
@@ -72,11 +85,6 @@ public class AgentTaskQueue {
         signatureMap.put(signature, task);
         ++taskNum;
         LOG.debug("add task: type[{}], backend[{}], signature[{}]", type, backendId, signature);
-        if (type == TTaskType.PUSH) {
-            PushTask pushTask = (PushTask) task;
-            LOG.debug("push task info: version[{}], version hash[{}]",
-                    pushTask.getVersion(), pushTask.getVersionHash());
-        }
         return true;
     }
 
@@ -103,9 +111,9 @@ public class AgentTaskQueue {
 
     /*
      * we cannot define a push task with only 'backendId', 'signature' and 'TTaskType'
-     * add version, versionHash and TPushType to help
+     * add version, and TPushType to help
      */
-    public static synchronized void removePushTask(long backendId, long signature, long version, long versionHash,
+    public static synchronized void removePushTask(long backendId, long signature, long version,
                                                    TPushType pushType, TTaskType taskType) {
         if (!tasks.contains(backendId, taskType)) {
             return;
@@ -125,6 +133,41 @@ public class AgentTaskQueue {
         signatureMap.remove(signature);
         LOG.debug("remove task: type[{}], backend[{}], signature[{}]", taskType, backendId, signature);
         --taskNum;
+    }
+
+    /*
+     * we cannot define a push task with only 'backendId', 'signature' and 'TTaskType'
+     * add version, and TPushType to help
+     */
+    public static synchronized void removePushTaskByTransactionId(long backendId, long transactionId,
+                                                                  TPushType pushType, TTaskType taskType) {
+        if (!tasks.contains(backendId, taskType)) {
+            return;
+        }
+
+        Map<Long, AgentTask> signatureMap = tasks.get(backendId, taskType);
+        if (signatureMap == null) {
+            return;
+        }
+
+        int numOfRemove = 0;
+        Iterator<Long> signatureIt = signatureMap.keySet().iterator();
+        while (signatureIt.hasNext()) {
+            Long signature = signatureIt.next();
+            AgentTask agentTask = signatureMap.get(signature);
+            if (agentTask instanceof PushTask) {
+                PushTask pushTask = (PushTask) agentTask;
+                if (pushTask.getPushType() == pushType && pushTask.getTransactionId() == transactionId) {
+                    signatureIt.remove();
+                    --taskNum;
+                    ++numOfRemove;
+                }
+            }
+        }
+
+        LOG.info("remove task: type[{}], backend[{}], transactionId[{}], numOfRemove[{}]",
+                taskType, backendId, transactionId, numOfRemove);
+
     }
 
     public static synchronized void removeTaskOfType(TTaskType type, long signature) {
@@ -262,7 +305,7 @@ public class AgentTaskQueue {
             }
         }
 
-        LOG.info("get task num with type[{}] in backend[{}]: {}. isFailed: {}",
+        LOG.debug("get task num with type[{}] in backend[{}]: {}. isFailed: {}",
                 type.name(), backendId, taskNum, isFailed);
         return taskNum;
     }

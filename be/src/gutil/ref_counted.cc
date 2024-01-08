@@ -8,20 +8,17 @@
 
 #include "gutil/atomic_refcount.h"
 
-namespace starrocks {
-
-namespace subtle {
+namespace starrocks::subtle {
 
 RefCountedBase::RefCountedBase()
-        : ref_count_(0)
 #ifndef NDEBUG
-          ,
-          in_dtor_(false)
-#endif
-{
+        : in_dtor_(false) {
 }
+#else
+        = default;
+#endif
 
-RefCountedBase::~RefCountedBase() {
+RefCountedBase::~RefCountedBase() { // NOLINT
 #ifndef NDEBUG
     DCHECK(in_dtor_) << "RefCounted object deleted without calling Release()";
 #endif
@@ -57,13 +54,13 @@ bool RefCountedThreadSafeBase::HasOneRef() const {
     return base::RefCountIsOne(&const_cast<RefCountedThreadSafeBase*>(this)->ref_count_);
 }
 
-RefCountedThreadSafeBase::RefCountedThreadSafeBase() : ref_count_(0) {
+RefCountedThreadSafeBase::RefCountedThreadSafeBase() { // NOLINT
 #ifndef NDEBUG
     in_dtor_ = false;
 #endif
 }
 
-RefCountedThreadSafeBase::~RefCountedThreadSafeBase() {
+RefCountedThreadSafeBase::~RefCountedThreadSafeBase() { // NOLINT
 #ifndef NDEBUG
     DCHECK(in_dtor_) << "RefCountedThreadSafe object deleted without "
                         "calling Release()";
@@ -91,6 +88,4 @@ bool RefCountedThreadSafeBase::Release() const {
     return false;
 }
 
-} // namespace subtle
-
-} // namespace starrocks
+} // namespace starrocks::subtle

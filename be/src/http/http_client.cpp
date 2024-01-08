@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/http/http_client.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -22,10 +18,11 @@
 #include "http/http_client.h"
 
 #include "common/config.h"
+#include "fs/fs_util.h"
 
 namespace starrocks {
 
-HttpClient::HttpClient() {}
+HttpClient::HttpClient() = default;
 
 HttpClient::~HttpClient() {
     if (_curl != nullptr) {
@@ -42,7 +39,7 @@ Status HttpClient::init(const std::string& url) {
     if (_curl == nullptr) {
         _curl = curl_easy_init();
         if (_curl == nullptr) {
-            return Status::InternalError("fail to initalize curl");
+            return Status::InternalError("fail to initialize curl");
         }
     } else {
         curl_easy_reset(_curl);
@@ -84,7 +81,7 @@ Status HttpClient::init(const std::string& url) {
     }
 
     curl_write_callback callback = [](char* buffer, size_t size, size_t nmemb, void* param) {
-        HttpClient* client = (HttpClient*)param;
+        auto* client = (HttpClient*)param;
         return client->on_response_data(buffer, size * nmemb);
     };
 
@@ -104,6 +101,13 @@ Status HttpClient::init(const std::string& url) {
     if (code != CURLE_OK) {
         LOG(WARNING) << "failed to set CURLOPT_URL, errmsg=" << _to_errmsg(code);
         return Status::InternalError("fail to set CURLOPT_URL");
+    }
+
+    // set NoProxy, otherwise elasticsearch may hang when the host enables HTTP_PROXY/HTTPS_PROXY
+    code = curl_easy_setopt(_curl, CURLOPT_NOPROXY, "*");
+    if (code != CURLE_OK) {
+        LOG(WARNING) << "failed to set CURLOPT_NOPROXY, errmsg=" << _to_errmsg(code);
+        return Status::InternalError("fail to set CURLOPT_NOPROXY");
     }
 
     return Status::OK();
@@ -172,7 +176,7 @@ Status HttpClient::execute(const std::function<bool(const void* data, size_t len
     return Status::OK();
 }
 
-Status HttpClient::download(const std::string& local_path) {
+StatusOr<uint64_t> HttpClient::download(const std::string& local_path) {
     // set method to GET
     set_method(GET);
 
@@ -182,24 +186,41 @@ Status HttpClient::download(const std::string& local_path) {
     curl_easy_setopt(_curl, CURLOPT_LOW_SPEED_TIME, config::download_low_speed_time);
     curl_easy_setopt(_curl, CURLOPT_MAX_RECV_SPEED_LARGE, config::max_download_speed_kbps * 1024);
 
-    auto fp_closer = [](FILE* fp) { fclose(fp); };
-    std::unique_ptr<FILE, decltype(fp_closer)> fp(fopen(local_path.c_str(), "w"), fp_closer);
-    if (fp == nullptr) {
-        LOG(WARNING) << "open file failed, file=" << local_path;
-        return Status::InternalError("open file failed");
-    }
+    WritableFileOptions opts{.sync_on_close = true, .mode = FileSystem::CREATE_OR_OPEN_WITH_TRUNCATE};
+    ASSIGN_OR_RETURN(auto output_file, fs::new_writable_file(opts, local_path));
+
     Status status;
-    auto callback = [&status, &fp, &local_path](const void* data, size_t length) {
-        auto res = fwrite(data, length, 1, fp.get());
-        if (res != 1) {
-            LOG(WARNING) << "fail to write data to file, file=" << local_path << ", error=" << ferror(fp.get());
-            status = Status::InternalError("fail to write data when download");
+    auto callback = [&status, &output_file, &local_path](const void* data, size_t length) {
+        status = output_file->append(Slice((const char*)data, length));
+        if (!status.ok()) {
+            LOG(WARNING) << "fail to write data to file, file=" << local_path << ", error=" << status;
             return false;
         }
         return true;
     };
     RETURN_IF_ERROR(execute(callback));
-    return status;
+    RETURN_IF_ERROR(status);
+    RETURN_IF_ERROR(output_file->close());
+    return output_file->size();
+}
+
+StatusOr<std::string> HttpClient::download() {
+    // set method to GET
+    set_method(GET);
+
+    // TODO(zc) Move this download speed limit outside to limit download speed
+    // at system level
+    curl_easy_setopt(_curl, CURLOPT_LOW_SPEED_LIMIT, config::download_low_speed_limit_kbps * 1024);
+    curl_easy_setopt(_curl, CURLOPT_LOW_SPEED_TIME, config::download_low_speed_time);
+    curl_easy_setopt(_curl, CURLOPT_MAX_RECV_SPEED_LARGE, config::max_download_speed_kbps * 1024);
+
+    std::string result;
+    auto callback = [&result](const void* data, size_t length) {
+        result.append((const char*)data, length);
+        return true;
+    };
+    RETURN_IF_ERROR(execute(callback));
+    return result;
 }
 
 Status HttpClient::execute(std::string* response) {

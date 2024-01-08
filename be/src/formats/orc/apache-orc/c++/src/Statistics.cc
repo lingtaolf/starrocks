@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/Statistics.cc
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -66,8 +62,8 @@ StatisticsImpl::StatisticsImpl(const proto::Footer& footer, const StatContext& s
 }
 
 StatisticsImpl::~StatisticsImpl() {
-    for (std::vector<ColumnStatistics*>::iterator ptr = colStats.begin(); ptr != colStats.end(); ++ptr) {
-        delete *ptr;
+    for (auto& colStat : colStats) {
+        delete colStat;
     }
 }
 
@@ -162,18 +158,6 @@ DoubleColumnStatisticsImpl::~DoubleColumnStatisticsImpl() {
 
 IntegerColumnStatisticsImpl::~IntegerColumnStatisticsImpl() {
     // PASS
-}
-
-void IntegerColumnStatisticsImpl::update(int64_t value, int repetitions) {
-    _stats.updateMinMax(value);
-
-    if (_stats.hasSum()) {
-        bool wasPositive = _stats.getSum() >= 0;
-        _stats.setSum(value * repetitions + _stats.getSum());
-        if ((value >= 0) == wasPositive) {
-            _stats.setHasSum((_stats.getSum() >= 0) == wasPositive);
-        }
-    }
 }
 
 StringColumnStatisticsImpl::~StringColumnStatisticsImpl() {

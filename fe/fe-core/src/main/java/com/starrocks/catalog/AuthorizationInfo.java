@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/AuthorizationInfo.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -23,6 +19,8 @@ package com.starrocks.catalog;
 
 import com.google.common.collect.Sets;
 import com.google.gson.Gson;
+import com.google.gson.annotations.SerializedName;
+import com.starrocks.cluster.ClusterNamespace;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 
@@ -42,7 +40,9 @@ import java.util.Set;
  * The job checks the priv by auth info.
  */
 public class AuthorizationInfo implements Writable {
+    @SerializedName("d")
     private String dbName;
+    @SerializedName("t")
     private Set<String> tableNameList;
 
     // only for persist
@@ -68,7 +68,7 @@ public class AuthorizationInfo implements Writable {
             out.writeBoolean(false);
         } else {
             out.writeBoolean(true);
-            Text.writeString(out, dbName);
+            Text.writeString(out, ClusterNamespace.getFullName(dbName));
         }
         if (tableNameList == null) {
             out.writeBoolean(false);
@@ -83,7 +83,7 @@ public class AuthorizationInfo implements Writable {
 
     public void readFields(DataInput in) throws IOException {
         if (in.readBoolean()) {
-            dbName = Text.readString(in);
+            dbName = ClusterNamespace.getNameFromFullName(Text.readString(in));
         }
         if (in.readBoolean()) {
             tableNameList = Sets.newHashSet();

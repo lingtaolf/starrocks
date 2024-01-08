@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/test/runtime/snapshot_loader_test.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -35,7 +31,7 @@ namespace starrocks {
 
 class SnapshotLoaderTest : public testing::Test {
 public:
-    SnapshotLoaderTest() {}
+    SnapshotLoaderTest() = default;
 
 private:
     ExecEnv* _exec_env;
@@ -93,6 +89,14 @@ TEST_F(SnapshotLoaderTest, NormalCase) {
     st = loader._replace_tablet_id("1234_2_5_12345_1.dat", 5678, &new_name);
     ASSERT_TRUE(st.ok());
     ASSERT_EQ("1234_2_5_12345_1.dat", new_name);
+
+    st = loader._replace_tablet_id("1234_2_5_12345_1.upt", 5678, &new_name);
+    ASSERT_TRUE(st.ok());
+    ASSERT_EQ("1234_2_5_12345_1.upt", new_name);
+
+    st = loader._replace_tablet_id("1234_2_5_12345_1.cols", 5678, &new_name);
+    ASSERT_TRUE(st.ok());
+    ASSERT_EQ("1234_2_5_12345_1.cols", new_name);
 
     st = loader._replace_tablet_id("1234_2_5_12345_1.idx", 5678, &new_name);
     ASSERT_TRUE(st.ok());

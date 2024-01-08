@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/frame_of_reference_coding.h
 
@@ -19,8 +32,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_FRAME_OF_REFERENCE_CODING_H
-#define STARROCKS_FRAME_OF_REFERENCE_CODING_H
+#pragma once
 
 #include <cstdlib>
 #include <iostream>
@@ -131,8 +143,7 @@ private:
 template <typename T>
 class ForDecoder {
 public:
-    explicit ForDecoder(const uint8_t* in_buffer, size_t buffer_len)
-            : _buffer(in_buffer), _buffer_len(buffer_len), _parsed(false) {}
+    explicit ForDecoder(const uint8_t* in_buffer, size_t buffer_len) : _buffer(in_buffer), _buffer_len(buffer_len) {}
 
     // read footer metadata
     bool init();
@@ -155,7 +166,7 @@ public:
 private:
     void bit_unpack(const uint8_t* input, uint8_t in_num, int bit_width, T* output);
 
-    inline uint32_t frame_size(uint32_t frame_index) {
+    uint32_t frame_size(uint32_t frame_index) {
         return (frame_index == _frame_count - 1) ? _last_frame_size : _max_frame_size;
     }
 
@@ -192,5 +203,3 @@ private:
     std::vector<T> _out_buffer; // store values of decoded frame
 };
 } // namespace starrocks
-
-#endif //STARROCKS_FRAME_OF_REFERENCE_CODING_H

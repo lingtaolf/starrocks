@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/olap/short_key_index.cpp
 
@@ -37,12 +50,11 @@ Status ShortKeyIndexBuilder::add_item(const Slice& key) {
     return Status::OK();
 }
 
-Status ShortKeyIndexBuilder::finalize(uint32_t num_segment_rows, std::vector<Slice>* body,
-                                      segment_v2::PageFooterPB* page_footer) {
-    page_footer->set_type(segment_v2::SHORT_KEY_PAGE);
+Status ShortKeyIndexBuilder::finalize(uint32_t num_segment_rows, std::vector<Slice>* body, PageFooterPB* page_footer) {
+    page_footer->set_type(SHORT_KEY_PAGE);
     page_footer->set_uncompressed_size(_key_buf.size() + _offset_buf.size());
 
-    segment_v2::ShortKeyFooterPB* footer = page_footer->mutable_short_key_page_footer();
+    ShortKeyFooterPB* footer = page_footer->mutable_short_key_page_footer();
     footer->set_num_items(_num_items);
     footer->set_key_bytes(_key_buf.size());
     footer->set_offset_bytes(_offset_buf.size());
@@ -55,7 +67,7 @@ Status ShortKeyIndexBuilder::finalize(uint32_t num_segment_rows, std::vector<Sli
     return Status::OK();
 }
 
-Status ShortKeyIndexDecoder::parse(const Slice& body, const segment_v2::ShortKeyFooterPB& footer) {
+Status ShortKeyIndexDecoder::parse(const Slice& body, const ShortKeyFooterPB& footer) {
     _footer = footer;
 
     // check if body size match footer's information

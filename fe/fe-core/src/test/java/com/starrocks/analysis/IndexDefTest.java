@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/analysis/IndexDefTest.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -22,10 +18,15 @@
 package com.starrocks.analysis;
 
 import com.google.common.collect.Lists;
-import com.starrocks.common.AnalysisException;
+import com.starrocks.analysis.IndexDef.IndexType;
+import com.starrocks.sql.analyzer.SemanticException;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+
+import java.util.HashMap;
+import java.util.Map;
 
 public class IndexDefTest {
     private IndexDef def;
@@ -36,12 +37,12 @@ public class IndexDefTest {
     }
 
     @Test
-    public void testAnalyzeNormal() throws AnalysisException {
+    public void testAnalyzeNormal() {
         def.analyze();
     }
 
     @Test
-    public void testAnalyzeExpection() throws AnalysisException {
+    public void testAnalyzeExpection() {
         try {
             def = new IndexDef(
                     "index1xxxxxxxxxxxxxxxxxindex1xxxxxxxxxxxxxxxxxindex1xxxxxxxxxxxxxxxxxindex1xxxxxx"
@@ -53,22 +54,41 @@ public class IndexDefTest {
                     "balabala");
             def.analyze();
             Assert.fail("No exception throws.");
-        } catch (AnalysisException e) {
-            Assert.assertTrue(e instanceof AnalysisException);
+        } catch (SemanticException e) {
+            Assert.assertTrue(e instanceof SemanticException);
         }
         try {
             def = new IndexDef("", Lists.newArrayList("col1"), IndexDef.IndexType.BITMAP, "balabala");
             def.analyze();
             Assert.fail("No exception throws.");
-        } catch (AnalysisException e) {
-            Assert.assertTrue(e instanceof AnalysisException);
+        } catch (SemanticException e) {
+            Assert.assertTrue(e instanceof SemanticException);
         }
+
+        def = new IndexDef("", null, IndexType.GIN, "");
+        Assertions.assertThrows(SemanticException.class, () -> def.analyze(), "Index can not accept null column.");
+
+        def = new IndexDef("", Lists.newArrayList("k1", "k2"), IndexType.BITMAP, "");
+        Assertions.assertThrows(SemanticException.class,
+                () -> def.analyze(), "bitmap index can only apply to a single column.");
+
+        def = new IndexDef("", Lists.newArrayList("k1", "k2"), IndexType.GIN, "");
+        Assertions.assertThrows(SemanticException.class,
+                () -> def.analyze(), "bitmap index can only apply to a single column.");
+
+
     }
 
     @Test
     public void toSql() {
         Assert.assertEquals("INDEX index1 (`col1`) USING BITMAP COMMENT 'balabala'", def.toSql());
         Assert.assertEquals("INDEX index1 ON table1 (`col1`) USING BITMAP COMMENT 'balabala'",
+                def.toSql("table1"));
+
+        Map<String, String> properties = new HashMap<>();
+        properties.put("k1", "k1");
+        def = new IndexDef("index1", Lists.newArrayList("k1", "k2"), IndexType.GIN, "", properties);
+        Assert.assertEquals("INDEX index1 ON table1 (`k1`,`k2`) USING GIN (\"k1\"=\"k1\") COMMENT ''",
                 def.toSql("table1"));
     }
 }

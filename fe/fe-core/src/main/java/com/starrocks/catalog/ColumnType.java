@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/ColumnType.java
 
@@ -22,7 +35,6 @@
 package com.starrocks.catalog;
 
 import com.google.common.base.Preconditions;
-import com.starrocks.common.FeMetaVersion;
 import com.starrocks.common.io.Text;
 
 import java.io.DataInput;
@@ -33,7 +45,7 @@ public abstract class ColumnType {
     private static Boolean[][] schemaChangeMatrix;
 
     static {
-        schemaChangeMatrix = new Boolean[PrimitiveType.BINARY.ordinal() + 1][PrimitiveType.BINARY.ordinal() + 1];
+        schemaChangeMatrix = new Boolean[PrimitiveType.values().length][PrimitiveType.values().length];
 
         for (int i = 0; i < schemaChangeMatrix.length; i++) {
             for (int j = 0; j < schemaChangeMatrix[i].length; j++) {
@@ -73,6 +85,8 @@ public abstract class ColumnType {
 
         schemaChangeMatrix[PrimitiveType.CHAR.ordinal()][PrimitiveType.VARCHAR.ordinal()] = true;
         schemaChangeMatrix[PrimitiveType.CHAR.ordinal()][PrimitiveType.CHAR.ordinal()] = true;
+        schemaChangeMatrix[PrimitiveType.JSON.ordinal()][PrimitiveType.VARCHAR.ordinal()] = true;
+        schemaChangeMatrix[PrimitiveType.VARCHAR.ordinal()][PrimitiveType.JSON.ordinal()] = true;
 
         schemaChangeMatrix[PrimitiveType.VARCHAR.ordinal()][PrimitiveType.TINYINT.ordinal()] = true;
         schemaChangeMatrix[PrimitiveType.VARCHAR.ordinal()][PrimitiveType.SMALLINT.ordinal()] = true;
@@ -173,10 +187,8 @@ public abstract class ColumnType {
         int scale = in.readInt();
         int precision = in.readInt();
         int len = in.readInt();
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_22) {
-            // Useless, just for back compatible
-            in.readBoolean();
-        }
+        // Useless, just for back compatible
+        in.readBoolean();
         return ScalarType.createType(primitiveType, len, precision, scale);
     }
 }

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/clone/DynamicPartitionScheduler.java
 
@@ -21,37 +34,52 @@
 
 package com.starrocks.clone;
 
+import com.google.api.client.util.Preconditions;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Range;
 import com.google.common.collect.Sets;
-import com.starrocks.analysis.AddPartitionClause;
-import com.starrocks.analysis.DistributionDesc;
-import com.starrocks.analysis.DropPartitionClause;
-import com.starrocks.analysis.HashDistributionDesc;
-import com.starrocks.analysis.PartitionKeyDesc;
-import com.starrocks.analysis.PartitionValue;
-import com.starrocks.analysis.SingleRangePartitionDesc;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
+import com.starrocks.catalog.DistributionInfo;
 import com.starrocks.catalog.DynamicPartitionProperty;
 import com.starrocks.catalog.HashDistributionInfo;
 import com.starrocks.catalog.OlapTable;
+import com.starrocks.catalog.Partition;
+import com.starrocks.catalog.PartitionInfo;
 import com.starrocks.catalog.PartitionKey;
+import com.starrocks.catalog.RandomDistributionInfo;
 import com.starrocks.catalog.RangePartitionInfo;
 import com.starrocks.catalog.Table;
+import com.starrocks.catalog.Type;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.Pair;
 import com.starrocks.common.util.DynamicPartitionUtil;
-import com.starrocks.common.util.MasterDaemon;
+import com.starrocks.common.util.FrontendDaemon;
 import com.starrocks.common.util.RangeUtils;
 import com.starrocks.common.util.TimeUtils;
+import com.starrocks.meta.lock.LockType;
+import com.starrocks.meta.lock.Locker;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.analyzer.SemanticException;
+import com.starrocks.sql.ast.AddPartitionClause;
+import com.starrocks.sql.ast.DistributionDesc;
+import com.starrocks.sql.ast.DropPartitionClause;
+import com.starrocks.sql.ast.HashDistributionDesc;
+import com.starrocks.sql.ast.PartitionKeyDesc;
+import com.starrocks.sql.ast.PartitionValue;
+import com.starrocks.sql.ast.SingleRangePartitionDesc;
+import com.starrocks.statistic.StatsConstants;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.threeten.extra.PeriodDuration;
 
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -60,14 +88,17 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+
+import static com.starrocks.catalog.TableProperty.INVALID;
 
 /**
  * This class is used to periodically add or drop partition on an olapTable which specify dynamic partition properties
  * Config.dynamic_partition_enable determine whether this feature is enable, Config.dynamic_partition_check_interval_seconds
  * determine how often the task is performed
  */
-public class DynamicPartitionScheduler extends MasterDaemon {
+public class DynamicPartitionScheduler extends FrontendDaemon {
     private static final Logger LOG = LogManager.getLogger(DynamicPartitionScheduler.class);
     public static final String LAST_SCHEDULER_TIME = "lastSchedulerTime";
     public static final String LAST_UPDATE_TIME = "lastUpdateTime";
@@ -75,15 +106,19 @@ public class DynamicPartitionScheduler extends MasterDaemon {
     public static final String CREATE_PARTITION_MSG = "createPartitionMsg";
     public static final String DROP_PARTITION_MSG = "dropPartitionMsg";
 
-    private final String DEFAULT_RUNTIME_VALUE = FeConstants.null_string;
+    private static final String DEFAULT_RUNTIME_VALUE = FeConstants.NULL_STRING;
 
-    private Map<String, Map<String, String>> runtimeInfos = Maps.newConcurrentMap();
-    private Set<Pair<Long, Long>> dynamicPartitionTableInfo = Sets.newConcurrentHashSet();
+    // runtime information for dynamic partitions key -> <tableName -> value>
+    private final Map<String, Map<String, String>> runtimeInfos = Maps.newConcurrentMap();
+    // (DbId, TableId) for a collection of objects marked with "dynamic_partition.enable" = "true" on the table
+    private final Set<Pair<Long, Long>> dynamicPartitionTableInfo = Sets.newConcurrentHashSet();
+    // (DbId, TableId) for a collection of objects marked with partition_ttl_number > 0 on the table
+    private final Set<Pair<Long, Long>> ttlPartitionInfo = Sets.newConcurrentHashSet();
+
     private boolean initialize;
 
     public enum State {
-        NORMAL,
-        ERROR
+        NORMAL, ERROR
     }
 
     public DynamicPartitionScheduler(String name, long intervalMs) {
@@ -97,6 +132,19 @@ public class DynamicPartitionScheduler extends MasterDaemon {
 
     public void removeDynamicPartitionTable(Long dbId, Long tableId) {
         dynamicPartitionTableInfo.remove(new Pair<>(dbId, tableId));
+    }
+
+    public void registerTtlPartitionTable(Long dbId, Long tableId) {
+        ttlPartitionInfo.add(new Pair<>(dbId, tableId));
+    }
+
+    public void removeTtlPartitionTable(Long dbId, Long tableId) {
+        ttlPartitionInfo.remove(new Pair<>(dbId, tableId));
+    }
+
+    @VisibleForTesting
+    public Set<Pair<Long, Long>> getTtlPartitionInfo() {
+        return ttlPartitionInfo;
     }
 
     public String getRuntimeInfo(String tableName, String key) {
@@ -135,11 +183,19 @@ public class DynamicPartitionScheduler extends MasterDaemon {
         DynamicPartitionProperty dynamicPartitionProperty = olapTable.getTableProperty().getDynamicPartitionProperty();
         RangePartitionInfo rangePartitionInfo = (RangePartitionInfo) olapTable.getPartitionInfo();
         ZonedDateTime now = ZonedDateTime.now(dynamicPartitionProperty.getTimeZone().toZoneId());
-        for (int i = 0; i <= dynamicPartitionProperty.getEnd(); i++) {
+
+        int idx;
+        int start = dynamicPartitionProperty.getStart();
+        int historyPartitionNum = dynamicPartitionProperty.getHistoryPartitionNum();
+
+        // start < 0 , historyPartitionNum >= 0
+        idx = Math.max(start, -historyPartitionNum);
+
+        for (; idx <= dynamicPartitionProperty.getEnd(); idx++) {
             String prevBorder =
-                    DynamicPartitionUtil.getPartitionRangeString(dynamicPartitionProperty, now, i, partitionFormat);
-            String nextBorder =
-                    DynamicPartitionUtil.getPartitionRangeString(dynamicPartitionProperty, now, i + 1, partitionFormat);
+                    DynamicPartitionUtil.getPartitionRangeString(dynamicPartitionProperty, now, idx, partitionFormat);
+            String nextBorder = DynamicPartitionUtil.getPartitionRangeString(dynamicPartitionProperty, now, idx + 1,
+                    partitionFormat);
             PartitionValue lowerValue = new PartitionValue(prevBorder);
             PartitionValue upperValue = new PartitionValue(nextBorder);
 
@@ -155,19 +211,32 @@ public class DynamicPartitionScheduler extends MasterDaemon {
                 // AnalysisException: keys.size is always equal to column.size, cannot reach this exception
                 // IllegalArgumentException: lb is greater than ub
                 LOG.warn("Error in gen addPartitionKeyRange. Error={}, db: {}, table: {}", e.getMessage(),
-                        db.getFullName(), olapTable.getName());
+                        db.getOriginName(), olapTable.getName());
                 continue;
             }
+
             for (Range<PartitionKey> partitionKeyRange : rangePartitionInfo.getIdToRange(false).values()) {
                 // only support single column partition now
                 try {
                     RangeUtils.checkRangeIntersect(partitionKeyRange, addPartitionKeyRange);
                 } catch (DdlException e) {
+                    /*
+                     * If the old partition range for [(' 2022-08-01 00:00:00), (' 2022-09-01 00:00:00)), the range of
+                     * the new partition for [(' 2022-08-29 00:00:00), (' 2022-09-05 00:00:00 ')), Is automatically cut
+                     * out for the new partition range [(' 2022-09-01 00:00:00), (' 2022-09-05 00:00:00))
+                     */
+                    if (partitionKeyRange.contains(addPartitionKeyRange.lowerEndpoint()) &&
+                            addPartitionKeyRange.contains(partitionKeyRange.upperEndpoint()) &&
+                            !addPartitionKeyRange.upperEndpoint().equals(partitionKeyRange.upperEndpoint())) {
+                        addPartitionKeyRange = Range.closedOpen(partitionKeyRange.upperEndpoint(),
+                                addPartitionKeyRange.upperEndpoint());
+                        continue;
+                    }
                     isPartitionExists = true;
                     if (addPartitionKeyRange.equals(partitionKeyRange)) {
                         clearCreatePartitionFailedMsg(olapTable.getName());
                     } else {
-                        recordCreatePartitionFailedMsg(db.getFullName(), olapTable.getName(), e.getMessage());
+                        recordCreatePartitionFailedMsg(db.getOriginName(), olapTable.getName(), e.getMessage());
                     }
                     break;
                 }
@@ -183,27 +252,36 @@ public class DynamicPartitionScheduler extends MasterDaemon {
             if (dynamicPartitionProperty.getReplicationNum() == DynamicPartitionProperty.NOT_SET_REPLICATION_NUM) {
                 partitionProperties.put("replication_num", String.valueOf(olapTable.getDefaultReplicationNum()));
             } else {
-                partitionProperties
-                        .put("replication_num", String.valueOf(dynamicPartitionProperty.getReplicationNum()));
+                partitionProperties.put("replication_num",
+                        String.valueOf(dynamicPartitionProperty.getReplicationNum()));
             }
-            String partitionName =
-                    dynamicPartitionProperty.getPrefix() + DynamicPartitionUtil.getFormattedPartitionName(
-                            dynamicPartitionProperty.getTimeZone(), prevBorder, dynamicPartitionProperty.getTimeUnit());
-            SingleRangePartitionDesc rangePartitionDesc = new SingleRangePartitionDesc(false, partitionName,
-                    partitionKeyDesc, partitionProperties);
+            String partitionName = dynamicPartitionProperty.getPrefix() +
+                    DynamicPartitionUtil.getFormattedPartitionName(dynamicPartitionProperty.getTimeZone(), prevBorder,
+                            dynamicPartitionProperty.getTimeUnit());
+            SingleRangePartitionDesc rangePartitionDesc =
+                    new SingleRangePartitionDesc(false, partitionName, partitionKeyDesc, partitionProperties);
+            if (dynamicPartitionProperty.getBuckets() == 0) {
+                addPartitionClauses.add(new AddPartitionClause(rangePartitionDesc, null, null, false));
+            } else {
+                // construct distribution desc
+                DistributionInfo distributionInfo = olapTable.getDefaultDistributionInfo();
+                DistributionDesc distributionDesc = null;
+                if (distributionInfo instanceof HashDistributionInfo) {
+                    HashDistributionInfo hashDistributionInfo = (HashDistributionInfo) distributionInfo;
+                    List<String> distColumnNames = new ArrayList<>();
+                    for (Column distributionColumn : hashDistributionInfo.getDistributionColumns()) {
+                        distColumnNames.add(distributionColumn.getName());
+                    }
+                    distributionDesc = new HashDistributionDesc(dynamicPartitionProperty.getBuckets(),
+                            distColumnNames);
+                } else {
+                    RandomDistributionInfo randomDistributionInfo = (RandomDistributionInfo) distributionInfo;
+                    distributionDesc = randomDistributionInfo.toDistributionDesc();
+                }
 
-            // construct distribution desc
-            HashDistributionInfo hashDistributionInfo = (HashDistributionInfo) olapTable.getDefaultDistributionInfo();
-            List<String> distColumnNames = new ArrayList<>();
-            for (Column distributionColumn : hashDistributionInfo.getDistributionColumns()) {
-                distColumnNames.add(distributionColumn.getName());
+                // add partition according to partition desc and distribution desc
+                addPartitionClauses.add(new AddPartitionClause(rangePartitionDesc, distributionDesc, null, false));
             }
-            DistributionDesc distributionDesc =
-                    new HashDistributionDesc(dynamicPartitionProperty.getBuckets(), distColumnNames);
-
-            // add partition according to partition desc and distribution desc
-            addPartitionClauses.add(new AddPartitionClause(rangePartitionDesc, distributionDesc,
-                    null, false));
         }
         return addPartitionClauses;
     }
@@ -222,10 +300,10 @@ public class DynamicPartitionScheduler extends MasterDaemon {
         }
 
         ZonedDateTime now = ZonedDateTime.now(dynamicPartitionProperty.getTimeZone().toZoneId());
-        String lowerBorder = DynamicPartitionUtil.getPartitionRangeString(dynamicPartitionProperty,
-                now, dynamicPartitionProperty.getStart(), partitionFormat);
-        String upperBorder = DynamicPartitionUtil.getPartitionRangeString(dynamicPartitionProperty,
-                now, 0, partitionFormat);
+        String lowerBorder = DynamicPartitionUtil.getPartitionRangeString(dynamicPartitionProperty, now,
+                dynamicPartitionProperty.getStart(), partitionFormat);
+        String upperBorder =
+                DynamicPartitionUtil.getPartitionRangeString(dynamicPartitionProperty, now, 0, partitionFormat);
         PartitionValue lowerPartitionValue = new PartitionValue(lowerBorder);
         PartitionValue upperPartitionValue = new PartitionValue(upperBorder);
         Range<PartitionKey> reservePartitionKeyRange;
@@ -239,7 +317,7 @@ public class DynamicPartitionScheduler extends MasterDaemon {
             // AnalysisException: keys.size is always equal to column.size, cannot reach this exception
             // IllegalArgumentException: lb is greater than ub
             LOG.warn("Error in gen reservePartitionKeyRange. Error={}, db: {}, table: {}", e.getMessage(),
-                    db.getFullName(), olapTable.getName());
+                    db.getOriginName(), olapTable.getName());
             return dropPartitionClauses;
         }
         RangePartitionInfo info = (RangePartitionInfo) (olapTable.getPartitionInfo());
@@ -268,88 +346,288 @@ public class DynamicPartitionScheduler extends MasterDaemon {
             Pair<Long, Long> tableInfo = iterator.next();
             Long dbId = tableInfo.first;
             Long tableId = tableInfo.second;
-            Database db = Catalog.getCurrentCatalog().getDb(dbId);
-            if (db == null) {
+            boolean shouldRemove = executeDynamicPartitionForTable(dbId, tableId);
+            if (shouldRemove) {
                 iterator.remove();
-                continue;
+            }
+        }
+    }
+
+    public boolean executeDynamicPartitionForTable(Long dbId, Long tableId) {
+        Database db = GlobalStateMgr.getCurrentState().getDb(dbId);
+        if (db == null) {
+            LOG.warn("Automatically removes the schedule because database does not exist, dbId: {}", dbId);
+            return true;
+        }
+
+        ArrayList<AddPartitionClause> addPartitionClauses = new ArrayList<>();
+        ArrayList<DropPartitionClause> dropPartitionClauses;
+        String tableName;
+        boolean skipAddPartition = false;
+        OlapTable olapTable;
+        Locker locker = new Locker();
+        locker.lockDatabase(db, LockType.READ);
+        try {
+            olapTable = (OlapTable) db.getTable(tableId);
+            // Only OlapTable has DynamicPartitionProperty
+            if (olapTable == null || !olapTable.dynamicPartitionExists() ||
+                    !olapTable.getTableProperty().getDynamicPartitionProperty().getEnable()) {
+                if (olapTable == null) {
+                    LOG.warn("Automatically removes the schedule because table does not exist, " +
+                            "tableId: {}", tableId);
+                } else if (!olapTable.dynamicPartitionExists()) {
+                    LOG.warn("Automatically removes the schedule because " +
+                            "table[{}] does not have dynamic partition", olapTable.getName());
+                } else {
+                    LOG.warn("Automatically removes the schedule because table[{}] " +
+                            "does not enable dynamic partition", olapTable.getName());
+                }
+                return true;
             }
 
-            ArrayList<AddPartitionClause> addPartitionClauses = new ArrayList<>();
-            ArrayList<DropPartitionClause> dropPartitionClauses;
-            String tableName;
-            boolean skipAddPartition = false;
-            OlapTable olapTable;
-            db.readLock();
+            if (olapTable.getState() != OlapTable.OlapTableState.NORMAL) {
+                String errorMsg = "Table[" + olapTable.getName() + "]'s state is not NORMAL." +
+                        "Do not allow doing dynamic add partition. table state=" + olapTable.getState();
+                recordCreatePartitionFailedMsg(db.getOriginName(), olapTable.getName(), errorMsg);
+                skipAddPartition = true;
+            }
+
+            // Determine the partition column type
+            // if column type is Date, format partition name as yyyyMMdd
+            // if column type is DateTime, format partition name as yyyyMMddHHssmm
+            // scheduler time should be record even no partition added
+            createOrUpdateRuntimeInfo(olapTable.getName(), LAST_SCHEDULER_TIME, TimeUtils.getCurrentFormatTime());
+            RangePartitionInfo rangePartitionInfo = (RangePartitionInfo) olapTable.getPartitionInfo();
+            if (rangePartitionInfo.getPartitionColumns().size() != 1) {
+                // currently only support partition with single column.
+                LOG.warn("Automatically removes the schedule because " +
+                        "table[{}] has more than one partition column", olapTable.getName());
+                return true;
+            }
+
+            Column partitionColumn = rangePartitionInfo.getPartitionColumns().get(0);
+            String partitionFormat;
             try {
-                olapTable = (OlapTable) db.getTable(tableId);
-                // Only OlapTable has DynamicPartitionProperty
-                if (olapTable == null
-                        || !olapTable.dynamicPartitionExists()
-                        || !olapTable.getTableProperty().getDynamicPartitionProperty().getEnable()) {
-                    iterator.remove();
-                    continue;
-                }
-
-                if (olapTable.getState() != OlapTable.OlapTableState.NORMAL) {
-                    String errorMsg = "Table[" + olapTable.getName() + "]'s state is not NORMAL."
-                            + "Do not allow doing dynamic add partition. table state=" + olapTable.getState();
-                    recordCreatePartitionFailedMsg(db.getFullName(), olapTable.getName(), errorMsg);
-                    skipAddPartition = true;
-                }
-
-                // Determine the partition column type
-                // if column type is Date, format partition name as yyyyMMdd
-                // if column type is DateTime, format partition name as yyyyMMddHHssmm
-                // scheduler time should be record even no partition added
-                createOrUpdateRuntimeInfo(olapTable.getName(), LAST_SCHEDULER_TIME, TimeUtils.getCurrentFormatTime());
-                RangePartitionInfo rangePartitionInfo = (RangePartitionInfo) olapTable.getPartitionInfo();
-                if (rangePartitionInfo.getPartitionColumns().size() != 1) {
-                    // currently only support partition with single column.
-                    iterator.remove();
-                    continue;
-                }
-
-                Column partitionColumn = rangePartitionInfo.getPartitionColumns().get(0);
-                String partitionFormat;
-                try {
-                    partitionFormat = DynamicPartitionUtil.getPartitionFormat(partitionColumn);
-                } catch (DdlException e) {
-                    recordCreatePartitionFailedMsg(db.getFullName(), olapTable.getName(), e.getMessage());
-                    continue;
-                }
-
-                if (!skipAddPartition) {
-                    addPartitionClauses = getAddPartitionClause(db, olapTable, partitionColumn, partitionFormat);
-                }
-                dropPartitionClauses = getDropPartitionClause(db, olapTable, partitionColumn, partitionFormat);
-                tableName = olapTable.getName();
-            } finally {
-                db.readUnlock();
-            }
-
-            for (DropPartitionClause dropPartitionClause : dropPartitionClauses) {
-                db.writeLock();
-                try {
-                    Catalog.getCurrentCatalog().dropPartition(db, olapTable, dropPartitionClause);
-                    clearDropPartitionFailedMsg(tableName);
-                } catch (DdlException e) {
-                    recordDropPartitionFailedMsg(db.getFullName(), tableName, e.getMessage());
-                } finally {
-                    db.writeUnlock();
-                }
+                partitionFormat = DynamicPartitionUtil.getPartitionFormat(partitionColumn);
+            } catch (DdlException e) {
+                recordCreatePartitionFailedMsg(db.getOriginName(), olapTable.getName(), e.getMessage());
+                return false;
             }
 
             if (!skipAddPartition) {
-                for (AddPartitionClause addPartitionClause : addPartitionClauses) {
-                    try {
-                        Catalog.getCurrentCatalog().addPartitions(db, tableName, addPartitionClause);
-                        clearCreatePartitionFailedMsg(tableName);
-                    } catch (DdlException | AnalysisException e) {
-                        recordCreatePartitionFailedMsg(db.getFullName(), tableName, e.getMessage());
-                    }
+                addPartitionClauses = getAddPartitionClause(db, olapTable, partitionColumn, partitionFormat);
+            }
+            dropPartitionClauses = getDropPartitionClause(db, olapTable, partitionColumn, partitionFormat);
+            tableName = olapTable.getName();
+        } finally {
+            locker.unLockDatabase(db, LockType.READ);
+        }
+
+        for (DropPartitionClause dropPartitionClause : dropPartitionClauses) {
+            if (!locker.lockAndCheckExist(db, LockType.WRITE)) {
+                LOG.warn("db: {}({}) has been dropped, skip", db.getFullName(), db.getId());
+                return false;
+            }
+            try {
+                GlobalStateMgr.getCurrentState().dropPartition(db, olapTable, dropPartitionClause);
+                clearDropPartitionFailedMsg(tableName);
+            } catch (DdlException e) {
+                recordDropPartitionFailedMsg(db.getOriginName(), tableName, e.getMessage());
+            } finally {
+                locker.unLockDatabase(db, LockType.WRITE);
+            }
+        }
+
+        if (!skipAddPartition) {
+            for (AddPartitionClause addPartitionClause : addPartitionClauses) {
+                try {
+                    GlobalStateMgr.getCurrentState().addPartitions(db, tableName, addPartitionClause);
+                    clearCreatePartitionFailedMsg(tableName);
+                } catch (DdlException | AnalysisException e) {
+                    recordCreatePartitionFailedMsg(db.getOriginName(), tableName, e.getMessage());
                 }
             }
         }
+        return false;
+    }
+
+    private void executePartitionTimeToLive() {
+        Iterator<Pair<Long, Long>> iterator = ttlPartitionInfo.iterator();
+        while (iterator.hasNext()) {
+            Pair<Long, Long> tableInfo = iterator.next();
+            Long dbId = tableInfo.first;
+            Long tableId = tableInfo.second;
+            Database db = GlobalStateMgr.getCurrentState().getDb(dbId);
+            if (db == null) {
+                iterator.remove();
+                LOG.warn("Could not get database={} info. remove it from scheduler", dbId);
+                continue;
+            }
+            Table table = db.getTable(tableId);
+            OlapTable olapTable;
+            if (table instanceof OlapTable) {
+                olapTable = (OlapTable) table;
+            } else {
+                iterator.remove();
+                LOG.warn("database={}, table={}. is not olap table. remove it from scheduler",
+                        dbId, tableId);
+                continue;
+            }
+
+            PartitionInfo partitionInfo = olapTable.getPartitionInfo();
+            RangePartitionInfo rangePartitionInfo;
+            if (partitionInfo instanceof RangePartitionInfo) {
+                rangePartitionInfo = (RangePartitionInfo) olapTable.getPartitionInfo();
+            } else {
+                LOG.warn("currently only support range partition." +
+                        "remove database={}, table={} from scheduler", dbId, tableId);
+                continue;
+            }
+
+            if (rangePartitionInfo.getPartitionColumns().size() != 1) {
+                iterator.remove();
+                LOG.warn("currently only support partition with single column. " +
+                        "remove database={}, table={} from scheduler", dbId, tableId);
+                continue;
+            }
+
+            int ttlNumber = olapTable.getTableProperty().getPartitionTTLNumber();
+            PeriodDuration ttlDuration = olapTable.getTableProperty().getPartitionTTL();
+            if (Objects.equals(ttlNumber, INVALID) && ttlDuration.isZero()) {
+                iterator.remove();
+                LOG.warn("database={}, table={} have no ttl. remove it from scheduler", dbId, tableId);
+                continue;
+            }
+
+            ArrayList<DropPartitionClause> dropPartitionClauses = null;
+            try {
+                if (!ttlDuration.isZero()) {
+                    dropPartitionClauses = buildDropPartitionClauseByTTL(olapTable, ttlDuration);
+                } else {
+                    dropPartitionClauses = getDropPartitionClauseByTTL(olapTable, ttlNumber);
+                }
+            } catch (AnalysisException e) {
+                LOG.warn("database={}, table={} Failed to generate drop statement.", dbId, tableId, e);
+            }
+            if (dropPartitionClauses == null) {
+                continue;
+            }
+
+            String tableName = olapTable.getName();
+            for (DropPartitionClause dropPartitionClause : dropPartitionClauses) {
+                Locker locker = new Locker();
+                locker.lockDatabase(db, LockType.WRITE);
+                try {
+                    GlobalStateMgr.getCurrentState().dropPartition(db, olapTable, dropPartitionClause);
+                    clearDropPartitionFailedMsg(tableName);
+                } catch (DdlException e) {
+                    recordDropPartitionFailedMsg(db.getOriginName(), tableName, e.getMessage());
+                } finally {
+                    locker.unLockDatabase(db, LockType.WRITE);
+                }
+            }
+
+        }
+    }
+
+    /**
+     * Build drop partitions by TTL.
+     * Drop the partition if partition upper endpoint less than TTL lower bound
+     */
+    private ArrayList<DropPartitionClause> buildDropPartitionClauseByTTL(OlapTable olapTable,
+                                                                         PeriodDuration ttlDuration)
+            throws AnalysisException {
+        if (ttlDuration.isZero()) {
+            return Lists.newArrayList();
+        }
+        ArrayList<DropPartitionClause> dropPartitionClauses = new ArrayList<>();
+        RangePartitionInfo rangePartitionInfo = (RangePartitionInfo) (olapTable.getPartitionInfo());
+        List<Column> partitionColumns = rangePartitionInfo.getPartitionColumns();
+        Preconditions.checkArgument(partitionColumns.size() == 1);
+        Type partitionType = partitionColumns.get(0).getType();
+        PartitionKey ttlLowerBound = null;
+
+        LocalDateTime ttlTime = LocalDateTime.now().minus(ttlDuration);
+        if (partitionType.isDatetime()) {
+            ttlLowerBound = PartitionKey.ofDateTime(ttlTime);
+        } else if (partitionType.isDate()) {
+            ttlLowerBound = PartitionKey.ofDate(ttlTime.toLocalDate());
+        } else {
+            throw new SemanticException("partition_ttl not support partition type: " + partitionType);
+        }
+
+        PartitionKey shadowPartitionKey = PartitionKey.createShadowPartitionKey(partitionColumns);
+
+        Map<Long, Range<PartitionKey>> idToRange = rangePartitionInfo.getIdToRange(false);
+        for (Map.Entry<Long, Range<PartitionKey>> partitionRange : idToRange.entrySet()) {
+            PartitionKey left = partitionRange.getValue().lowerEndpoint();
+            if (left.compareTo(shadowPartitionKey) == 0) {
+                continue;
+            }
+
+            PartitionKey right = partitionRange.getValue().upperEndpoint();
+            if (right.compareTo(ttlLowerBound) <= 0) {
+                long partitionId = partitionRange.getKey();
+                String dropPartitionName = olapTable.getPartition(partitionId).getName();
+                dropPartitionClauses.add(new DropPartitionClause(true, dropPartitionName, false, true));
+            }
+        }
+        return dropPartitionClauses;
+    }
+
+    private ArrayList<DropPartitionClause> getDropPartitionClauseByTTL(OlapTable olapTable, int ttlNumber)
+            throws AnalysisException {
+
+        ArrayList<DropPartitionClause> dropPartitionClauses = new ArrayList<>();
+        RangePartitionInfo rangePartitionInfo = (RangePartitionInfo) (olapTable.getPartitionInfo());
+        List<Column> partitionColumns = rangePartitionInfo.getPartitionColumns();
+
+        // Currently, materialized views and automatically created partition tables
+        // only support single-column partitioning.
+        Preconditions.checkArgument(partitionColumns.size() == 1);
+        Type partitionType = partitionColumns.get(0).getType();
+        List<Map.Entry<Long, Range<PartitionKey>>> candidatePartitionList = Lists.newArrayList();
+
+        if (partitionType.isDateType()) {
+            PartitionKey currentPartitionKey = partitionType.isDatetime() ?
+                    PartitionKey.ofDateTime(LocalDateTime.now()) : PartitionKey.ofDate(LocalDate.now());
+            PartitionKey shadowPartitionKey = PartitionKey.createShadowPartitionKey(partitionColumns);
+
+            Map<Long, Range<PartitionKey>> idToRange = rangePartitionInfo.getIdToRange(false);
+            for (Map.Entry<Long, Range<PartitionKey>> partitionRange : idToRange.entrySet()) {
+                PartitionKey lowerPartitionKey = partitionRange.getValue().lowerEndpoint();
+
+                if (lowerPartitionKey.compareTo(shadowPartitionKey) == 0) {
+                    continue;
+                }
+
+                if (lowerPartitionKey.compareTo(currentPartitionKey) <= 0) {
+                    candidatePartitionList.add(partitionRange);
+                }
+            }
+        } else if (partitionType.isNumericType()) {
+            candidatePartitionList = new ArrayList<>(rangePartitionInfo.getIdToRange(false).entrySet());
+        } else {
+            throw new AnalysisException("Partition ttl does not support type:" + partitionType);
+        }
+
+        candidatePartitionList.sort(Comparator.comparing(o -> o.getValue().upperEndpoint()));
+
+        int allPartitionNumber = candidatePartitionList.size();
+        if (allPartitionNumber <= ttlNumber) {
+            return dropPartitionClauses;
+        } else {
+            int dropSize = allPartitionNumber - ttlNumber;
+            for (int i = 0; i < dropSize; i++) {
+                Long checkDropPartitionId = candidatePartitionList.get(i).getKey();
+                Partition partition = olapTable.getPartition(checkDropPartitionId);
+                if (partition != null) {
+                    String dropPartitionName = partition.getName();
+                    dropPartitionClauses.add(new DropPartitionClause(false, dropPartitionName, false, true));
+                }
+            }
+        }
+        return dropPartitionClauses;
     }
 
     private void recordCreatePartitionFailedMsg(String dbName, String tableName, String msg) {
@@ -375,23 +653,36 @@ public class DynamicPartitionScheduler extends MasterDaemon {
     }
 
     private void initDynamicPartitionTable() {
-        for (Long dbId : Catalog.getCurrentCatalog().getDbIds()) {
-            Database db = Catalog.getCurrentCatalog().getDb(dbId);
+        for (Long dbId : GlobalStateMgr.getCurrentState().getDbIds()) {
+            Database db = GlobalStateMgr.getCurrentState().getDb(dbId);
             if (db == null) {
                 continue;
             }
-            db.readLock();
+            if (db.isSystemDatabase() || db.getFullName().equals(StatsConstants.STATISTICS_DB_NAME)) {
+                continue;
+            }
+
+            Locker locker = new Locker();
+            locker.lockDatabase(db, LockType.READ);
             try {
-                for (Table table : Catalog.getCurrentCatalog().getDb(dbId).getTables()) {
+                for (Table table : GlobalStateMgr.getCurrentState().getDb(dbId).getTables()) {
                     if (DynamicPartitionUtil.isDynamicPartitionTable(table)) {
                         registerDynamicPartitionTable(db.getId(), table.getId());
                     }
+                    if (DynamicPartitionUtil.isTTLPartitionTable(table)) {
+                        registerTtlPartitionTable(db.getId(), table.getId());
+                    }
                 }
             } finally {
-                db.readUnlock();
+                locker.unLockDatabase(db, LockType.READ);
             }
         }
         initialize = true;
+    }
+
+    @VisibleForTesting
+    public void runOnceForTest() {
+        runAfterCatalogReady();
     }
 
     @Override
@@ -404,5 +695,6 @@ public class DynamicPartitionScheduler extends MasterDaemon {
         if (Config.dynamic_partition_enable) {
             executeDynamicPartition();
         }
+        executePartitionTimeToLive();
     }
 }

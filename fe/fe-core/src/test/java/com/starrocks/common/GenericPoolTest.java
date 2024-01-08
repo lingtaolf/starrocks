@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/common/GenericPoolTest.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -49,6 +45,7 @@ import com.starrocks.thrift.TScanOpenParams;
 import com.starrocks.thrift.TScanOpenResult;
 import com.starrocks.thrift.TSnapshotRequest;
 import com.starrocks.thrift.TStatus;
+import com.starrocks.thrift.TStreamLoadChannel;
 import com.starrocks.thrift.TTabletStatResult;
 import com.starrocks.thrift.TTransmitDataParams;
 import com.starrocks.thrift.TTransmitDataResult;
@@ -147,7 +144,7 @@ public class GenericPoolTest {
         }
 
         @Override
-        public TAgentResult release_snapshot(String snapshot_path) throws TException {
+        public TAgentResult release_snapshot(String snapshotPath) throws TException {
             return null;
         }
 
@@ -172,7 +169,7 @@ public class GenericPoolTest {
         }
 
         @Override
-        public TAgentResult make_snapshot(TSnapshotRequest snapshot_request) throws TException {
+        public TAgentResult make_snapshot(TSnapshotRequest snapshotRequest) throws TException {
             // TODO Auto-generated method stub
             return null;
         }
@@ -184,13 +181,13 @@ public class GenericPoolTest {
         }
 
         @Override
-        public TExportStatusResult get_export_status(TUniqueId task_id) throws TException {
+        public TExportStatusResult get_export_status(TUniqueId taskId) throws TException {
             // TODO Auto-generated method stub
             return null;
         }
 
         @Override
-        public TStatus erase_export_task(TUniqueId task_id) throws TException {
+        public TStatus erase_export_task(TUniqueId taskId) throws TException {
             // TODO Auto-generated method stub
             return null;
         }
@@ -203,6 +200,12 @@ public class GenericPoolTest {
 
         @Override
         public TStatus submit_routine_load_task(List<TRoutineLoadTask> tasks) throws TException {
+            // TODO Auto-generated method stub
+            return null;
+        }
+
+        @Override
+        public TStatus finish_stream_load_channel(TStreamLoadChannel streamLoadChannel) throws TException {
             // TODO Auto-generated method stub
             return null;
         }

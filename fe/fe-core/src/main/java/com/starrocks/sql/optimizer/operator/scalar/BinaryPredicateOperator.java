@@ -1,18 +1,30 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package com.starrocks.sql.optimizer.operator.scalar;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
+import com.starrocks.analysis.BinaryType;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
-import static com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator.BinaryType.EQ_FOR_NULL;
-
 public class BinaryPredicateOperator extends PredicateOperator {
-    private static final Map<BinaryType, BinaryType> BINARY_CONVERSE_MAP =
+    private static final Map<BinaryType, BinaryType> BINARY_COMMUTATIVE_MAP =
             ImmutableMap.<BinaryType, BinaryType>builder()
                     .put(BinaryType.EQ, BinaryType.EQ)
                     .put(BinaryType.NE, BinaryType.NE)
@@ -21,6 +33,16 @@ public class BinaryPredicateOperator extends PredicateOperator {
                     .put(BinaryType.GE, BinaryType.LE)
                     .put(BinaryType.GT, BinaryType.LT)
                     .put(BinaryType.EQ_FOR_NULL, BinaryType.EQ_FOR_NULL)
+                    .build();
+
+    private static final Map<BinaryType, BinaryType> BINARY_NEGATIVE_MAP =
+            ImmutableMap.<BinaryType, BinaryType>builder()
+                    .put(BinaryType.EQ, BinaryType.NE)
+                    .put(BinaryType.NE, BinaryType.EQ)
+                    .put(BinaryType.LE, BinaryType.GT)
+                    .put(BinaryType.LT, BinaryType.GE)
+                    .put(BinaryType.GE, BinaryType.LT)
+                    .put(BinaryType.GT, BinaryType.LE)
                     .build();
 
     private final BinaryType type;
@@ -53,52 +75,18 @@ public class BinaryPredicateOperator extends PredicateOperator {
         return visitor.visitBinaryPredicate(this, context);
     }
 
-    public enum BinaryType {
-        EQ("="),
-        NE("!="),
-        LE("<="),
-        GE(">="),
-        LT("<"),
-        GT(">"),
-        EQ_FOR_NULL("<=>");
-
-        private final String type;
-
-        BinaryType(String type) {
-            this.type = type;
-        }
-
-        @Override
-        public String toString() {
-            return type;
-        }
-
-        public boolean isEqual() {
-            return type.equals(EQ.type);
-        }
-
-        public boolean isNotEqual() {
-            return type.equals(NE.type);
-        }
-
-        public boolean isEquivalence() {
-            return this == EQ || this == EQ_FOR_NULL;
-        }
-
-        ;
-
-        public boolean isRange() {
-            return type.equals(LT.type)
-                    || type.equals(LE.type)
-                    || type.equals(GT.type)
-                    || type.equals(GE.type);
-        }
+    public BinaryPredicateOperator commutative() {
+        return new BinaryPredicateOperator(BINARY_COMMUTATIVE_MAP.get(this.getBinaryType()),
+                this.getChild(1),
+                this.getChild(0));
     }
 
     public BinaryPredicateOperator negative() {
-        return new BinaryPredicateOperator(BINARY_CONVERSE_MAP.get(this.getBinaryType()),
-                this.getChild(1),
-                this.getChild(0));
+        if (BINARY_NEGATIVE_MAP.containsKey(this.getBinaryType())) {
+            return new BinaryPredicateOperator(BINARY_NEGATIVE_MAP.get(this.getBinaryType()), this.getChildren());
+        } else {
+            return null;
+        }
     }
 
     @Override
@@ -132,12 +120,31 @@ public class BinaryPredicateOperator extends PredicateOperator {
     }
 
     @Override
-    public boolean isStrictPredicate() {
-        if (type == EQ_FOR_NULL) {
-            return false;
-        }
-        // To exclude 1 = 1;
-        // TODO(kks): Currently, we only allow column ref and cast, we should allow some functions
-        return getChild(0).isColumnRefOrCast() || getChild(1).isColumnRefOrCast();
+    public boolean isNullable() {
+        return !this.type.equals(BinaryType.EQ_FOR_NULL) && super.isNullable();
+    }
+
+    public static BinaryPredicateOperator eq(ScalarOperator lhs, ScalarOperator rhs) {
+        return new BinaryPredicateOperator(BinaryType.EQ, lhs, rhs);
+    }
+
+    public static BinaryPredicateOperator ge(ScalarOperator lhs, ScalarOperator rhs) {
+        return new BinaryPredicateOperator(BinaryType.GE, lhs, rhs);
+    }
+
+    public static BinaryPredicateOperator gt(ScalarOperator lhs, ScalarOperator rhs) {
+        return new BinaryPredicateOperator(BinaryType.GT, lhs, rhs);
+    }
+
+    public static BinaryPredicateOperator ne(ScalarOperator lhs, ScalarOperator rhs) {
+        return new BinaryPredicateOperator(BinaryType.NE, lhs, rhs);
+    }
+
+    public static BinaryPredicateOperator le(ScalarOperator lhs, ScalarOperator rhs) {
+        return new BinaryPredicateOperator(BinaryType.LE, lhs, rhs);
+    }
+
+    public static BinaryPredicateOperator lt(ScalarOperator lhs, ScalarOperator rhs) {
+        return new BinaryPredicateOperator(BinaryType.LT, lhs, rhs);
     }
 }

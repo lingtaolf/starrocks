@@ -70,14 +70,12 @@
 // property.  We already have several such functions; see
 // hash_unittest.cc for the details and unittests.
 
-#ifndef UTIL_HASH_HASH_H_
-#define UTIL_HASH_HASH_H_
-
-#include <stddef.h>
-#include <stdint.h> // for uintptr_t
-#include <string.h>
+#pragma once
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint> // for uintptr_t
+#include <cstring>
 #include <ext/hash_map>
 using __gnu_cxx::hash;
 using __gnu_cxx::hash_map; // hacky way to make sure we import standard hash<> fns
@@ -403,4 +401,3 @@ extern template class hash_map<std::string, std::string>;
 } // namespace __gnu_cxx
 
 #endif // defined(__GNUC__)
-#endif // UTIL_HASH_HASH_H_

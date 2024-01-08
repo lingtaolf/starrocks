@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/util/ListUtil.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -24,6 +20,7 @@ package com.starrocks.common.util;
 import com.google.common.base.Preconditions;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 public class ListUtil {
@@ -43,6 +40,10 @@ public class ListUtil {
             throws NullPointerException, IllegalArgumentException {
         Preconditions.checkNotNull(list, "list must not be null");
         Preconditions.checkArgument(expectedSize > 0, "expectedSize must larger than 0");
+
+        if (1 == expectedSize) {
+            return Collections.singletonList(list);
+        }
 
         int splitSize = Math.min(expectedSize, list.size());
 

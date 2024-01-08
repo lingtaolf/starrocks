@@ -48,10 +48,9 @@
 // The intent is eventually to put all of these routines in namespace
 // base::subtle
 
-#ifndef THREAD_ATOMICOPS_H_
-#define THREAD_ATOMICOPS_H_
+#pragma once
 
-#include <stdint.h>
+#include <cstdint>
 
 // ------------------------------------------------------------------------
 // Include the platform specific implementations of the types
@@ -326,5 +325,3 @@ inline base::subtle::Atomic64 Acquire_Load(volatile const base::subtle::Atomic64
 inline base::subtle::Atomic64 Release_Load(volatile const base::subtle::Atomic64* ptr) {
     return base::subtle::Release_Load(ptr);
 }
-
-#endif // THREAD_ATOMICOPS_H_

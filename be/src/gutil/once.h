@@ -21,8 +21,7 @@
 //     ...
 //   }
 
-#ifndef BASE_ONCE_H_
-#define BASE_ONCE_H_
+#pragma once
 
 #include "gutil/atomicops.h"
 #include "gutil/dynamic_annotations.h"
@@ -52,7 +51,7 @@ extern void GoogleOnceInternalInit(Atomic32* state, void (*func)(), void (*func_
 inline void GoogleOnceInit(GoogleOnceType* state, void (*func)()) {
     Atomic32 s = Acquire_Load(&state->state);
     if (PREDICT_FALSE(s != GOOGLE_ONCE_INTERNAL_DONE)) {
-        GoogleOnceInternalInit(&state->state, func, 0, 0);
+        GoogleOnceInternalInit(&state->state, func, nullptr, nullptr);
     }
     ANNOTATE_HAPPENS_AFTER(&state->state);
 }
@@ -91,7 +90,7 @@ inline void GoogleOnceInitArg(GoogleOnceType* state, void (*func_with_arg)(T*), 
 //   }
 class GoogleOnceDynamic {
 public:
-    GoogleOnceDynamic() : state_(GOOGLE_ONCE_INTERNAL_INIT) {}
+    GoogleOnceDynamic() {}
 
     // If this->Init() has not been called before by any thread,
     // execute (*func_with_arg)(arg) then return.
@@ -110,8 +109,7 @@ public:
     }
 
 private:
-    Atomic32 state_;
-    DISALLOW_COPY_AND_ASSIGN(GoogleOnceDynamic);
+    Atomic32 state_{GOOGLE_ONCE_INTERNAL_INIT};
+    GoogleOnceDynamic(const GoogleOnceDynamic&) = delete;
+    const GoogleOnceDynamic& operator=(const GoogleOnceDynamic&) = delete;
 };
-
-#endif // BASE_ONCE_H_

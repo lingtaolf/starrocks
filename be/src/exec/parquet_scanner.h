@@ -1,25 +1,20 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/parquet_scanner.h
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #pragma once
+
+#include <fs/fs.h>
 
 #include <map>
 #include <memory>
@@ -27,63 +22,74 @@
 #include <string>
 #include <vector>
 
+#include "column/vectorized_fwd.h"
 #include "common/status.h"
+#include "exec/arrow_to_starrocks_converter.h"
 #include "exec/file_scanner.h"
-#include "gen_cpp/PlanNodes_types.h"
-#include "gen_cpp/Types_types.h"
+#include "parquet_reader.h"
+#include "parquet_scanner.h"
 #include "runtime/mem_pool.h"
 #include "util/runtime_profile.h"
 #include "util/slice.h"
 
 namespace starrocks {
 
-class Tuple;
-class SlotDescriptor;
-class Slice;
-class ParquetReaderWrap;
-class RuntimeState;
-class ExprContext;
-class TupleDescriptor;
-class TupleRow;
-class RowDescriptor;
-class MemTracker;
-class RuntimeProfile;
-class StreamLoadPipe;
-
 // Broker scanner convert the data read from broker to starrocks's tuple.
 class ParquetScanner : public FileScanner {
 public:
-    ParquetScanner(RuntimeState* state, RuntimeProfile* profile, const TBrokerScanRangeParams& params,
-                   const std::vector<TBrokerRangeDesc>& ranges, const std::vector<TNetworkAddress>& broker_addresses,
-                   ScannerCounter* counter);
-    ~ParquetScanner();
+    ParquetScanner(RuntimeState* state, RuntimeProfile* profile, const TBrokerScanRange& scan_range,
+                   ScannerCounter* counter, bool schema_only = false);
 
-    // Open this scanner, will initialize information need to
-    virtual Status open();
+    ~ParquetScanner() override;
 
-    // Get next tuple
-    virtual Status get_next(Tuple* tuple, MemPool* tuple_pool, bool* eof);
+    Status open() override;
 
-    // Close this scanner
-    virtual void close();
+    StatusOr<ChunkPtr> get_next() override;
+
+    Status get_schema(std::vector<SlotDescriptor>* schema) override;
+
+    void close() override;
+
+    static Status convert_array_to_column(ConvertFuncTree* func, size_t num_elements, const arrow::Array* array,
+                                          const ColumnPtr& column, size_t batch_start_idx, size_t column_start_idx,
+                                          Filter* chunk_filter, ArrowConvertContext* conv_ctx);
+
+    static Status new_column(const arrow::DataType* arrow_type, const SlotDescriptor* slot_desc, ColumnPtr* column,
+                             ConvertFuncTree* conv_func, Expr** expr, ObjectPool& pool, bool strict_mode);
+
+    static Status build_dest(const arrow::DataType* arrow_type, const TypeDescriptor* type_desc, bool is_nullable,
+                             TypeDescriptor* raw_type_desc, ConvertFuncTree* conv_func, bool& need_cast,
+                             bool strict_mode);
 
 private:
     // Read next buffer from reader
     Status open_next_reader();
+    Status next_batch();
+    Status initialize_src_chunk(ChunkPtr* chunk);
+    Status append_batch_to_src_chunk(ChunkPtr* chunk);
+    bool chunk_is_full();
+    bool batch_is_exhausted();
+    Status finalize_src_chunk(ChunkPtr* chunk);
 
-private:
-    //const TBrokerScanRangeParams& _params;
-    const std::vector<TBrokerRangeDesc>& _ranges;
-    const std::vector<TNetworkAddress>& _broker_addresses;
-
-    // Reader
-    ParquetReaderWrap* _cur_file_reader;
-    int _next_range;
-    bool _cur_file_eof; // is read over?
+    const TBrokerScanRange& _scan_range;
+    int _next_file;
+    std::shared_ptr<ParquetChunkReader> _curr_file_reader;
     bool _scanner_eof;
-
-    // used to hold current StreamLoadPipe
-    std::shared_ptr<StreamLoadPipe> _stream_load_pipe;
+    RecordBatchPtr _batch;
+    const size_t _max_chunk_size;
+    size_t _batch_start_idx;
+    size_t _chunk_start_idx;
+    int _num_of_columns_from_file = 0;
+    std::vector<std::unique_ptr<ConvertFuncTree>> _conv_funcs;
+    std::vector<Expr*> _cast_exprs;
+    ObjectPool _pool;
+    Filter _chunk_filter;
+    ArrowConvertContext _conv_ctx;
+    int64_t _last_file_size = 0;
+    int64_t _last_range_size = 0;
+    int64_t _last_file_scan_rows = 0;
+    int64_t _last_file_scan_bytes = 0;
+    int64_t _next_batch_counter = 0;
 };
 
 } // namespace starrocks

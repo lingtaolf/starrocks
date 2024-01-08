@@ -1,25 +1,38 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "storage/primary_index.h"
 
 #include <gtest/gtest.h>
 
+#include "column/binary_column.h"
 #include "column/fixed_length_column.h"
 #include "column/schema.h"
 #include "gutil/strings/substitute.h"
+#include "storage/chunk_helper.h"
 #include "storage/primary_key_encoder.h"
-#include "storage/vectorized/chunk_helper.h"
 #include "testutil/parallel_test.h"
 
-using namespace starrocks::vectorized;
+using namespace starrocks;
 
 namespace starrocks {
 
-template <FieldType field_type, typename DatumType>
+template <LogicalType field_type, typename DatumType>
 void test_integral_pk() {
-    auto f = std::make_shared<vectorized::Field>(0, "c0", field_type, false);
+    auto f = std::make_shared<Field>(0, "c0", field_type, false);
     f->set_is_key(true);
-    auto schema = std::make_shared<vectorized::Schema>(Fields{f});
+    auto schema = std::make_shared<Schema>(Fields{f}, PRIMARY_KEYS, std::vector<ColumnId>{0});
     auto pk_index = TEST_create_primary_index(*schema);
 
     constexpr int kSegmentSize = 20;
@@ -48,6 +61,20 @@ void test_integral_pk() {
         pk_data[i] = pk_value++;
     }
     ASSERT_TRUE(pk_index->insert(2, 0, *pk_col).ok());
+
+    {
+        std::vector<uint64_t> rowids(pk_col->size());
+        pk_index->get(*pk_col, &rowids);
+        for (uint32_t i = 0; i < kSegmentSize; i++) {
+            uint64_t v = rowids[i];
+            uint32_t rssid = v >> 32;
+            CHECK_EQ(rssid, 2);
+            if (rssid != static_cast<uint32_t>(-1)) {
+                uint32_t rowid = v & ROWID_MASK;
+                CHECK_EQ(rowid, i);
+            }
+        }
+    }
 
     PrimaryIndex::DeletesMap deletes;
 
@@ -84,6 +111,16 @@ void test_integral_pk() {
     pk_index->erase(*pk_col, &deletes);
     CHECK_EQ(2, deletes.size());
 
+    {
+        std::vector<uint64_t> rowids(pk_col->size());
+        pk_index->get(*pk_col, &rowids);
+        for (uint32_t i = 0; i < kSegmentSize; i++) {
+            uint64_t v = rowids[i];
+            uint32_t rssid = v >> 32;
+            CHECK_EQ(rssid, -1);
+        }
+    }
+
     CHECK(deletes.find(2) != deletes.end());
     CHECK(deletes.find(2) != deletes.end());
     CHECK_EQ(kSegmentSize / 2, deletes[2].size());
@@ -97,30 +134,30 @@ void test_integral_pk() {
 }
 
 PARALLEL_TEST(PrimaryIndexTest, test_tinyint) {
-    test_integral_pk<OLAP_FIELD_TYPE_TINYINT, int8_t>();
+    test_integral_pk<TYPE_TINYINT, int8_t>();
 }
 
 PARALLEL_TEST(PrimaryIndexTest, test_smallint) {
-    test_integral_pk<OLAP_FIELD_TYPE_SMALLINT, int16_t>();
+    test_integral_pk<TYPE_SMALLINT, int16_t>();
 }
 
 PARALLEL_TEST(PrimaryIndexTest, test_int) {
-    test_integral_pk<OLAP_FIELD_TYPE_INT, int32_t>();
+    test_integral_pk<TYPE_INT, int32_t>();
 }
 
 PARALLEL_TEST(PrimaryIndexTest, test_bigint) {
-    test_integral_pk<OLAP_FIELD_TYPE_BIGINT, int64_t>();
+    test_integral_pk<TYPE_BIGINT, int64_t>();
 }
 
 PARALLEL_TEST(PrimaryIndexTest, test_largeint) {
-    test_integral_pk<OLAP_FIELD_TYPE_LARGEINT, __int128>();
+    test_integral_pk<TYPE_LARGEINT, __int128>();
 }
 
-template <FieldType field_type>
+template <LogicalType field_type>
 void test_binary_pk() {
-    auto f = std::make_shared<vectorized::Field>(0, "c0", field_type, false);
+    auto f = std::make_shared<Field>(0, "c0", field_type, false);
     f->set_is_key(true);
-    auto schema = std::make_shared<vectorized::Schema>(Fields{f});
+    auto schema = std::make_shared<Schema>(Fields{f}, PRIMARY_KEYS, std::vector<ColumnId>{0});
     auto pk_index = TEST_create_primary_index(*schema);
 
     constexpr int kSegmentSize = 20;
@@ -151,6 +188,20 @@ void test_binary_pk() {
         pk_col->append(strings::Substitute("binary_pk_$0", pk_value++));
     }
     ASSERT_TRUE(pk_index->insert(2, 0, *pk_col).ok());
+
+    {
+        std::vector<uint64_t> rowids(pk_col->size());
+        pk_index->get(*pk_col, &rowids);
+        for (uint32_t i = 0; i < kSegmentSize; i++) {
+            uint64_t v = rowids[i];
+            uint32_t rssid = v >> 32;
+            CHECK_EQ(rssid, 2);
+            if (rssid != static_cast<uint32_t>(-1)) {
+                uint32_t rowid = v & ROWID_MASK;
+                CHECK_EQ(rowid, i);
+            }
+        }
+    }
 
     PrimaryIndex::DeletesMap deletes;
 
@@ -190,6 +241,16 @@ void test_binary_pk() {
     pk_index->erase(*pk_col, &deletes);
     CHECK_EQ(2, deletes.size());
 
+    {
+        std::vector<uint64_t> rowids(pk_col->size());
+        pk_index->get(*pk_col, &rowids);
+        for (uint32_t i = 0; i < kSegmentSize; i++) {
+            uint64_t v = rowids[i];
+            uint32_t rssid = v >> 32;
+            CHECK_EQ(rssid, -1);
+        }
+    }
+
     CHECK(deletes.find(2) != deletes.end());
     CHECK(deletes.find(3) != deletes.end());
     CHECK_EQ(kSegmentSize / 2, deletes[2].size());
@@ -203,15 +264,15 @@ void test_binary_pk() {
 }
 
 PARALLEL_TEST(PrimaryIndexTest, test_varchar) {
-    test_binary_pk<OLAP_FIELD_TYPE_VARCHAR>();
+    test_binary_pk<TYPE_VARCHAR>();
 }
 
 PARALLEL_TEST(PrimaryIndexTest, test_composite_key) {
-    auto f1 = std::make_shared<vectorized::Field>(0, "c0", OLAP_FIELD_TYPE_TINYINT, false);
+    auto f1 = std::make_shared<Field>(0, "c0", TYPE_TINYINT, false);
     f1->set_is_key(true);
-    auto f2 = std::make_shared<vectorized::Field>(1, "c1", OLAP_FIELD_TYPE_SMALLINT, false);
+    auto f2 = std::make_shared<Field>(1, "c1", TYPE_SMALLINT, false);
     f2->set_is_key(true);
-    auto schema = std::make_shared<vectorized::Schema>(Fields{f1, f2});
+    auto schema = std::make_shared<Schema>(Fields{f1, f2}, PRIMARY_KEYS, std::vector<ColumnId>{0, 1});
     auto pk_index = TEST_create_primary_index(*schema);
 
     constexpr int kSegmentSize = 100;
@@ -228,7 +289,7 @@ PARALLEL_TEST(PrimaryIndexTest, test_composite_key) {
         pk_col1->append(i * 2);
     }
 
-    std::unique_ptr<vectorized::Column> pk_column;
+    std::unique_ptr<Column> pk_column;
     PrimaryKeyEncoder::create_column(*schema, &pk_column);
     PrimaryKeyEncoder::encode(*schema, *chunk, 0, chunk->num_rows(), pk_column.get());
 

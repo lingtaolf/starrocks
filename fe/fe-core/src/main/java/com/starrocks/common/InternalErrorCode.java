@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/common/InternalErrorCode.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -32,13 +28,15 @@ public enum InternalErrorCode {
     DB_ERR(5),
     TABLE_ERR(6),
     META_NOT_FOUND_ERR(7),
+    REPLICA_ENOUGH_ERR(8),
 
     // for load job error
     MANUAL_PAUSE_ERR(100),
     MANUAL_STOP_ERR(101),
     TOO_MANY_FAILURE_ROWS_ERR(102),
     CREATE_TASKS_ERR(103),
-    TASKS_ABORT_ERR(104);
+    TASKS_ABORT_ERR(104),
+    SLOW_RUNNING_ERR(105);
 
     private long errCode;
 

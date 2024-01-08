@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/http/http_request.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_COMMON_UTIL_HTTP_REQUEST_H
-#define STARROCKS_BE_SRC_COMMON_UTIL_HTTP_REQUEST_H
+#pragma once
 
 #include <glog/logging.h>
 
@@ -106,5 +101,3 @@ private:
 };
 
 } // namespace starrocks
-
-#endif

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/common/proc/BackendsProcDirTest.java
 
@@ -21,10 +34,10 @@
 
 package com.starrocks.common.proc;
 
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.TabletInvertedIndex;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.persist.EditLog;
+import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.system.Backend;
 import com.starrocks.system.SystemInfoService;
 import mockit.Expectations;
@@ -43,7 +56,7 @@ public class BackendsProcDirTest {
     @Mocked
     private TabletInvertedIndex tabletInvertedIndex;
     @Mocked
-    private Catalog catalog;
+    private GlobalStateMgr globalStateMgr;
     @Mocked
     private EditLog editLog;
 
@@ -65,15 +78,15 @@ public class BackendsProcDirTest {
                 editLog.logBackendStateChange((Backend) any);
                 minTimes = 0;
 
-                catalog.getNextId();
+                globalStateMgr.getNextId();
                 minTimes = 0;
                 result = 10000L;
 
-                catalog.getEditLog();
+                globalStateMgr.getEditLog();
                 minTimes = 0;
                 result = editLog;
 
-                catalog.clear();
+                globalStateMgr.clear();
                 minTimes = 0;
 
                 systemInfoService.getBackend(1000);
@@ -94,21 +107,21 @@ public class BackendsProcDirTest {
             }
         };
 
-        new Expectations(catalog) {
+        new Expectations(globalStateMgr) {
             {
-                Catalog.getCurrentCatalog();
+                GlobalStateMgr.getCurrentState();
                 minTimes = 0;
-                result = catalog;
+                result = globalStateMgr;
 
-                Catalog.getCurrentCatalog();
+                GlobalStateMgr.getCurrentState();
                 minTimes = 0;
-                result = catalog;
+                result = globalStateMgr;
 
-                Catalog.getCurrentInvertedIndex();
+                GlobalStateMgr.getCurrentInvertedIndex();
                 minTimes = 0;
                 result = tabletInvertedIndex;
 
-                Catalog.getCurrentSystemInfo();
+                GlobalStateMgr.getCurrentSystemInfo();
                 minTimes = 0;
                 result = systemInfoService;
             }
@@ -119,14 +132,6 @@ public class BackendsProcDirTest {
     @After
     public void tearDown() {
         // systemInfoService = null;
-    }
-
-    @Test
-    public void testRegister() {
-        BackendsProcDir dir;
-
-        dir = new BackendsProcDir(systemInfoService);
-        Assert.assertFalse(dir.register("100000", new BaseProcDir()));
     }
 
     @Test(expected = AnalysisException.class)
@@ -188,4 +193,8 @@ public class BackendsProcDirTest {
         Assert.assertTrue(result instanceof BaseProcResult);
     }
 
+    @Test    
+    public void testIPTitle() {
+        Assert.assertTrue(BackendsProcDir.TITLE_NAMES.get(1).equals("IP"));
+    }
 }

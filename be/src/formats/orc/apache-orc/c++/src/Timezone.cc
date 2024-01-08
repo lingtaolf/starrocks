@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/orc/tree/main/c++/src/Timezone.cc
 
@@ -22,14 +35,13 @@
 
 #include "Timezone.hh"
 
-#include <errno.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <map>
 #include <sstream>
+#include <utility>
 
 #include "orc/OrcFile.hh"
 
@@ -231,7 +243,7 @@ class FutureRuleImpl : public FutureRule {
     }
 
 public:
-    virtual ~FutureRuleImpl() override;
+    ~FutureRuleImpl() override;
     bool isDefined() const override;
     const TimezoneVariant& getVariant(int64_t clk) const override;
     void print(std::ostream& out) const override;
@@ -286,7 +298,7 @@ void FutureRuleImpl::print(std::ostream& out) const {
 class FutureRuleParser {
 public:
     FutureRuleParser(const std::string& str, FutureRuleImpl* rule)
-            : ruleString(str), length(str.size()), position(0), output(*rule) {
+            : ruleString(str), length(str.size()), output(*rule) {
         output.ruleString = str;
         if (position != length) {
             parseName(output.standard.name);
@@ -314,7 +326,7 @@ public:
 private:
     const std::string& ruleString;
     size_t length;
-    size_t position;
+    size_t position{0};
     FutureRuleImpl& output;
 
     void throwError(const char* msg) {
@@ -501,24 +513,24 @@ static uint32_t decode32(const unsigned char* ptr) {
 
 class Version1Parser : public VersionParser {
 public:
-    virtual ~Version1Parser() override;
+    ~Version1Parser() override;
 
-    virtual uint64_t getVersion() const override { return 1; }
+    uint64_t getVersion() const override { return 1; }
 
     /**
      * Get the number of bytes
      */
-    virtual uint64_t getTimeSize() const override { return 4; }
+    uint64_t getTimeSize() const override { return 4; }
 
     /**
      * Parse the time at the given location.
      */
-    virtual int64_t parseTime(const unsigned char* ptr) const override {
+    int64_t parseTime(const unsigned char* ptr) const override {
         // sign extend from 32 bits
         return static_cast<int32_t>(decode32(ptr));
     }
 
-    virtual std::string parseFutureString(const unsigned char*, uint64_t, uint64_t) const override { return ""; }
+    std::string parseFutureString(const unsigned char*, uint64_t, uint64_t) const override { return ""; }
 };
 
 Version1Parser::~Version1Parser() {
@@ -527,23 +539,23 @@ Version1Parser::~Version1Parser() {
 
 class Version2Parser : public VersionParser {
 public:
-    virtual ~Version2Parser() override;
+    ~Version2Parser() override;
 
-    virtual uint64_t getVersion() const override { return 2; }
+    uint64_t getVersion() const override { return 2; }
 
     /**
      * Get the number of bytes
      */
-    virtual uint64_t getTimeSize() const override { return 8; }
+    uint64_t getTimeSize() const override { return 8; }
 
     /**
      * Parse the time at the given location.
      */
-    virtual int64_t parseTime(const unsigned char* ptr) const override {
+    int64_t parseTime(const unsigned char* ptr) const override {
         return static_cast<int64_t>(decode32(ptr)) << 32 | decode32(ptr + 4);
     }
 
-    virtual std::string parseFutureString(const unsigned char* ptr, uint64_t offset, uint64_t length) const override {
+    std::string parseFutureString(const unsigned char* ptr, uint64_t offset, uint64_t length) const override {
         return std::string(reinterpret_cast<const char*>(ptr) + offset + 1, length - 2);
     }
 };
@@ -554,8 +566,8 @@ Version2Parser::~Version2Parser() {
 
 class TimezoneImpl : public Timezone {
 public:
-    TimezoneImpl(const std::string& name, const std::vector<unsigned char> bytes);
-    virtual ~TimezoneImpl() override;
+    TimezoneImpl(std::string name, const std::vector<unsigned char>& bytes);
+    ~TimezoneImpl() override;
 
     /**
      * Get the variant for the given time (time_t).
@@ -616,8 +628,8 @@ Timezone::~Timezone() {
     // PASS
 }
 
-TimezoneImpl::TimezoneImpl(const std::string& _filename, const std::vector<unsigned char> buffer)
-        : filename(_filename) {
+TimezoneImpl::TimezoneImpl(std::string _filename, const std::vector<unsigned char>& buffer)
+        : filename(std::move(_filename)) {
     parseZoneFile(&buffer[0], 0, buffer.size(), Version1Parser());
     // Build the literal for the ORC epoch
     // 2015 Jan 1 00:00:00
@@ -648,13 +660,13 @@ const char* getTimezoneDirectory() {
 const Timezone& getTimezoneByFilename(const std::string& filename) {
     // ORC-110
     std::lock_guard<std::mutex> timezone_lock(timezone_mutex);
-    std::map<std::string, std::shared_ptr<Timezone> >::iterator itr = timezoneCache.find(filename);
+    auto itr = timezoneCache.find(filename);
     if (itr != timezoneCache.end()) {
-        return *(itr->second).get();
+        return *itr->second;
     }
     try {
         ORC_UNIQUE_PTR<InputStream> file = readFile(filename);
-        size_t size = static_cast<size_t>(file->getLength());
+        auto size = static_cast<size_t>(file->getLength());
         std::vector<unsigned char> buffer(size);
         file->read(&buffer[0], size, 0);
         timezoneCache[filename] = std::shared_ptr<Timezone>(new TimezoneImpl(filename, buffer));

@@ -3,15 +3,13 @@
 #include "gutil/strings/strcat.h"
 
 #include <common/logging.h>
-#include <stdarg.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
 
-#include "gutil/gscoped_ptr.h"
+#include <cstdarg>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+
 #include "gutil/stl_util.h"
-#include "gutil/strings/ascii_ctype.h"
-#include "gutil/strings/escaping.h"
 
 AlphaNum gEmptyAlphaNum("");
 
@@ -129,8 +127,7 @@ string StrCat(const AlphaNum& a, const AlphaNum& b, const AlphaNum& c, const Alp
     return result;
 }
 
-namespace strings {
-namespace internal {
+namespace strings::internal {
 
 // StrCat with this many params is exceedingly rare, but it has been
 // requested...  therefore we'll rely on default arguments to make calling
@@ -157,8 +154,7 @@ string StrCatNineOrMore(const AlphaNum* a, ...) {
     return result;
 }
 
-} // namespace internal
-} // namespace strings
+} // namespace strings::internal
 
 // It's possible to call StrAppend with a StringPiece that is itself a fragment
 // of the string we're appending to.  However the results of this are random.

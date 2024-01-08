@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/analysis/LargeIntLiteral.java
 
@@ -25,6 +38,7 @@ import com.starrocks.catalog.Type;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.NotImplementedException;
 import com.starrocks.common.io.Text;
+import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.thrift.TExprNode;
 import com.starrocks.thrift.TExprNodeType;
 import com.starrocks.thrift.TLargeIntLiteral;
@@ -38,7 +52,6 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Objects;
 
-// large int for the num that native types can not
 public class LargeIntLiteral extends LiteralExpr {
     // -2^127
     public static final BigInteger LARGE_INT_MIN = new BigInteger("-170141183460469231731687303715884105728");
@@ -62,7 +75,10 @@ public class LargeIntLiteral extends LiteralExpr {
     }
 
     public LargeIntLiteral(String value) throws AnalysisException {
-        super();
+        this(value, NodePosition.ZERO);
+    }
+    public LargeIntLiteral(String value, NodePosition pos) throws AnalysisException {
+        super(pos);
         BigInteger bigInt;
         try {
             bigInt = new BigInteger(value);
@@ -85,6 +101,10 @@ public class LargeIntLiteral extends LiteralExpr {
         value = other.value;
     }
 
+    public BigInteger getValue() {
+        return value;
+    }
+
     @Override
     public Expr clone() {
         return new LargeIntLiteral(this);
@@ -97,11 +117,15 @@ public class LargeIntLiteral extends LiteralExpr {
         return largeIntLiteral;
     }
 
+    public static LargeIntLiteral createMaxValue() {
+        LargeIntLiteral largeIntLiteral = new LargeIntLiteral();
+        largeIntLiteral.type = Type.LARGEINT;
+        largeIntLiteral.value = LARGE_INT_MAX;
+        return largeIntLiteral;
+    }
+
     @Override
     public void analyzeImpl(Analyzer analyzer) throws AnalysisException {
-        if (value.compareTo(LARGE_INT_MIN) < 0 || value.compareTo(LARGE_INT_MAX) > 0) {
-            throw new AnalysisException("Number Overflow. literal: " + value);
-        }
     }
 
     @Override
@@ -110,7 +134,7 @@ public class LargeIntLiteral extends LiteralExpr {
     }
 
     @Override
-    public Object getRealValue() {
+    public Object getRealObjectValue() {
         return this.value;
     }
 
@@ -157,6 +181,8 @@ public class LargeIntLiteral extends LiteralExpr {
             return Double.compare(value.doubleValue(), expr.getDoubleValue());
         } else if (expr.type.isDecimalV2()) {
             return new BigDecimal(value).compareTo(((DecimalLiteral) expr).getValue());
+        } else if (expr.type.isBoolean()) {
+            return value.compareTo(new BigInteger(String.valueOf(expr.getLongValue())));
         } else {
             BigInteger intValue = new BigInteger(expr.getStringValue());
             return value.compareTo(intValue);
@@ -232,6 +258,12 @@ public class LargeIntLiteral extends LiteralExpr {
 
     @Override
     public int hashCode() {
-        return 31 * super.hashCode() + Objects.hashCode(value);
+        // IntLiteral(0) equals to LargeIntLiteral(0), so their hash codes must equal.
+        return Objects.hash(getLongValue());
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        return super.equals(obj);
     }
 }

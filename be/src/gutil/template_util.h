@@ -46,8 +46,7 @@
 // Both of these outcomes means that we may be able to directly replace
 // some of these with boost equivalents.
 //
-#ifndef BASE_TEMPLATE_UTIL_H_
-#define BASE_TEMPLATE_UTIL_H_
+#pragma once
 
 namespace base {
 
@@ -148,7 +147,7 @@ struct or_ : public integral_constant<bool, (A::value || B::value)> {};
 // is_class type_trait implementation.
 struct IsClassHelper {
     template <typename C>
-    static YesType Test(void (C::*)(void));
+    static YesType Test(void (C::*)());
 
     template <typename C>
     static NoType Test(...);
@@ -158,5 +157,3 @@ template <typename T>
 struct is_class : integral_constant<bool, sizeof(IsClassHelper::Test<T>(0)) == sizeof(YesType)> {};
 
 } // namespace base
-
-#endif // BASE_TEMPLATE_UTIL_H_

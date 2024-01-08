@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/util/simdutf8check.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,13 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef SIMDUTF8CHECK_H
-#define SIMDUTF8CHECK_H
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <string.h>
+#pragma once
+
 #include <x86intrin.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 
 /*
  * These functions are used for validating utf8 string.
@@ -411,4 +407,3 @@ static struct avx_processed_utf_bytes avxcheckUTF8Bytes_asciipath(__m256i curren
 }
 
 #endif // __AVX2__
-#endif

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/load/routineload/RoutineLoadTaskSchedulerTest.java
 
@@ -23,8 +36,9 @@ package com.starrocks.load.routineload;
 
 import com.google.common.collect.Maps;
 import com.google.common.collect.Queues;
-import com.starrocks.catalog.Catalog;
+import com.starrocks.common.Config;
 import com.starrocks.common.jmockit.Deencapsulation;
+import com.starrocks.server.GlobalStateMgr;
 import mockit.Expectations;
 import mockit.Injectable;
 import mockit.Mocked;
@@ -37,9 +51,9 @@ import java.util.UUID;
 public class RoutineLoadTaskSchedulerTest {
 
     @Mocked
-    private RoutineLoadManager routineLoadManager;
+    private RoutineLoadMgr routineLoadManager;
     @Mocked
-    private Catalog catalog;
+    private GlobalStateMgr globalStateMgr;
 
     @Test
     public void testRunOneCycle(@Injectable KafkaRoutineLoadJob kafkaRoutineLoadJob1,
@@ -53,8 +67,8 @@ public class RoutineLoadTaskSchedulerTest {
         Deencapsulation.setField(kafkaProgress, "partitionIdToOffset", partitionIdToOffset);
 
         Queue<RoutineLoadTaskInfo> routineLoadTaskInfoQueue = Queues.newLinkedBlockingQueue();
-        KafkaTaskInfo routineLoadTaskInfo1 = new KafkaTaskInfo(new UUID(1, 1), 1l, "default_cluster", 20000,
-                System.currentTimeMillis(), partitionIdToOffset);
+        KafkaTaskInfo routineLoadTaskInfo1 = new KafkaTaskInfo(new UUID(1, 1), 1L, 20000,
+                System.currentTimeMillis(), partitionIdToOffset, Config.routine_load_task_timeout_second * 1000);
         routineLoadTaskInfoQueue.add(routineLoadTaskInfo1);
 
         Map<Long, RoutineLoadTaskInfo> idToRoutineLoadTask = Maps.newHashMap();
@@ -67,10 +81,10 @@ public class RoutineLoadTaskSchedulerTest {
 
         new Expectations() {
             {
-                Catalog.getCurrentCatalog();
+                GlobalStateMgr.getCurrentState();
                 minTimes = 0;
-                result = catalog;
-                catalog.getRoutineLoadManager();
+                result = globalStateMgr;
+                globalStateMgr.getRoutineLoadMgr();
                 minTimes = 0;
                 result = routineLoadManager;
 

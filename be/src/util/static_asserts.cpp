@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/util/static_asserts.cpp
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -22,7 +18,6 @@
 #include <boost/static_assert.hpp>
 
 #include "runtime/datetime_value.h"
-#include "runtime/decimal_value.h"
 #include "runtime/string_value.h"
 
 namespace starrocks {
@@ -35,8 +30,6 @@ private:
     BOOST_STATIC_ASSERT(offsetof(StringValue, len) == 8);
     // Datetime value
     BOOST_STATIC_ASSERT(sizeof(DateTimeValue) == 16);
-    // BOOST_STATIC_ASSERT(offsetof(DateTimeValue, _year) == 8);
-    BOOST_STATIC_ASSERT(sizeof(DecimalValue) == 40);
 };
 
 } // namespace starrocks

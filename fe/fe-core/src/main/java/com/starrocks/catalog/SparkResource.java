@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/SparkResource.java
 
@@ -26,7 +39,6 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.gson.annotations.SerializedName;
 import com.starrocks.analysis.BrokerDesc;
-import com.starrocks.analysis.ResourceDesc;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.LoadException;
@@ -34,6 +46,8 @@ import com.starrocks.common.Pair;
 import com.starrocks.common.proc.BaseProcResult;
 import com.starrocks.load.loadv2.SparkRepository;
 import com.starrocks.load.loadv2.SparkYarnConfigFiles;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.ResourceDesc;
 
 import java.io.File;
 import java.util.Map;
@@ -124,18 +138,21 @@ public class SparkResource extends Resource {
     // broker username and password
     @SerializedName(value = "brokerProperties")
     private Map<String, String> brokerProperties;
+    @SerializedName(value = "hasBroker")
+    private boolean hasBroker;
 
     public SparkResource(String name) {
-        this(name, Maps.newHashMap(), null, null, Maps.newHashMap());
+        this(name, Maps.newHashMap(), null, null, Maps.newHashMap(), false);
     }
 
     private SparkResource(String name, Map<String, String> sparkConfigs, String workingDir, String broker,
-                          Map<String, String> brokerProperties) {
+                          Map<String, String> brokerProperties, boolean hasBroker) {
         super(name, ResourceType.SPARK);
         this.sparkConfigs = sparkConfigs;
         this.workingDir = workingDir;
         this.broker = broker;
         this.brokerProperties = brokerProperties;
+        this.hasBroker = hasBroker;
     }
 
     public String getMaster() {
@@ -152,6 +169,10 @@ public class SparkResource extends Resource {
 
     public String getBroker() {
         return broker;
+    }
+
+    public boolean hasBroker() {
+        return hasBroker;
     }
 
     public Map<String, String> getBrokerPropertiesWithoutPrefix() {
@@ -174,15 +195,20 @@ public class SparkResource extends Resource {
     }
 
     public SparkResource getCopiedResource() {
-        return new SparkResource(name, Maps.newHashMap(sparkConfigs), workingDir, broker, brokerProperties);
+        return new SparkResource(name, Maps.newHashMap(sparkConfigs), workingDir, broker, brokerProperties, hasBroker);
     }
 
     // Each SparkResource has and only has one SparkRepository.
     // This method get the remote archive which matches the dpp version from remote repository
     public synchronized SparkRepository.SparkArchive prepareArchive() throws LoadException {
-        String remoteRepositoryPath = workingDir + "/" + Catalog.getCurrentCatalog().getClusterId()
+        String remoteRepositoryPath = workingDir + "/" + GlobalStateMgr.getCurrentState().getClusterId()
                 + "/" + SparkRepository.REPOSITORY_DIR + name;
-        BrokerDesc brokerDesc = new BrokerDesc(broker, getBrokerPropertiesWithoutPrefix());
+        BrokerDesc brokerDesc;
+        if (hasBroker) {
+            brokerDesc = new BrokerDesc(broker, getBrokerPropertiesWithoutPrefix());
+        } else {
+            brokerDesc = new BrokerDesc(getBrokerPropertiesWithoutPrefix());
+        }
         SparkRepository repository = new SparkRepository(remoteRepositoryPath, brokerDesc);
         // This checks and uploads the remote archive.
         repository.prepare();
@@ -238,6 +264,7 @@ public class SparkResource extends Resource {
         }
         if (properties.containsKey(BROKER)) {
             broker = properties.get(BROKER);
+            hasBroker = true;
         }
         brokerProperties.putAll(getBrokerProperties(properties));
     }
@@ -298,12 +325,17 @@ public class SparkResource extends Resource {
 
         // check working dir and broker
         workingDir = properties.get(WORKING_DIR);
-        broker = properties.get(BROKER);
-        if ((workingDir == null && broker != null) || (workingDir != null && broker == null)) {
-            throw new DdlException("working_dir and broker should be assigned at the same time");
+        if (properties.containsKey(BROKER)) {
+            hasBroker = true;
+            broker = properties.get(BROKER);
+            if ((workingDir == null && broker != null) || (workingDir != null && broker == null)) {
+                throw new DdlException("working_dir and broker should be assigned at the same time");
+            }
+        } else {
+            hasBroker = false;
         }
         // check broker exist
-        if (broker != null && !Catalog.getCurrentCatalog().getBrokerMgr().containsBroker(broker)) {
+        if (broker != null && !GlobalStateMgr.getCurrentState().getBrokerMgr().containsBroker(broker)) {
             throw new DdlException("Unknown broker name(" + broker + ")");
         }
         brokerProperties = getBrokerProperties(properties);

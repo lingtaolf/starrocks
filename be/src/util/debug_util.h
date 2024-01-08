@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/util/debug_util.h
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_COMMON_UTIL_DEBUG_UTIL_H
-#define STARROCKS_BE_SRC_COMMON_UTIL_DEBUG_UTIL_H
+#pragma once
 
 #include <boost/cstdint.hpp>
 #include <ostream>
@@ -49,14 +44,15 @@ std::string PrintTMetricKind(const TMetricKind::type& type);
 // This is used to set gflags build version
 std::string get_build_version(bool compact);
 
+// similar with std::string get_build_version(bool), but without allocate any memory from heap
+size_t get_build_version(char* buffer, size_t max_size);
+
 // Returns a string "<product version number> (<short build hash>)"
 std::string get_short_version();
 
 // Returns "<program short name> version <GetBuildVersion(compact)>"
 std::string get_version_string(bool compact);
 
-std::string hexdump(const char* buf, int len);
+std::string hexdump(const char* buf, size_t len);
 
 } // namespace starrocks
-
-#endif

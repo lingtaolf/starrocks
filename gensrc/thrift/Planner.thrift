@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/gensrc/thrift/Planner.thrift
 
@@ -22,11 +35,27 @@
 namespace cpp starrocks
 namespace java com.starrocks.thrift
 
+include "Data.thrift"
 include "Types.thrift"
 include "Exprs.thrift"
 include "DataSinks.thrift"
 include "PlanNodes.thrift"
 include "Partitions.thrift"
+
+struct TCacheParam {
+   1: optional i32 id;
+   2: optional binary digest;
+   3: optional map<i32,i32> slot_remapping;
+   4: optional map<i64,string> region_map;
+   5: optional bool force_populate;
+   6: optional i64 entry_max_bytes;
+   7: optional i64 entry_max_rows;
+   8: optional bool can_use_multiversion;
+   10:optional Types.TKeysType keys_type;
+   // cached_plan_node_ids is the sets of PlanNodeIds of the PlanNodes from OlapScanNode to cache point
+   // AggregationNode along left-deepmost path of the PlanFragment.
+   11: optional set<i32> cached_plan_node_ids;
+}
 
 // TPlanFragment encapsulates info needed to execute a particular
 // plan fragment, including how to produce and how to partition its output.
@@ -65,6 +94,11 @@ struct TPlanFragment {
   // sink) in a single instance of this fragment. This is used for an optimization in
   // InitialReservation. Measured in bytes. required in V1
   8: optional i64 initial_reservation_total_claims
+  20: optional list<Data.TGlobalDict> query_global_dicts
+  // For insert into table select * from table, we need to distinguish the global dicts for query and load
+  21: optional list<Data.TGlobalDict> load_global_dicts
+  22: optional TCacheParam cache_param
+  23: optional map<i32, Exprs.TExpr> query_global_dict_exprs
 }
 
 // location information for a single scan range

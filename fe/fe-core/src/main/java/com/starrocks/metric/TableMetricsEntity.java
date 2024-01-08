@@ -1,8 +1,21 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.metric;
 
-import avro.shaded.com.google.common.collect.Lists;
+import com.google.common.collect.Lists;
 import com.starrocks.metric.Metric.MetricUnit;
 
 import java.util.List;
@@ -20,34 +33,40 @@ public final class TableMetricsEntity {
     private static final String TABLE_LOAD_BYTES_COMMENT = "total loaded bytes of a table";
     public static final String TABLE_LOAD_ROWS = "table_load_rows";
     private static final String TABLE_LOAD_ROWS_COMMENT = "total loaded rows of a table";
+    public static final String TABLE_LOAD_ERROR_ROWS = "table_load_error_rows";
+    private static final String TABLE_LOAD_ERROR_COMMENT = "total error rows in load job of a table";
+    public static final String TABLE_LOAD_UNSELECTED_ROWS = "table_load_unselected_rows";
+    private static final String TABLE_LOAD_UNSELECTED_COMMENT = "total unselected rows in load job of a table";
     public static final String TABLE_LOAD_FINISHED = "table_load_finished";
     private static final String TABLE_LOAD_FINISHED_COMMENT = "total loaded times of this table";
 
     private List<Metric> metrics;
 
-    public LongCounterMetric COUNTER_SCAN_BYTES_TOTAL;
-    public LongCounterMetric COUNTER_SCAN_ROWS_TOTAL;
-    public LongCounterMetric COUNTER_SCAN_FINISHED_TOTAL;
+    public LongCounterMetric counterScanBytesTotal;
+    public LongCounterMetric counterScanRowsTotal;
+    public LongCounterMetric counterScanFinishedTotal;
 
-    public LongCounterMetric COUNTER_STREAM_LOAD_BYTES_TOTAL;
-    public LongCounterMetric COUNTER_STREAM_LOAD_ROWS_TOTAL;
-    public LongCounterMetric COUNTER_STREAM_LOAD_FINISHED_TOTAL;
+    public LongCounterMetric counterStreamLoadBytesTotal;
+    public LongCounterMetric counterStreamLoadRowsTotal;
+    public LongCounterMetric counterStreamLoadFinishedTotal;
 
-    public LongCounterMetric COUNTER_ROUTINE_LOAD_BYTES_TOTAL;
-    public LongCounterMetric COUNTER_ROUTINE_LOAD_ROWS_TOTAL;
-    public LongCounterMetric COUNTER_ROUTINE_LOAD_FINISHED_TOTAL;
+    public LongCounterMetric counterRoutineLoadBytesTotal;
+    public LongCounterMetric counterRoutineLoadRowsTotal;
+    public LongCounterMetric counterRoutineLoadErrorRowsTotal;
+    public LongCounterMetric counterRoutineLoadUnselectedRowsTotal;
+    public LongCounterMetric counterRoutineLoadFinishedTotal;
 
-    public LongCounterMetric COUNTER_INSERT_LOAD_BYTES_TOTAL;
-    public LongCounterMetric COUNTER_INSERT_LOAD_ROWS_TOTAL;
-    public LongCounterMetric COUNTER_INSERT_LOAD_FINISHED_TOTAL;
+    public LongCounterMetric counterInsertLoadBytesTotal;
+    public LongCounterMetric counterInsertLoadRowsTotal;
+    public LongCounterMetric counterInsertLoadFinishedTotal;
 
-    public LongCounterMetric COUNTER_BROKER_LOAD_BYTES_TOTAL;
-    public LongCounterMetric COUNTER_BROKER_LOAD_ROWS_TOTAL;
-    public LongCounterMetric COUNTER_BROKER_LOAD_FINISHED_TOTAL;
+    public LongCounterMetric counterBrokerLoadBytesTotal;
+    public LongCounterMetric counterBrokerLoadRowsTotal;
+    public LongCounterMetric counterBrokerLoadFinishedTotal;
 
-    public LongCounterMetric COUNTER_SPARK_LOAD_BYTES_TOTAL;
-    public LongCounterMetric COUNTER_SPARK_LOAD_ROWS_TOTAL;
-    public LongCounterMetric COUNTER_SPARK_LOAD_FINISHED_TOTAL;
+    public LongCounterMetric counterSparkLoadBytesTotal;
+    public LongCounterMetric counterSparkLoadRowsTotal;
+    public LongCounterMetric counterSparkLoadFinishedTotal;
 
     public TableMetricsEntity() {
         initTableMetrics();
@@ -61,79 +80,87 @@ public final class TableMetricsEntity {
         metrics = Lists.newArrayList();
 
         // scan metrics
-        COUNTER_SCAN_BYTES_TOTAL = new LongCounterMetric(TABLE_SCAN_BYTES, MetricUnit.BYTES, TABLE_SCAN_BYTES_COMMENT);
-        metrics.add(COUNTER_SCAN_BYTES_TOTAL);
-        COUNTER_SCAN_ROWS_TOTAL = new LongCounterMetric(TABLE_SCAN_ROWS, MetricUnit.ROWS, TABLE_SCAN_ROWS_COMMENT);
-        metrics.add(COUNTER_SCAN_ROWS_TOTAL);
-        COUNTER_SCAN_FINISHED_TOTAL =
+        counterScanBytesTotal = new LongCounterMetric(TABLE_SCAN_BYTES, MetricUnit.BYTES, TABLE_SCAN_BYTES_COMMENT);
+        metrics.add(counterScanBytesTotal);
+        counterScanRowsTotal = new LongCounterMetric(TABLE_SCAN_ROWS, MetricUnit.ROWS, TABLE_SCAN_ROWS_COMMENT);
+        metrics.add(counterScanRowsTotal);
+        counterScanFinishedTotal =
                 new LongCounterMetric(TABLE_SCAN_FINISHED, MetricUnit.REQUESTS, TABLE_SCAN_FINISHED_COMMENT);
-        metrics.add(COUNTER_SCAN_FINISHED_TOTAL);
+        metrics.add(counterScanFinishedTotal);
 
         // load metrics
-        COUNTER_STREAM_LOAD_BYTES_TOTAL =
+        counterStreamLoadBytesTotal =
                 new LongCounterMetric(TABLE_LOAD_BYTES, MetricUnit.BYTES, TABLE_LOAD_BYTES_COMMENT);
-        COUNTER_STREAM_LOAD_BYTES_TOTAL.addLabel(new MetricLabel("type", "stream_load"));
-        metrics.add(COUNTER_STREAM_LOAD_BYTES_TOTAL);
-        COUNTER_STREAM_LOAD_ROWS_TOTAL =
+        counterStreamLoadBytesTotal.addLabel(new MetricLabel("type", "stream_load"));
+        metrics.add(counterStreamLoadBytesTotal);
+        counterStreamLoadRowsTotal =
                 new LongCounterMetric(TABLE_LOAD_ROWS, MetricUnit.ROWS, TABLE_LOAD_ROWS_COMMENT);
-        COUNTER_STREAM_LOAD_ROWS_TOTAL.addLabel(new MetricLabel("type", "stream_load"));
-        metrics.add(COUNTER_STREAM_LOAD_ROWS_TOTAL);
-        COUNTER_STREAM_LOAD_FINISHED_TOTAL =
+        counterStreamLoadRowsTotal.addLabel(new MetricLabel("type", "stream_load"));
+        metrics.add(counterStreamLoadRowsTotal);
+        counterStreamLoadFinishedTotal =
                 new LongCounterMetric(TABLE_LOAD_FINISHED, MetricUnit.REQUESTS, TABLE_LOAD_FINISHED_COMMENT);
-        COUNTER_STREAM_LOAD_FINISHED_TOTAL.addLabel(new MetricLabel("type", "stream_load"));
-        metrics.add(COUNTER_STREAM_LOAD_FINISHED_TOTAL);
+        counterStreamLoadFinishedTotal.addLabel(new MetricLabel("type", "stream_load"));
+        metrics.add(counterStreamLoadFinishedTotal);
 
-        COUNTER_ROUTINE_LOAD_BYTES_TOTAL =
+        counterRoutineLoadBytesTotal =
                 new LongCounterMetric(TABLE_LOAD_BYTES, MetricUnit.BYTES, TABLE_LOAD_BYTES_COMMENT);
-        COUNTER_ROUTINE_LOAD_BYTES_TOTAL.addLabel(new MetricLabel("type", "routine_load"));
-        metrics.add(COUNTER_ROUTINE_LOAD_BYTES_TOTAL);
-        COUNTER_ROUTINE_LOAD_ROWS_TOTAL =
+        counterRoutineLoadBytesTotal.addLabel(new MetricLabel("type", "routine_load"));
+        metrics.add(counterRoutineLoadBytesTotal);
+        counterRoutineLoadRowsTotal =
                 new LongCounterMetric(TABLE_LOAD_ROWS, MetricUnit.ROWS, TABLE_LOAD_ROWS_COMMENT);
-        COUNTER_ROUTINE_LOAD_ROWS_TOTAL.addLabel(new MetricLabel("type", "routine_load"));
-        metrics.add(COUNTER_ROUTINE_LOAD_ROWS_TOTAL);
-        COUNTER_ROUTINE_LOAD_FINISHED_TOTAL =
+        counterRoutineLoadRowsTotal.addLabel(new MetricLabel("type", "routine_load"));
+        metrics.add(counterRoutineLoadRowsTotal);
+        counterRoutineLoadErrorRowsTotal =
+                new LongCounterMetric(TABLE_LOAD_ERROR_ROWS, MetricUnit.ROWS,  TABLE_LOAD_ERROR_COMMENT);
+        counterRoutineLoadErrorRowsTotal.addLabel(new MetricLabel("type", "routine_load"));
+        metrics.add(counterRoutineLoadErrorRowsTotal);
+        counterRoutineLoadUnselectedRowsTotal =
+                new LongCounterMetric(TABLE_LOAD_UNSELECTED_ROWS, MetricUnit.ROWS, TABLE_LOAD_UNSELECTED_COMMENT);
+        counterRoutineLoadUnselectedRowsTotal.addLabel(new MetricLabel("type", "routine_load"));
+        metrics.add(counterRoutineLoadUnselectedRowsTotal);
+        counterRoutineLoadFinishedTotal =
                 new LongCounterMetric(TABLE_LOAD_FINISHED, MetricUnit.REQUESTS, TABLE_LOAD_FINISHED_COMMENT);
-        COUNTER_ROUTINE_LOAD_FINISHED_TOTAL.addLabel(new MetricLabel("type", "routine_load"));
-        metrics.add(COUNTER_ROUTINE_LOAD_FINISHED_TOTAL);
+        counterRoutineLoadFinishedTotal.addLabel(new MetricLabel("type", "routine_load"));
+        metrics.add(counterRoutineLoadFinishedTotal);
 
-        COUNTER_BROKER_LOAD_BYTES_TOTAL =
+        counterBrokerLoadBytesTotal =
                 new LongCounterMetric(TABLE_LOAD_BYTES, MetricUnit.BYTES, TABLE_LOAD_BYTES_COMMENT);
-        COUNTER_BROKER_LOAD_BYTES_TOTAL.addLabel(new MetricLabel("type", "broker_load"));
-        metrics.add(COUNTER_BROKER_LOAD_BYTES_TOTAL);
-        COUNTER_BROKER_LOAD_ROWS_TOTAL =
+        counterBrokerLoadBytesTotal.addLabel(new MetricLabel("type", "broker_load"));
+        metrics.add(counterBrokerLoadBytesTotal);
+        counterBrokerLoadRowsTotal =
                 new LongCounterMetric(TABLE_LOAD_ROWS, MetricUnit.ROWS, TABLE_LOAD_ROWS_COMMENT);
-        COUNTER_BROKER_LOAD_ROWS_TOTAL.addLabel(new MetricLabel("type", "broker_load"));
-        metrics.add(COUNTER_BROKER_LOAD_ROWS_TOTAL);
-        COUNTER_BROKER_LOAD_FINISHED_TOTAL =
+        counterBrokerLoadRowsTotal.addLabel(new MetricLabel("type", "broker_load"));
+        metrics.add(counterBrokerLoadRowsTotal);
+        counterBrokerLoadFinishedTotal =
                 new LongCounterMetric(TABLE_LOAD_FINISHED, MetricUnit.REQUESTS, TABLE_LOAD_FINISHED_COMMENT);
-        COUNTER_BROKER_LOAD_FINISHED_TOTAL.addLabel(new MetricLabel("type", "broker_load"));
-        metrics.add(COUNTER_BROKER_LOAD_FINISHED_TOTAL);
+        counterBrokerLoadFinishedTotal.addLabel(new MetricLabel("type", "broker_load"));
+        metrics.add(counterBrokerLoadFinishedTotal);
 
-        COUNTER_SPARK_LOAD_BYTES_TOTAL =
+        counterSparkLoadBytesTotal =
                 new LongCounterMetric(TABLE_LOAD_BYTES, MetricUnit.BYTES, TABLE_LOAD_BYTES_COMMENT);
-        COUNTER_SPARK_LOAD_BYTES_TOTAL.addLabel(new MetricLabel("type", "spark_load"));
-        metrics.add(COUNTER_SPARK_LOAD_BYTES_TOTAL);
-        COUNTER_SPARK_LOAD_ROWS_TOTAL =
+        counterSparkLoadBytesTotal.addLabel(new MetricLabel("type", "spark_load"));
+        metrics.add(counterSparkLoadBytesTotal);
+        counterSparkLoadRowsTotal =
                 new LongCounterMetric(TABLE_LOAD_ROWS, MetricUnit.ROWS, TABLE_LOAD_ROWS_COMMENT);
-        COUNTER_SPARK_LOAD_ROWS_TOTAL.addLabel(new MetricLabel("type", "spark_load"));
-        metrics.add(COUNTER_SPARK_LOAD_ROWS_TOTAL);
-        COUNTER_SPARK_LOAD_FINISHED_TOTAL =
+        counterSparkLoadRowsTotal.addLabel(new MetricLabel("type", "spark_load"));
+        metrics.add(counterSparkLoadRowsTotal);
+        counterSparkLoadFinishedTotal =
                 new LongCounterMetric(TABLE_LOAD_FINISHED, MetricUnit.REQUESTS, TABLE_LOAD_FINISHED_COMMENT);
-        COUNTER_SPARK_LOAD_FINISHED_TOTAL.addLabel(new MetricLabel("type", "spark_load"));
-        metrics.add(COUNTER_SPARK_LOAD_FINISHED_TOTAL);
+        counterSparkLoadFinishedTotal.addLabel(new MetricLabel("type", "spark_load"));
+        metrics.add(counterSparkLoadFinishedTotal);
 
-        COUNTER_INSERT_LOAD_BYTES_TOTAL =
+        counterInsertLoadBytesTotal =
                 new LongCounterMetric(TABLE_LOAD_BYTES, MetricUnit.BYTES, TABLE_LOAD_BYTES_COMMENT);
-        COUNTER_INSERT_LOAD_BYTES_TOTAL.addLabel(new MetricLabel("type", "insert_into"));
-        metrics.add(COUNTER_INSERT_LOAD_BYTES_TOTAL);
-        COUNTER_INSERT_LOAD_ROWS_TOTAL =
+        counterInsertLoadBytesTotal.addLabel(new MetricLabel("type", "insert_into"));
+        metrics.add(counterInsertLoadBytesTotal);
+        counterInsertLoadRowsTotal =
                 new LongCounterMetric(TABLE_LOAD_ROWS, MetricUnit.ROWS, TABLE_LOAD_ROWS_COMMENT);
-        COUNTER_INSERT_LOAD_ROWS_TOTAL.addLabel(new MetricLabel("type", "insert_into"));
-        metrics.add(COUNTER_INSERT_LOAD_ROWS_TOTAL);
-        COUNTER_INSERT_LOAD_FINISHED_TOTAL =
+        counterInsertLoadRowsTotal.addLabel(new MetricLabel("type", "insert_into"));
+        metrics.add(counterInsertLoadRowsTotal);
+        counterInsertLoadFinishedTotal =
                 new LongCounterMetric(TABLE_LOAD_FINISHED, MetricUnit.REQUESTS, TABLE_LOAD_FINISHED_COMMENT);
-        COUNTER_INSERT_LOAD_FINISHED_TOTAL.addLabel(new MetricLabel("type", "insert_into"));
-        metrics.add(COUNTER_INSERT_LOAD_FINISHED_TOTAL);
+        counterInsertLoadFinishedTotal.addLabel(new MetricLabel("type", "insert_into"));
+        metrics.add(counterInsertLoadFinishedTotal);
     }
 }
 

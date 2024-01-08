@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/common/proc/DbsProcDirTest.java
 
@@ -22,10 +35,10 @@
 package com.starrocks.common.proc;
 
 import com.google.common.collect.Lists;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Database;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.FeConstants;
+import com.starrocks.server.GlobalStateMgr;
 import mockit.Expectations;
 import mockit.Mocked;
 import org.junit.After;
@@ -40,10 +53,10 @@ public class DbsProcDirTest {
     private Database db1;
     private Database db2;
     @Mocked
-    private Catalog catalog;
+    private GlobalStateMgr globalStateMgr;
 
     // construct test case
-    //  catalog
+    //  globalStateMgr
     //  | - db1
     //  | - db2
 
@@ -55,42 +68,42 @@ public class DbsProcDirTest {
 
     @After
     public void tearDown() {
-        catalog = null;
+        globalStateMgr = null;
     }
 
     @Test
     public void testRegister() {
         DbsProcDir dir;
 
-        dir = new DbsProcDir(catalog);
+        dir = new DbsProcDir(globalStateMgr);
         Assert.assertFalse(dir.register("db1", new BaseProcDir()));
     }
 
     @Test(expected = AnalysisException.class)
     public void testLookupNormal() throws AnalysisException {
-        new Expectations(catalog) {
+        new Expectations(globalStateMgr) {
             {
-                catalog.getDb("db1");
+                globalStateMgr.getDb("db1");
                 minTimes = 0;
                 result = db1;
 
-                catalog.getDb("db2");
+                globalStateMgr.getDb("db2");
                 minTimes = 0;
                 result = db2;
 
-                catalog.getDb("db3");
+                globalStateMgr.getDb("db3");
                 minTimes = 0;
                 result = null;
 
-                catalog.getDb(db1.getId());
+                globalStateMgr.getDb(db1.getId());
                 minTimes = 0;
                 result = db1;
 
-                catalog.getDb(db2.getId());
+                globalStateMgr.getDb(db2.getId());
                 minTimes = 0;
                 result = db2;
 
-                catalog.getDb(anyLong);
+                globalStateMgr.getDb(anyLong);
                 minTimes = 0;
                 result = null;
             }
@@ -99,7 +112,7 @@ public class DbsProcDirTest {
         DbsProcDir dir;
         ProcNodeInterface node;
 
-        dir = new DbsProcDir(catalog);
+        dir = new DbsProcDir(globalStateMgr);
         try {
             node = dir.lookup(String.valueOf(db1.getId()));
             Assert.assertNotNull(node);
@@ -108,7 +121,7 @@ public class DbsProcDirTest {
             Assert.fail();
         }
 
-        dir = new DbsProcDir(catalog);
+        dir = new DbsProcDir(globalStateMgr);
         try {
             node = dir.lookup(String.valueOf(db2.getId()));
             Assert.assertNotNull(node);
@@ -117,7 +130,7 @@ public class DbsProcDirTest {
             Assert.fail();
         }
 
-        dir = new DbsProcDir(catalog);
+        dir = new DbsProcDir(globalStateMgr);
         node = dir.lookup("10002");
         Assert.assertNull(node);
     }
@@ -127,7 +140,7 @@ public class DbsProcDirTest {
         DbsProcDir dir;
         ProcNodeInterface node;
 
-        dir = new DbsProcDir(catalog);
+        dir = new DbsProcDir(globalStateMgr);
         try {
             node = dir.lookup(null);
         } catch (AnalysisException e) {
@@ -145,33 +158,33 @@ public class DbsProcDirTest {
 
     @Test
     public void testFetchResultNormal() throws AnalysisException {
-        new Expectations(catalog) {
+        new Expectations(globalStateMgr) {
             {
-                catalog.getDbNames();
+                globalStateMgr.getDbNames();
                 minTimes = 0;
                 result = Lists.newArrayList("db1", "db2");
 
-                catalog.getDb("db1");
+                globalStateMgr.getDb("db1");
                 minTimes = 0;
                 result = db1;
 
-                catalog.getDb("db2");
+                globalStateMgr.getDb("db2");
                 minTimes = 0;
                 result = db2;
 
-                catalog.getDb("db3");
+                globalStateMgr.getDb("db3");
                 minTimes = 0;
                 result = null;
 
-                catalog.getDb(db1.getId());
+                globalStateMgr.getDb(db1.getId());
                 minTimes = 0;
                 result = db1;
 
-                catalog.getDb(db2.getId());
+                globalStateMgr.getDb(db2.getId());
                 minTimes = 0;
                 result = db2;
 
-                catalog.getDb(anyLong);
+                globalStateMgr.getDb(anyLong);
                 minTimes = 0;
                 result = null;
             }
@@ -180,7 +193,7 @@ public class DbsProcDirTest {
         DbsProcDir dir;
         ProcResult result;
 
-        dir = new DbsProcDir(catalog);
+        dir = new DbsProcDir(globalStateMgr);
         result = dir.fetchResult();
         Assert.assertNotNull(result);
         Assert.assertTrue(result instanceof BaseProcResult);
@@ -189,18 +202,18 @@ public class DbsProcDirTest {
                 Lists.newArrayList("DbId", "DbName", "TableNum", "Quota", "LastConsistencyCheckTime", "ReplicaQuota"),
                 result.getColumnNames());
         List<List<String>> rows = Lists.newArrayList();
-        rows.add(Arrays.asList(String.valueOf(db1.getId()), db1.getFullName(), "0", "8388608.000 TB",
-                FeConstants.null_string, "9223372036854775807"));
-        rows.add(Arrays.asList(String.valueOf(db2.getId()), db2.getFullName(), "0", "8388608.000 TB",
-                FeConstants.null_string, "9223372036854775807"));
+        rows.add(Arrays.asList(String.valueOf(db1.getId()), db1.getOriginName(), "0", "8388608.000 TB",
+                FeConstants.NULL_STRING, "9223372036854775807"));
+        rows.add(Arrays.asList(String.valueOf(db2.getId()), db2.getOriginName(), "0", "8388608.000 TB",
+                FeConstants.NULL_STRING, "9223372036854775807"));
         Assert.assertEquals(rows, result.getRows());
     }
 
     @Test
     public void testFetchResultInvalid() throws AnalysisException {
-        new Expectations(catalog) {
+        new Expectations(globalStateMgr) {
             {
-                catalog.getDbNames();
+                globalStateMgr.getDbNames();
                 minTimes = 0;
                 result = null;
             }
@@ -216,7 +229,7 @@ public class DbsProcDirTest {
             e.printStackTrace();
         }
 
-        dir = new DbsProcDir(catalog);
+        dir = new DbsProcDir(globalStateMgr);
         result = dir.fetchResult();
         Assert.assertEquals(
                 Lists.newArrayList("DbId", "DbName", "TableNum", "Quota", "LastConsistencyCheckTime", "ReplicaQuota"),

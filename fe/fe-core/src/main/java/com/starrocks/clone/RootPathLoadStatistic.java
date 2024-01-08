@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/clone/RootPathLoadStatistic.java
 
@@ -21,21 +34,30 @@
 
 package com.starrocks.clone;
 
+import com.google.gson.JsonObject;
+import com.google.gson.annotations.SerializedName;
+import com.starrocks.catalog.DiskInfo;
 import com.starrocks.catalog.DiskInfo.DiskState;
 import com.starrocks.clone.BackendLoadStatistic.Classification;
 import com.starrocks.clone.BalanceStatus.ErrCode;
-import com.starrocks.common.Config;
+import com.starrocks.persist.gson.GsonUtils;
 import com.starrocks.thrift.TStorageMedium;
 
 public class RootPathLoadStatistic implements Comparable<RootPathLoadStatistic> {
 
-    private long beId;
-    private String path;
-    private Long pathHash;
-    private TStorageMedium storageMedium;
-    private long capacityB;
-    private long usedCapacityB;
-    private DiskState diskState;
+    @SerializedName(value = "beId")
+    private final long beId;
+    @SerializedName(value = "path")
+    private final String path;
+    @SerializedName(value = "pathHash")
+    private final Long pathHash;
+    @SerializedName(value = "storageMedium")
+    private final TStorageMedium storageMedium;
+    @SerializedName(value = "total")
+    private final long capacityB;
+    @SerializedName(value = "used")
+    private final long usedCapacityB;
+    private final DiskState diskState;
 
     private Classification clazz = Classification.INIT;
 
@@ -90,27 +112,17 @@ public class RootPathLoadStatistic implements Comparable<RootPathLoadStatistic> 
         return diskState;
     }
 
-    public BalanceStatus isFit(long tabletSize, boolean isSupplement) {
-        if (diskState == DiskState.OFFLINE) {
+    public BalanceStatus isFit(long tabletSize) {
+        if (diskState != DiskState.ONLINE) {
             return new BalanceStatus(ErrCode.COMMON_ERROR,
-                    toString() + " does not fit tablet with size: " + tabletSize + ", offline");
+                    toString() + " does not fit tablet with size: " + tabletSize + ", disk state: " + diskState);
         }
 
-        if (isSupplement) {
-            if ((usedCapacityB + tabletSize) / (double) capacityB > (Config.storage_flood_stage_usage_percent / 100.0)
-                    && capacityB - usedCapacityB - tabletSize < Config.storage_flood_stage_left_capacity_bytes) {
-                return new BalanceStatus(ErrCode.COMMON_ERROR,
-                        toString() + " does not fit tablet with size: " + tabletSize + ", limitation reached");
-            } else {
-                return BalanceStatus.OK;
-            }
-        }
-
-        if ((usedCapacityB + tabletSize) / (double) capacityB > (Config.storage_high_watermark_usage_percent / 100.0)
-                || capacityB - usedCapacityB - tabletSize < Config.storage_min_left_capacity_bytes) {
+        if (DiskInfo.exceedLimit(capacityB - usedCapacityB - tabletSize, capacityB, false)) {
             return new BalanceStatus(ErrCode.COMMON_ERROR,
                     toString() + " does not fit tablet with size: " + tabletSize);
         }
+
         return BalanceStatus.OK;
     }
 
@@ -125,8 +137,13 @@ public class RootPathLoadStatistic implements Comparable<RootPathLoadStatistic> 
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder();
-        sb.append("path: ").append(path).append(", be: ").append(beId);
-        sb.append(", used: ").append(usedCapacityB).append(", total: ").append(capacityB);
+        sb.append("path: ").append(path).append(", path hash: ").append(pathHash).append(", be: ").append(beId);
+        sb.append(", medium: ").append(storageMedium).append(", used: ").append(usedCapacityB);
+        sb.append(", total: ").append(capacityB);
         return sb.toString();
+    }
+
+    public JsonObject toJson() {
+        return (JsonObject) GsonUtils.GSON.toJsonTree(this);
     }
 }

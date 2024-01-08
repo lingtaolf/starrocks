@@ -6,15 +6,14 @@
 
 #include "gutil/strings/numbers.h"
 
-#include <assert.h>
-#include <ctype.h>
-#include <errno.h>
-#include <float.h> // for DBL_DIG and FLT_DIG
-#include <math.h>  // for HUGE_VAL
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
+#include <cassert>
+#include <cctype>
+#include <cerrno>
+#include <cfloat> // for DBL_DIG and FLT_DIG
+#include <cmath>  // for HUGE_VAL
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 using std::numeric_limits;
 #include <string>
@@ -454,7 +453,7 @@ string FpToString(Fprint fp) {
 }
 
 // Default arguments
-string Uint128ToHexString(uint128 ui128) {
+string Uint128ToHexString(const uint128& ui128) {
     char buf[33];
     snprintf(buf, sizeof(buf), "%016" PRIx64, Uint128High64(ui128));
     snprintf(buf + 16, sizeof(buf) - 16, "%016" PRIx64, Uint128Low64(ui128));
@@ -560,7 +559,7 @@ bool safe_int_internal(const char* start, const char* end, int base, IntType* va
         // loop over digits
         // loop body is interleaved for perf, not readability
         for (; start < end; ++start) {
-            unsigned char c = static_cast<unsigned char>(start[0]);
+            auto c = static_cast<unsigned char>(start[0]);
             int digit = kAsciiToInt[c];
             if (value > vmax_over_base) return false;
             value *= base;
@@ -583,7 +582,7 @@ bool safe_int_internal(const char* start, const char* end, int base, IntType* va
         // loop over digits
         // loop body is interleaved for perf, not readability
         for (; start < end; ++start) {
-            unsigned char c = static_cast<unsigned char>(start[0]);
+            auto c = static_cast<unsigned char>(start[0]);
             int digit = kAsciiToInt[c];
             if (value < vmin_over_base) return false;
             value *= base;
@@ -612,7 +611,7 @@ bool safe_strto32(const char* startptr, const int buffer_size, int32* value) {
     return safe_int_internal<int32>(startptr, startptr + buffer_size, 10, value);
 }
 
-bool safe_strto64(const char* startptr, const int buffer_size, int64* value) {
+bool safe_strto64(const char* startptr, const int64 buffer_size, int64* value) {
     return safe_int_internal<int64>(startptr, startptr + buffer_size, 10, value);
 }
 
@@ -955,7 +954,7 @@ char* FastUInt64ToBufferLeft(uint64 u64, char* buffer) {
     uint digits;
     const char* ASCII_digits = nullptr;
 
-    uint32 u = static_cast<uint32>(u64);
+    auto u = static_cast<uint32>(u64);
     if (u == u64) return FastUInt32ToBufferLeft(u, buffer);
 
     uint64 top_11_digits = u64 / 1000000000;
@@ -1006,7 +1005,7 @@ char* FastUInt128ToBufferLeft(unsigned __int128 i, char* buffer) {
     static const unsigned __int128 TWENTY_DIGITS =
             static_cast<unsigned __int128>(10000000000) * static_cast<unsigned __int128>(10000000000);
 
-    uint64 u = static_cast<uint64>(i);
+    auto u = static_cast<uint64>(i);
     if (u == i) return FastUInt64ToBufferLeft(u, buffer);
 
     unsigned __int128 top_19_digits = i / TWENTY_DIGITS;

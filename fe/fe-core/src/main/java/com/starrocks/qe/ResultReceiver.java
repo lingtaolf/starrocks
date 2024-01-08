@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/qe/ResultReceiver.java
 
@@ -22,10 +35,11 @@
 package com.starrocks.qe;
 
 import com.starrocks.common.Status;
+import com.starrocks.common.util.DebugUtil;
 import com.starrocks.metric.MetricRepo;
 import com.starrocks.proto.PFetchDataResult;
 import com.starrocks.proto.PUniqueId;
-import com.starrocks.rpc.BackendServiceProxy;
+import com.starrocks.rpc.BackendServiceClient;
 import com.starrocks.rpc.PFetchDataRequest;
 import com.starrocks.rpc.RpcException;
 import com.starrocks.thrift.TNetworkAddress;
@@ -44,8 +58,8 @@ import java.util.concurrent.TimeoutException;
 
 public class ResultReceiver {
     private static final Logger LOG = LogManager.getLogger(ResultReceiver.class);
-    private boolean isDone = false;
-    private boolean isCancel = false;
+    private volatile boolean isDone = false;
+    private volatile boolean isCancel = false;
     private long packetIdx = 0;
     private final long timeoutTs;
     private final TNetworkAddress address;
@@ -72,7 +86,7 @@ public class ResultReceiver {
                 PFetchDataRequest request = new PFetchDataRequest(finstId);
 
                 currentThread = Thread.currentThread();
-                Future<PFetchDataResult> future = BackendServiceProxy.getInstance().fetchDataAsync(address, request);
+                Future<PFetchDataResult> future = BackendServiceClient.getInstance().fetchDataAsync(address, request);
                 PFetchDataResult pResult = null;
                 while (pResult == null) {
                     long currentTs = System.currentTimeMillis();
@@ -90,16 +104,16 @@ public class ResultReceiver {
                         }
                     }
                 }
-                TStatusCode code = TStatusCode.findByValue(pResult.status.status_code);
+                TStatusCode code = TStatusCode.findByValue(pResult.status.statusCode);
                 if (code != TStatusCode.OK) {
                     status.setPstatus(pResult.status);
                     return null;
                 }
 
-                rowBatch.setQueryStatistics(pResult.query_statistics);
+                rowBatch.setQueryStatistics(pResult.queryStatistics);
 
-                if (packetIdx != pResult.packet_seq) {
-                    LOG.warn("receive packet failed, expect={}, receive={}", packetIdx, pResult.packet_seq);
+                if (packetIdx != pResult.packetSeq) {
+                    LOG.warn("receive packet failed, expect={}, receive={}", packetIdx, pResult.packetSeq);
                     status.setRpcStatus("receive error packet");
                     return null;
                 }
@@ -118,21 +132,24 @@ public class ResultReceiver {
                 }
             }
         } catch (RpcException e) {
-            LOG.warn("fetch result rpc exception, finstId={}", finstId, e);
+            LOG.warn("fetch result rpc exception, finstId={}", DebugUtil.printId(finstId), e);
             status.setRpcStatus(e.getMessage());
-            SimpleScheduler.addToBlacklist(backendId);
+            SimpleScheduler.addToBlocklist(backendId);
         } catch (ExecutionException e) {
-            LOG.warn("fetch result execution exception, finstId={}", finstId, e);
+            LOG.warn("fetch result execution exception, finstId={}", DebugUtil.printId(finstId), e);
             if (e.getMessage().contains("time out")) {
                 // if timeout, we set error code to TIMEOUT, and it will not retry querying.
-                status.setStatus(new Status(TStatusCode.TIMEOUT, e.getMessage()));
+                status.setStatus(new Status(TStatusCode.TIMEOUT,
+                        String.format("Query exceeded time limit of %d seconds",
+                                ConnectContext.get().getSessionVariable().getQueryTimeoutS())));
             } else {
                 status.setRpcStatus(e.getMessage());
-                SimpleScheduler.addToBlacklist(backendId);
+                SimpleScheduler.addToBlocklist(backendId);
             }
         } catch (TimeoutException e) {
-            LOG.warn("fetch result timeout, finstId={}", finstId, e);
-            status.setStatus("query timeout");
+            LOG.warn("fetch result timeout, finstId={}", DebugUtil.printId(finstId), e);
+            status.setInternalErrorStatus(String.format("Query exceeded time limit of %d seconds",
+                    ConnectContext.get().getSessionVariable().getQueryTimeoutS()));
             if (MetricRepo.isInit) {
                 MetricRepo.COUNTER_QUERY_TIMEOUT.increase(1L);
             }

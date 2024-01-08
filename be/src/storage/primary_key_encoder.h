@@ -1,4 +1,16 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #pragma once
 
@@ -21,31 +33,44 @@ namespace starrocks {
 //   if this column is the last column: append directly
 //   if not: convert each 0x00 inside the string to 0x00 0x01,
 //           add a tailing 0x00 0x00, then append
+
 class PrimaryKeyEncoder {
 public:
-    static bool is_supported(const vectorized::Field& f);
+    static bool is_supported(const Field& f);
 
-    static bool is_supported(const vectorized::Schema& schema);
+    static bool is_supported(const Schema& schema, const std::vector<ColumnId>& key_idxes);
 
-    // Return |OLAP_FIELD_TYPE_NONE| if no primary key contained in |schema|.
-    static FieldType encoded_primary_key_type(const vectorized::Schema& schema);
+    // Return |TYPE_NONE| if no primary key contained in |schema|.
+    static LogicalType encoded_primary_key_type(const Schema& schema, const std::vector<ColumnId>& key_idxes);
 
     // Return -1 if encoded key is not fixed size
-    static size_t get_encoded_fixed_size(const vectorized::Schema& schema);
+    static size_t get_encoded_fixed_size(const Schema& schema);
 
-    static Status create_column(const vectorized::Schema& schema, std::unique_ptr<vectorized::Column>* pcolumn);
+    // create suitable column to hold encoded key
+    //   schema: schema of the table
+    //   pcolumn: output column
+    //   large_column: some usage may fill the column with more than uint32_max elements, set true to support this
+    static Status create_column(const Schema& schema, std::unique_ptr<Column>* pcolumn, bool large_column = false);
 
-    static void encode(const vectorized::Schema& schema, const vectorized::Chunk& chunk, size_t offset, size_t len,
-                       vectorized::Column* dest);
+    // create suitable column to hold encoded key
+    //   schema: schema of the table
+    //   pcolumn: output column
+    //   key_idxes: indexes of columns for encoding
+    //   large_column: some usage may fill the column with more than uint32_max elements, set true to support this
+    static Status create_column(const Schema& schema, std::unique_ptr<Column>* pcolumn,
+                                const std::vector<ColumnId>& key_idxes, bool large_column = false);
 
-    static void encode_selective(const vectorized::Schema& schema, const vectorized::Chunk& chunk,
-                                 const uint32_t* indexes, size_t len, vectorized::Column* dest);
+    static void encode(const Schema& schema, const Chunk& chunk, size_t offset, size_t len, Column* dest);
 
-    static bool encode_exceed_limit(const vectorized::Schema& schema, const vectorized::Chunk& chunk, size_t offset,
-                                    size_t len, size_t limit_size);
+    static void encode_sort_key(const Schema& schema, const Chunk& chunk, size_t offset, size_t len, Column* dest);
 
-    static Status decode(const vectorized::Schema& schema, const vectorized::Column& keys, size_t offset, size_t len,
-                         vectorized::Chunk* dest);
+    static void encode_selective(const Schema& schema, const Chunk& chunk, const uint32_t* indexes, size_t len,
+                                 Column* dest);
+
+    static bool encode_exceed_limit(const Schema& schema, const Chunk& chunk, size_t offset, size_t len,
+                                    size_t limit_size);
+
+    static Status decode(const Schema& schema, const Column& keys, size_t offset, size_t len, Chunk* dest);
 };
 
 } // namespace starrocks

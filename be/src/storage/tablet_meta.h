@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/olap/tablet_meta.h
 
@@ -19,16 +32,18 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef STARROCKS_BE_SRC_OLAP_TABLET_META_H
-#define STARROCKS_BE_SRC_OLAP_TABLET_META_H
+#pragma once
 
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "common/logging.h"
+#include "common/status.h"
 #include "gen_cpp/olap_file.pb.h"
+#include "storage/binlog_manager.h"
 #include "storage/delete_handler.h"
 #include "storage/olap_common.h"
 #include "storage/olap_define.h"
@@ -73,140 +88,104 @@ class TabletMeta;
 using TabletMetaSharedPtr = std::shared_ptr<TabletMeta>;
 class TabletUpdates;
 
-class AlterTabletTask {
-public:
-    AlterTabletTask() {}
-    void init_from_pb(const AlterTabletPB& alter_task);
-    void to_alter_pb(AlterTabletPB* alter_task);
-
-    inline const AlterTabletState& alter_state() const { return _alter_state; }
-    OLAPStatus set_alter_state(AlterTabletState alter_state);
-
-    inline int64_t related_tablet_id() const { return _related_tablet_id; }
-    inline int32_t related_schema_hash() const { return _related_schema_hash; }
-    inline void set_related_tablet_id(int64_t related_tablet_id) { _related_tablet_id = related_tablet_id; }
-    inline void set_related_schema_hash(int32_t schema_hash) { _related_schema_hash = schema_hash; }
-
-    inline const AlterTabletType& alter_type() const { return _alter_type; }
-    inline void set_alter_type(AlterTabletType alter_type) { _alter_type = alter_type; }
-
-    friend bool operator==(const AlterTabletTask& a, const AlterTabletTask& b);
-    friend bool operator!=(const AlterTabletTask& a, const AlterTabletTask& b);
-
-private:
-    AlterTabletState _alter_state = ALTER_PREPARED;
-    int64_t _related_tablet_id = 0;
-    int32_t _related_schema_hash = 0;
-    AlterTabletType _alter_type = SCHEMA_CHANGE;
-};
-
-bool operator==(const AlterTabletTask& a, const AlterTabletTask& b);
-bool operator!=(const AlterTabletTask& a, const AlterTabletTask& b);
-
-using AlterTabletTaskSharedPtr = std::shared_ptr<AlterTabletTask>;
-
 // Class encapsulates meta of tablet.
 // The concurrency control is handled in Tablet Class, not in this class.
 class TabletMeta {
 public:
-    static OLAPStatus create(MemTracker* mem_tracker, const TCreateTabletReq& request, const TabletUid& tablet_uid,
-                             uint64_t shard_id, uint32_t next_unique_id,
-                             const std::unordered_map<uint32_t, uint32_t>& col_ordinal_to_unique_id,
-                             RowsetTypePB rowset_type, TabletMetaSharedPtr* tablet_meta);
+    [[nodiscard]] static Status create(const TCreateTabletReq& request, const TabletUid& tablet_uid, uint64_t shard_id,
+                                       uint32_t next_unique_id,
+                                       const std::unordered_map<uint32_t, uint32_t>& col_ordinal_to_unique_id,
+                                       TabletMetaSharedPtr* tablet_meta);
 
-    TabletMeta(MemTracker* mem_tracker);
-    TabletMeta(MemTracker* mem_tracker, int64_t table_id, int64_t partition_id, int64_t tablet_id, int32_t schema_hash,
-               uint64_t shard_id, const TTabletSchema& tablet_schema, uint32_t next_unique_id,
+    static TabletMetaSharedPtr create();
+
+    static RowsetMetaSharedPtr& rowset_meta_with_max_rowset_version(std::vector<RowsetMetaSharedPtr> rowsets);
+
+    explicit TabletMeta();
+    TabletMeta(int64_t table_id, int64_t partition_id, int64_t tablet_id, int32_t schema_hash, uint64_t shard_id,
+               const TTabletSchema& tablet_schema, uint32_t next_unique_id, bool enable_persistent_index,
                const std::unordered_map<uint32_t, uint32_t>& col_ordinal_to_unique_id, const TabletUid& tablet_uid,
-               TTabletType::type tabletType, RowsetTypePB roset_type);
-    virtual ~TabletMeta() { _mem_tracker->release(_mem_tracker->consumption()); }
+               TTabletType::type tabletType, TCompressionType::type compression_type,
+               int32_t primary_index_cache_expire_sec, TStorageType::type storage_type);
+
+    virtual ~TabletMeta();
 
     // Function create_from_file is used to be compatible with previous tablet_meta.
     // Previous tablet_meta is a physical file in tablet dir, which is not stored in rocksdb.
-    OLAPStatus create_from_file(const std::string& file_path);
-    OLAPStatus save(const std::string& file_path);
-    static OLAPStatus save(const std::string& file_path, const TabletMetaPB& tablet_meta_pb);
-    static OLAPStatus reset_tablet_uid(const std::string& file_path);
+    [[nodiscard]] Status create_from_file(const std::string& file_path);
+    [[nodiscard]] Status create_from_memory(std::string_view data);
+    [[nodiscard]] Status save(const std::string& file_path);
+    [[nodiscard]] static Status save(const std::string& file_path, const TabletMetaPB& tablet_meta_pb);
+    [[nodiscard]] static Status reset_tablet_uid(const std::string& file_path);
     static std::string construct_header_file_path(const std::string& schema_hash_path, int64_t tablet_id);
-    OLAPStatus save_meta(DataDir* data_dir);
+    [[nodiscard]] Status save_meta(DataDir* data_dir);
 
-    OLAPStatus serialize(std::string* meta_binary);
-    OLAPStatus deserialize(const std::string& meta_binary);
+    [[nodiscard]] Status serialize(std::string* meta_binary);
+    [[nodiscard]] Status deserialize(std::string_view data);
     void init_from_pb(TabletMetaPB* ptablet_meta_pb);
 
     void to_meta_pb(TabletMetaPB* tablet_meta_pb);
     void to_json(std::string* json_string, json2pb::Pb2JsonOptions& options);
 
-    inline TabletTypePB tablet_type() const { return _tablet_type; }
-    inline TabletUid tablet_uid() const;
-    inline int64_t table_id() const;
-    inline int64_t partition_id() const;
-    inline int64_t tablet_id() const;
-    inline int32_t schema_hash() const;
-    inline int16_t shard_id() const;
-    inline void set_shard_id(int32_t shard_id);
-    inline int64_t creation_time() const;
-    inline void set_creation_time(int64_t creation_time);
-    inline int64_t cumulative_layer_point() const;
-    inline void set_cumulative_layer_point(int64_t new_point);
+    TabletTypePB tablet_type() const { return _tablet_type; }
+    TabletUid tablet_uid() const;
+    int64_t table_id() const;
+    int64_t partition_id() const;
+    int64_t tablet_id() const;
+    void set_tablet_id(int64_t tablet_id) { _tablet_id = tablet_id; }
+    int32_t schema_hash() const;
+    int32_t shard_id() const;
+    void set_shard_id(int32_t shard_id);
+    int64_t creation_time() const;
+    void set_creation_time(int64_t creation_time);
+    int64_t cumulative_layer_point() const;
+    void set_cumulative_layer_point(int64_t new_point);
 
-    inline size_t num_rows() const;
+    size_t num_rows() const;
     // disk space occupied by tablet
-    inline size_t tablet_footprint() const;
-    inline size_t version_count() const;
+    size_t tablet_footprint() const;
+    size_t version_count() const;
     Version max_version() const;
 
-    inline TabletState tablet_state() const;
-    inline void set_tablet_state(TabletState state);
+    TabletState tablet_state() const;
+    // NOTE: Normally you should NOT call this method directly but call Tablet::set_tablet_state().
+    // This is a dangerous method, it may change the state from SHUTDOWN to RUNNING again, which should not happen
+    // in normal cases
+    void set_tablet_state(TabletState state);
 
-    inline bool in_restore_mode() const;
+    bool in_restore_mode() const;
 
-    inline const TabletSchema& tablet_schema() const;
+    const TabletSchema& tablet_schema() const;
 
-    inline void set_tablet_schema(const std::shared_ptr<TabletSchema>& tablet_schema) {
-        if (_schema != nullptr) {
-            _mem_tracker->release(_schema->mem_usage());
-        }
-        _schema = tablet_schema;
-        _mem_tracker->consume(_schema->mem_usage());
-    }
+    void set_tablet_schema(const TabletSchemaCSPtr& tablet_schema) { _schema = tablet_schema; }
+    void save_tablet_schema(const TabletSchemaCSPtr& tablet_schema, DataDir* data_dir);
 
-    inline std::shared_ptr<TabletSchema>& mutable_tablet_schema() { return _schema; }
+    TabletSchemaCSPtr& tablet_schema_ptr() { return _schema; }
 
-    inline const std::vector<RowsetMetaSharedPtr>& all_rs_metas() const;
-    OLAPStatus add_rs_meta(const RowsetMetaSharedPtr& rs_meta);
+    const std::vector<RowsetMetaSharedPtr>& all_rs_metas() const;
+    void add_rs_meta(const RowsetMetaSharedPtr& rs_meta);
     void delete_rs_meta_by_version(const Version& version, std::vector<RowsetMetaSharedPtr>* deleted_rs_metas);
     void modify_rs_metas(const std::vector<RowsetMetaSharedPtr>& to_add,
                          const std::vector<RowsetMetaSharedPtr>& to_delete);
     void revise_rs_metas(std::vector<RowsetMetaSharedPtr> rs_metas);
 
     void revise_inc_rs_metas(std::vector<RowsetMetaSharedPtr> rs_metas);
-    inline const std::vector<RowsetMetaSharedPtr>& all_inc_rs_metas() const;
-    inline const std::vector<RowsetMetaSharedPtr>& all_stale_rs_metas() const;
-    OLAPStatus add_inc_rs_meta(const RowsetMetaSharedPtr& rs_meta);
+    const std::vector<RowsetMetaSharedPtr>& all_inc_rs_metas() const;
+    const std::vector<RowsetMetaSharedPtr>& all_stale_rs_metas() const;
+    void add_inc_rs_meta(const RowsetMetaSharedPtr& rs_meta);
     void delete_inc_rs_meta_by_version(const Version& version);
     RowsetMetaSharedPtr acquire_inc_rs_meta_by_version(const Version& version) const;
     void delete_stale_rs_meta_by_version(const Version& version);
-    RowsetMetaSharedPtr acquire_stale_rs_meta_by_version(const Version& version) const;
+
+    void reset_tablet_schema_for_restore(const TabletSchemaPB& schema_pb);
 
     void add_delete_predicate(const DeletePredicatePB& delete_predicate, int64_t version);
     void remove_delete_predicate_by_version(const Version& version);
     const DelPredicateArray& delete_predicates() const;
     bool version_for_delete_predicate(const Version& version);
-    AlterTabletTaskSharedPtr alter_task();
-    void add_alter_task(const AlterTabletTask& alter_task);
-    void delete_alter_task();
-    OLAPStatus set_alter_state(AlterTabletState alter_state);
-
     std::string full_name() const;
 
-    OLAPStatus set_partition_id(int64_t partition_id);
-
-    RowsetTypePB preferred_rowset_type() const { return _preferred_rowset_type; }
-
-    void set_preferred_rowset_type(RowsetTypePB preferred_rowset_type) {
-        _preferred_rowset_type = preferred_rowset_type;
-    }
+    void set_partition_id(int64_t partition_id);
 
     // used when create new tablet
     void create_inital_updates_meta();
@@ -216,22 +195,44 @@ public:
         return _updatesPB.release();
     }
 
-private:
-    OLAPStatus _save_meta(DataDir* data_dir);
+    std::string get_storage_type() const { return _storage_type; }
 
-    static int64_t calc_mem_usage_of_rs_metas(const std::vector<RowsetMetaSharedPtr>& rs_metas) {
-        int64_t mem_usage = 0;
-        for (const auto& rs_meta : rs_metas) {
-            mem_usage += rs_meta->mem_usage();
-        }
-        return mem_usage;
+    bool get_enable_persistent_index() const { return _enable_persistent_index; }
+
+    void set_enable_persistent_index(bool enable_persistent_index) {
+        _enable_persistent_index = enable_persistent_index;
     }
+
+    int32_t get_primary_index_cache_expire_sec() const { return _primary_index_cache_expire_sec; }
+    void set_primary_index_cache_expire_sec(int32_t primary_index_cache_expire_sec) {
+        _primary_index_cache_expire_sec = primary_index_cache_expire_sec;
+    }
+
+    std::shared_ptr<BinlogConfig> get_binlog_config() { return _binlog_config; }
+
+    void set_binlog_config(const BinlogConfig& new_config) {
+        _binlog_config = std::make_shared<BinlogConfig>();
+        _binlog_config->update(new_config);
+    }
+
+    BinlogLsn get_binlog_min_lsn() { return _binlog_min_lsn; }
+
+    void set_binlog_min_lsn(BinlogLsn& binlog_lsn) { _binlog_min_lsn = binlog_lsn; }
+
+    bool enable_shortcut_compaction() const { return _enable_shortcut_compaction; }
+
+    void set_enable_shortcut_compaction(bool enable_shortcut_compaction) {
+        _enable_shortcut_compaction = enable_shortcut_compaction;
+    }
+
+private:
+    int64_t _mem_usage() const { return sizeof(TabletMeta); }
+
+    Status _save_meta(DataDir* data_dir);
 
     // _del_pred_array is ignored to compare.
     friend bool operator==(const TabletMeta& a, const TabletMeta& b);
     friend bool operator!=(const TabletMeta& a, const TabletMeta& b);
-
-    std::unique_ptr<MemTracker> _mem_tracker = nullptr;
 
     int64_t _table_id = 0;
     int64_t _partition_id = 0;
@@ -240,13 +241,15 @@ private:
     int32_t _shard_id = 0;
     int64_t _creation_time = 0;
     int64_t _cumulative_layer_point = 0;
+    bool _enable_persistent_index = false;
+    int32_t _primary_index_cache_expire_sec = 0;
     TabletUid _tablet_uid;
     TabletTypePB _tablet_type = TabletTypePB::TABLET_TYPE_DISK;
 
     TabletState _tablet_state = TABLET_NOTREADY;
     // Note: Segment store the pointer of TabletSchema,
     // so this point should never change
-    std::shared_ptr<TabletSchema> _schema = nullptr;
+    TabletSchemaCSPtr _schema = nullptr;
 
     std::vector<RowsetMetaSharedPtr> _rs_metas;
     std::vector<RowsetMetaSharedPtr> _inc_rs_metas;
@@ -256,9 +259,7 @@ private:
     std::vector<RowsetMetaSharedPtr> _stale_rs_metas;
 
     DelPredicateArray _del_pred_array;
-    AlterTabletTaskSharedPtr _alter_task;
     bool _in_restore_mode = false;
-    RowsetTypePB _preferred_rowset_type = BETA_ROWSET;
 
     // This meta is used for TabletUpdates' load process,
     // to save memory it will be passed to TabletUpdates for usage
@@ -267,6 +268,23 @@ private:
     // A reference to TabletUpdates, so update related meta
     // can be serialized with tablet meta automatically
     TabletUpdates* _updates = nullptr;
+
+    std::shared_ptr<BinlogConfig> _binlog_config;
+
+    // The minimum lsn of binlog that is valid. It will be updated when deleting expired
+    // or overcapacity binlog in Tablet#delete_expired_inc_rowsets, and used to skip those
+    // useless binlog when recovery in Tablet#finish_load_rowsets. We can not only depend
+    // on _inc_rs_metas for recovery because _inc_rs_metas may contain rowsets that doest
+    // not have binlog in the following cases
+    // 1. _inc_rs_metas already contains some rowsets before enable binlog, so there is no
+    //    binlog for these data
+    // 2. config::inc_rowset_expired_sec is larger than the expired time of binlog, so
+    //    a rowset will not be removed from _inc_rs_metas if only the binlog is expired
+    BinlogLsn _binlog_min_lsn;
+
+    bool _enable_shortcut_compaction = true;
+
+    std::string _storage_type;
 
     std::shared_mutex _meta_lock;
 };
@@ -291,7 +309,7 @@ inline int32_t TabletMeta::schema_hash() const {
     return _schema_hash;
 }
 
-inline int16_t TabletMeta::shard_id() const {
+inline int32_t TabletMeta::shard_id() const {
     return _shard_id;
 }
 
@@ -368,5 +386,3 @@ bool operator==(const TabletMeta& a, const TabletMeta& b);
 bool operator!=(const TabletMeta& a, const TabletMeta& b);
 
 } // namespace starrocks
-
-#endif // STARROCKS_BE_SRC_OLAP_OLAP_TABLET_META_H

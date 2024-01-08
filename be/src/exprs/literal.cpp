@@ -1,177 +1,190 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exprs/literal.cpp
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "exprs/literal.h"
 
-#include <string>
-
-#include "gen_cpp/Exprs_types.h"
-#include "runtime/runtime_state.h"
-#include "util/string_parser.hpp"
+#include "column/chunk.h"
+#include "column/column_helper.h"
+#include "column/const_column.h"
+#include "column/vectorized_fwd.h"
+#include "common/statusor.h"
+#include "exprs/jit/ir_helper.h"
+#include "gutil/port.h"
+#include "gutil/strings/fastmem.h"
+#include "types/constexpr.h"
 
 namespace starrocks {
 
-Literal::Literal(const TExprNode& node) : Expr(node) {
+#define CASE_TYPE_COLUMN(NODE_TYPE, CHECK_TYPE, LITERAL_VALUE)                              \
+    case NODE_TYPE: {                                                                       \
+        DCHECK_EQ(node.node_type, TExprNodeType::CHECK_TYPE);                               \
+        DCHECK(node.__isset.LITERAL_VALUE);                                                 \
+        _value = ColumnHelper::create_const_column<NODE_TYPE>(node.LITERAL_VALUE.value, 1); \
+        break;                                                                              \
+    }
+
+template <LogicalType LT>
+static RunTimeCppType<LT> unpack_decimal(const std::string& s) {
+    static_assert(lt_is_decimal<LT>);
+    RunTimeCppType<LT> value;
+#ifdef IS_LITTLE_ENDIAN
+    strings::memcpy_inlined(&value, &s.front(), sizeof(value));
+#else
+    std::copy(s.rbegin(), s.rend(), (char*)&value);
+#endif
+    return value;
+}
+
+template <LogicalType DecimalType, typename = DecimalLTGuard<DecimalType>>
+static ColumnPtr const_column_from_literal(const TExprNode& node, int precision, int scale) {
+    using CppType = RunTimeCppType<DecimalType>;
+    using ColumnType = RunTimeColumnType<DecimalType>;
+    CppType datum;
+    DCHECK(node.__isset.decimal_literal);
+    // using TDecimalLiteral::integer_value take precedence over using TDecimalLiteral::value
+    if (node.decimal_literal.__isset.integer_value) {
+        const std::string& s = node.decimal_literal.integer_value;
+        datum = unpack_decimal<DecimalType>(s);
+        return ColumnHelper::create_const_decimal_column<DecimalType>(datum, precision, scale, 1);
+    }
+    auto& literal_value = node.decimal_literal.value;
+    auto fail =
+            DecimalV3Cast::from_string<CppType>(&datum, precision, scale, literal_value.c_str(), literal_value.size());
+    if (fail) {
+        return ColumnHelper::create_const_null_column(1);
+    } else {
+        return ColumnHelper::create_const_decimal_column<DecimalType>(datum, precision, scale, 1);
+    }
+}
+
+VectorizedLiteral::VectorizedLiteral(const TExprNode& node) : Expr(node) {
+    if (node.node_type == TExprNodeType::NULL_LITERAL) {
+        _value = ColumnHelper::create_const_null_column(1);
+        return;
+    }
+
     switch (_type.type) {
-    case TYPE_BOOLEAN:
-        DCHECK_EQ(node.node_type, TExprNodeType::BOOL_LITERAL);
-        DCHECK(node.__isset.bool_literal);
-        _value.bool_val = node.bool_literal.value;
-        break;
-    case TYPE_TINYINT:
-        DCHECK_EQ(node.node_type, TExprNodeType::INT_LITERAL);
-        DCHECK(node.__isset.int_literal);
-        _value.tinyint_val = node.int_literal.value;
-        break;
-    case TYPE_SMALLINT:
-        DCHECK_EQ(node.node_type, TExprNodeType::INT_LITERAL);
-        DCHECK(node.__isset.int_literal);
-        _value.smallint_val = node.int_literal.value;
-        break;
-    case TYPE_INT:
-        DCHECK_EQ(node.node_type, TExprNodeType::INT_LITERAL);
-        DCHECK(node.__isset.int_literal);
-        _value.int_val = node.int_literal.value;
-        break;
-    case TYPE_BIGINT:
-        DCHECK_EQ(node.node_type, TExprNodeType::INT_LITERAL);
-        DCHECK(node.__isset.int_literal);
-        _value.bigint_val = node.int_literal.value;
-        break;
+        CASE_TYPE_COLUMN(TYPE_BOOLEAN, BOOL_LITERAL, bool_literal)
+        CASE_TYPE_COLUMN(TYPE_TINYINT, INT_LITERAL, int_literal);
+        CASE_TYPE_COLUMN(TYPE_SMALLINT, INT_LITERAL, int_literal);
+        CASE_TYPE_COLUMN(TYPE_INT, INT_LITERAL, int_literal);
+        CASE_TYPE_COLUMN(TYPE_BIGINT, INT_LITERAL, int_literal);
+        CASE_TYPE_COLUMN(TYPE_FLOAT, FLOAT_LITERAL, float_literal);
+        CASE_TYPE_COLUMN(TYPE_DOUBLE, FLOAT_LITERAL, float_literal);
     case TYPE_LARGEINT: {
-        StringParser::ParseResult parse_result = StringParser::PARSE_SUCCESS;
         DCHECK_EQ(node.node_type, TExprNodeType::LARGE_INT_LITERAL);
-        _value.large_int_val = StringParser::string_to_int<__int128>(
-                node.large_int_literal.value.c_str(), node.large_int_literal.value.size(), &parse_result);
+
+        StringParser::ParseResult parse_result = StringParser::PARSE_SUCCESS;
+        auto data = StringParser::string_to_int<__int128>(node.large_int_literal.value.c_str(),
+                                                          node.large_int_literal.value.size(), &parse_result);
         if (parse_result != StringParser::PARSE_SUCCESS) {
-            _value.large_int_val = MAX_INT128;
+            data = MAX_INT128;
+        }
+        _value = ColumnHelper::create_const_column<TYPE_LARGEINT>(data, 1);
+        break;
+    }
+    case TYPE_CHAR:
+    case TYPE_VARCHAR: {
+        // @IMPORTANT: build slice though get_data, else maybe will cause multi-thread crash in scanner
+        _value = ColumnHelper::create_const_column<TYPE_VARCHAR>(Slice(node.string_literal.value), 1);
+        break;
+    }
+    case TYPE_TIME: {
+        _value = ColumnHelper::create_const_column<TYPE_TIME>(node.float_literal.value, 1);
+        break;
+    }
+    case TYPE_DATE: {
+        DateValue v;
+        if (v.from_string(node.date_literal.value.c_str(), node.date_literal.value.size())) {
+            _value = ColumnHelper::create_const_column<TYPE_DATE>(v, 1);
+        } else {
+            _value = ColumnHelper::create_const_null_column(1);
         }
         break;
     }
-    case TYPE_FLOAT:
-        DCHECK_EQ(node.node_type, TExprNodeType::FLOAT_LITERAL);
-        DCHECK(node.__isset.float_literal);
-        _value.float_val = node.float_literal.value;
-        break;
-    case TYPE_DOUBLE:
-    case TYPE_TIME:
-        DCHECK_EQ(node.node_type, TExprNodeType::FLOAT_LITERAL);
-        DCHECK(node.__isset.float_literal);
-        _value.double_val = node.float_literal.value;
-        break;
-    case TYPE_DATE:
-    case TYPE_DATETIME:
-        _value.datetime_val.from_date_str(node.date_literal.value.c_str(), node.date_literal.value.size());
-        break;
-    case TYPE_CHAR:
-    case TYPE_VARCHAR:
-        DCHECK_EQ(node.node_type, TExprNodeType::STRING_LITERAL);
-        DCHECK(node.__isset.string_literal);
-        _value.set_string_val(node.string_literal.value);
-        break;
-    case TYPE_DECIMAL: {
-        DCHECK_EQ(node.node_type, TExprNodeType::DECIMAL_LITERAL);
-        DCHECK(node.__isset.decimal_literal);
-        _value.decimal_val = DecimalValue(node.decimal_literal.value);
+    case TYPE_DATETIME: {
+        TimestampValue v;
+        if (v.from_string(node.date_literal.value.c_str(), node.date_literal.value.size())) {
+            _value = ColumnHelper::create_const_column<TYPE_DATETIME>(v, 1);
+        } else {
+            _value = ColumnHelper::create_const_null_column(1);
+        }
         break;
     }
     case TYPE_DECIMALV2: {
-        DCHECK_EQ(node.node_type, TExprNodeType::DECIMAL_LITERAL);
-        DCHECK(node.__isset.decimal_literal);
-        _value.decimalv2_val = DecimalV2Value(node.decimal_literal.value);
+        _value = ColumnHelper::create_const_column<TYPE_DECIMALV2>(DecimalV2Value(node.decimal_literal.value), 1);
+        break;
+    }
+    case TYPE_DECIMAL32: {
+        _value = const_column_from_literal<TYPE_DECIMAL32>(node, this->type().precision, this->type().scale);
+        break;
+    }
+    case TYPE_DECIMAL64: {
+        _value = const_column_from_literal<TYPE_DECIMAL64>(node, this->type().precision, this->type().scale);
+        break;
+    }
+    case TYPE_DECIMAL128: {
+        _value = const_column_from_literal<TYPE_DECIMAL128>(node, this->type().precision, this->type().scale);
+        break;
+    }
+    case TYPE_VARBINARY: {
+        // @IMPORTANT: build slice though get_data, else maybe will cause multi-thread crash in scanner
+        _value = ColumnHelper::create_const_column<TYPE_VARBINARY>(Slice(node.binary_literal.value), 1);
         break;
     }
     default:
+        DCHECK(false) << "Vectorized engine not implement type: " << _type.type;
         break;
-        // DCHECK(false) << "Invalid type: " << TypeToString(_type.type);
     }
 }
 
-Literal::~Literal() {}
-
-BooleanVal Literal::get_boolean_val(ExprContext* context, TupleRow* row) {
-    DCHECK_EQ(_type.type, TYPE_BOOLEAN) << _type;
-    return BooleanVal(_value.bool_val);
+VectorizedLiteral::VectorizedLiteral(ColumnPtr&& value, const TypeDescriptor& type)
+        : Expr(type, false), _value(std::move(value)) {
+    DCHECK(_value->is_constant());
 }
 
-TinyIntVal Literal::get_tiny_int_val(ExprContext* context, TupleRow* row) {
-    DCHECK_EQ(_type.type, TYPE_TINYINT) << _type;
-    return TinyIntVal(_value.tinyint_val);
+#undef CASE_TYPE_COLUMN
+
+StatusOr<ColumnPtr> VectorizedLiteral::evaluate_checked(ExprContext* context, Chunk* ptr) {
+    ColumnPtr column = _value->clone_empty();
+    column->append(*_value, 0, 1);
+    if (ptr != nullptr) {
+        column->resize(ptr->num_rows());
+    }
+    return column;
 }
 
-SmallIntVal Literal::get_small_int_val(ExprContext* context, TupleRow* row) {
-    DCHECK_EQ(_type.type, TYPE_SMALLINT) << _type;
-    return SmallIntVal(_value.smallint_val);
+bool VectorizedLiteral::is_compilable() const {
+    return IRHelper::support_jit(_type.type);
 }
 
-IntVal Literal::get_int_val(ExprContext* context, TupleRow* row) {
-    DCHECK_EQ(_type.type, TYPE_INT) << _type;
-    return IntVal(_value.int_val);
+StatusOr<LLVMDatum> VectorizedLiteral::generate_ir_impl(ExprContext* context, const llvm::Module& module,
+                                                        llvm::IRBuilder<>& b,
+                                                        const std::vector<LLVMDatum>& datums) const {
+    ASSIGN_OR_RETURN(auto result, IRHelper::create_ir_number(b, _type.type, _value->raw_data()));
+    LLVMDatum datum(b);
+    datum.value = result;
+    return datum;
 }
 
-BigIntVal Literal::get_big_int_val(ExprContext* context, TupleRow* row) {
-    DCHECK_EQ(_type.type, TYPE_BIGINT) << _type;
-    return BigIntVal(_value.bigint_val);
+std::string VectorizedLiteral::debug_string() const {
+    std::stringstream out;
+    out << "VectorizedLiteral("
+        << "type=" << this->type().debug_string() << ", value=" << _value->debug_string() << ")";
+    return out.str();
 }
 
-LargeIntVal Literal::get_large_int_val(ExprContext* context, TupleRow* row) {
-    DCHECK_EQ(_type.type, TYPE_LARGEINT) << _type;
-    return LargeIntVal(_value.large_int_val);
-}
-
-FloatVal Literal::get_float_val(ExprContext* context, TupleRow* row) {
-    DCHECK_EQ(_type.type, TYPE_FLOAT) << _type;
-    return FloatVal(_value.float_val);
-}
-
-DoubleVal Literal::get_double_val(ExprContext* context, TupleRow* row) {
-    DCHECK_EQ(_type.type, TYPE_DOUBLE) << _type;
-    return DoubleVal(_value.double_val);
-}
-
-DecimalVal Literal::get_decimal_val(ExprContext* context, TupleRow* row) {
-    DCHECK_EQ(_type.type, TYPE_DECIMAL) << _type;
-    DecimalVal dec_val;
-    _value.decimal_val.to_decimal_val(&dec_val);
-    return dec_val;
-}
-
-DecimalV2Val Literal::get_decimalv2_val(ExprContext* context, TupleRow* row) {
-    DCHECK_EQ(_type.type, TYPE_DECIMALV2) << _type;
-    DecimalV2Val dec_val;
-    _value.decimalv2_val.to_decimal_val(&dec_val);
-    return dec_val;
-}
-
-DateTimeVal Literal::get_datetime_val(ExprContext* context, TupleRow* row) {
-    DateTimeVal dt_val;
-    _value.datetime_val.to_datetime_val(&dt_val);
-    return dt_val;
-}
-
-StringVal Literal::get_string_val(ExprContext* context, TupleRow* row) {
-    DCHECK(_type.is_string_type()) << _type;
-    StringVal str_val;
-    _value.string_val.to_string_val(&str_val);
-    return str_val;
-}
+VectorizedLiteral::~VectorizedLiteral() = default;
 
 } // namespace starrocks

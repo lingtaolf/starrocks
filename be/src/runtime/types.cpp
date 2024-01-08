@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/runtime/types.cpp
 
@@ -24,10 +37,15 @@
 #include <ostream>
 
 #include "gutil/strings/substitute.h"
+#include "runtime/datetime_value.h"
+#include "runtime/string_value.h"
+#include "storage/types.h"
+#include "types/array_type_info.h"
+#include "types/logical_type.h"
 
 namespace starrocks {
 
-TypeDescriptor::TypeDescriptor(const std::vector<TTypeNode>& types, int* idx) : len(-1), precision(-1), scale(-1) {
+TypeDescriptor::TypeDescriptor(const std::vector<TTypeNode>& types, int* idx) {
     DCHECK_GE(*idx, 0);
     DCHECK_LT(*idx, types.size());
     const TTypeNode& node = types[*idx];
@@ -51,16 +69,17 @@ TypeDescriptor::TypeDescriptor(const std::vector<TTypeNode>& types, int* idx) : 
     case TTypeNodeType::STRUCT:
         type = TYPE_STRUCT;
         ++(*idx);
-        for (int i = 0; i < node.struct_fields.size(); ++i) {
-            field_names.push_back(node.struct_fields[i].name);
+        for (const auto& struct_field : node.struct_fields) {
+            field_names.push_back(struct_field.name);
             children.push_back(TypeDescriptor(types, idx));
         }
+        DCHECK_EQ(field_names.size(), children.size());
         break;
     case TTypeNodeType::ARRAY:
         DCHECK(!node.__isset.scalar_type);
         DCHECK_LT(*idx, types.size() - 1);
-        ++(*idx);
         type = TYPE_ARRAY;
+        ++(*idx);
         children.push_back(TypeDescriptor(types, idx));
         break;
     case TTypeNodeType::MAP:
@@ -95,6 +114,7 @@ void TypeDescriptor::to_thrift(TTypeDesc* thrift_type) const {
             curr_node.struct_fields.emplace_back();
             curr_node.struct_fields.back().__set_name(field_name);
         }
+        DCHECK_EQ(children.size(), field_names.size());
         for (const TypeDescriptor& child : children) {
             child.to_thrift(thrift_type);
         }
@@ -123,11 +143,12 @@ void TypeDescriptor::to_protobuf(PTypeDesc* proto_type) const {
         children[0].to_protobuf(proto_type);
     } else if (type == TYPE_MAP) {
         node->set_type(TTypeNodeType::MAP);
-        DCHECK_EQ(2, children.size());
         children[0].to_protobuf(proto_type);
         children[1].to_protobuf(proto_type);
+        DCHECK_EQ(2, children.size());
     } else if (type == TYPE_STRUCT) {
         node->set_type(TTypeNodeType::STRUCT);
+        DCHECK_EQ(field_names.size(), children.size());
         for (const auto& field_name : field_names) {
             node->add_struct_fields()->set_name(field_name);
         }
@@ -150,13 +171,12 @@ void TypeDescriptor::to_protobuf(PTypeDesc* proto_type) const {
     }
 }
 
-TypeDescriptor::TypeDescriptor(const google::protobuf::RepeatedPtrField<PTypeNode>& types, int* idx)
-        : len(-1), precision(-1), scale(-1) {
+TypeDescriptor::TypeDescriptor(const google::protobuf::RepeatedPtrField<PTypeNode>& types, int* idx) {
     DCHECK_GE(*idx, 0);
     DCHECK_LT(*idx, types.size());
 
     const PTypeNode& node = types.Get(*idx);
-    TTypeNodeType::type node_type = static_cast<TTypeNodeType::type>(node.type());
+    auto node_type = static_cast<TTypeNodeType::type>(node.type());
     switch (node_type) {
     case TTypeNodeType::SCALAR: {
         DCHECK(node.has_scalar_type());
@@ -207,6 +227,8 @@ std::string TypeDescriptor::debug_string() const {
         return strings::Substitute("CHAR($0)", len);
     case TYPE_VARCHAR:
         return strings::Substitute("VARCHAR($0)", len);
+    case TYPE_VARBINARY:
+        return strings::Substitute("VARBINARY($0)", len);
     case TYPE_DECIMAL:
         return strings::Substitute("DECIMAL($0, $1)", precision, scale);
     case TYPE_DECIMALV2:
@@ -226,7 +248,9 @@ std::string TypeDescriptor::debug_string() const {
         ss << "STRUCT{";
         for (size_t i = 0; i < field_names.size(); i++) {
             ss << field_names[i] << " " << children[i].debug_string();
-            if (i + 1 < field_names.size()) ss << ", ";
+            if (i + 1 < field_names.size()) {
+                ss << ", ";
+            }
         }
         ss << "}";
         return ss.str();
@@ -234,6 +258,152 @@ std::string TypeDescriptor::debug_string() const {
     default:
         return type_to_string(type);
     }
+}
+
+bool TypeDescriptor::support_join() const {
+    if (type == TYPE_ARRAY || type == TYPE_MAP || type == TYPE_STRUCT) {
+        return std::all_of(children.begin(), children.end(), [](const TypeDescriptor& t) { return t.support_join(); });
+    }
+    return type != TYPE_JSON && type != TYPE_OBJECT && type != TYPE_PERCENTILE && type != TYPE_HLL;
+}
+
+bool TypeDescriptor::support_orderby() const {
+    if (type == TYPE_ARRAY) {
+        return children[0].support_orderby();
+    }
+    return type != TYPE_JSON && type != TYPE_OBJECT && type != TYPE_PERCENTILE && type != TYPE_HLL &&
+           type != TYPE_MAP && type != TYPE_STRUCT;
+}
+
+bool TypeDescriptor::support_groupby() const {
+    if (type == TYPE_ARRAY || type == TYPE_MAP || type == TYPE_STRUCT) {
+        return std::all_of(children.begin(), children.end(),
+                           [](const TypeDescriptor& t) { return t.support_groupby(); });
+    }
+    return type != TYPE_JSON && type != TYPE_OBJECT && type != TYPE_PERCENTILE && type != TYPE_HLL;
+}
+
+TypeDescriptor TypeDescriptor::from_storage_type_info(TypeInfo* type_info) {
+    LogicalType ftype = type_info->type();
+
+    bool is_array = false;
+    if (ftype == TYPE_ARRAY) {
+        is_array = true;
+        type_info = get_item_type_info(type_info).get();
+        ftype = type_info->type();
+    }
+
+    LogicalType ltype = scalar_field_type_to_logical_type(ftype);
+    DCHECK(ltype != TYPE_UNKNOWN);
+    int len = TypeDescriptor::MAX_VARCHAR_LENGTH;
+    int precision = type_info->precision();
+    int scale = type_info->scale();
+    TypeDescriptor ret = TypeDescriptor::from_logical_type(ltype, len, precision, scale);
+
+    if (is_array) {
+        TypeDescriptor arr;
+        arr.type = TYPE_ARRAY;
+        arr.children.emplace_back(ret);
+        return arr;
+    }
+    return ret;
+}
+
+/// Returns the size of a slot for this type.
+int TypeDescriptor::get_slot_size() const {
+    switch (type) {
+    case TYPE_CHAR:
+    case TYPE_VARCHAR:
+    case TYPE_HLL:
+    case TYPE_OBJECT:
+    case TYPE_PERCENTILE:
+    case TYPE_JSON:
+    case TYPE_VARBINARY:
+        return sizeof(StringValue);
+
+    case TYPE_NULL:
+    case TYPE_BOOLEAN:
+    case TYPE_TINYINT:
+        return 1;
+
+    case TYPE_SMALLINT:
+        return 2;
+
+    case TYPE_INT:
+    case TYPE_FLOAT:
+    case TYPE_DECIMAL32:
+        return 4;
+
+    case TYPE_BIGINT:
+    case TYPE_DOUBLE:
+    case TYPE_TIME:
+    case TYPE_DECIMAL64:
+        return 8;
+
+    case TYPE_DATE:
+    case TYPE_DATETIME:
+        // This is the size of the slot, the actual size of the data is 12.
+        return sizeof(DateTimeValue);
+
+    case TYPE_DECIMAL:
+        return 40;
+
+    case TYPE_LARGEINT:
+    case TYPE_DECIMALV2:
+    case TYPE_DECIMAL128:
+        return 16;
+    case TYPE_ARRAY:
+    case TYPE_MAP:
+        return sizeof(void*); // sizeof(Collection*)
+    case TYPE_STRUCT: {
+        int struct_size = 0;
+        for (const TypeDescriptor& type_descriptor : children) {
+            struct_size += type_descriptor.get_slot_size();
+        }
+        return struct_size;
+    }
+    case TYPE_UNKNOWN:
+    case TYPE_BINARY:
+    case TYPE_FUNCTION:
+    case TYPE_UNSIGNED_TINYINT:
+    case TYPE_UNSIGNED_SMALLINT:
+    case TYPE_UNSIGNED_INT:
+    case TYPE_UNSIGNED_BIGINT:
+    case TYPE_DISCRETE_DOUBLE:
+    case TYPE_DATE_V1:
+    case TYPE_DATETIME_V1:
+    case TYPE_NONE:
+    case TYPE_MAX_VALUE:
+        DCHECK(false);
+        break;
+    }
+    // For llvm complain
+    return -1;
+}
+
+size_t TypeDescriptor::get_flat_size() const {
+    if (is_unknown_type()) {
+        return 0;
+    }
+    if (!is_complex_type()) {
+        return 1;
+    } else {
+        int size = 0;
+        for (const auto& type : children) {
+            size += type.get_flat_size();
+        }
+        return size;
+    }
+}
+
+size_t TypeDescriptor::get_array_depth_limit() const {
+    int depth = 1;
+    const TypeDescriptor* type = this;
+    while (type->children.size() > 0) {
+        type = &type->children[0];
+        depth++;
+    }
+    return depth;
 }
 
 } // namespace starrocks

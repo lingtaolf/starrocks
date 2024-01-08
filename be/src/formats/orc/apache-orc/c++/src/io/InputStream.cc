@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/orc/tree/main/c++/src/io/InputStream.cc
 
@@ -57,6 +70,10 @@ uint64_t PositionProvider::current() {
     return *position;
 }
 
+PositionProvider& PositionProviderMap::at(uint64_t columnId) {
+    return providers.at(columnId);
+}
+
 SeekableInputStream::~SeekableInputStream() {
     // PASS
 }
@@ -92,7 +109,7 @@ bool SeekableArrayInputStream::Next(const void** buffer, int* size) {
 
 void SeekableArrayInputStream::BackUp(int count) {
     if (count >= 0) {
-        uint64_t unsignedCount = static_cast<uint64_t>(count);
+        auto unsignedCount = static_cast<uint64_t>(count);
         if (unsignedCount <= blockSize && unsignedCount <= position) {
             position -= unsignedCount;
         } else {
@@ -103,7 +120,7 @@ void SeekableArrayInputStream::BackUp(int count) {
 
 bool SeekableArrayInputStream::Skip(int count) {
     if (count >= 0) {
-        uint64_t unsignedCount = static_cast<uint64_t>(count);
+        auto unsignedCount = static_cast<uint64_t>(count);
         if (unsignedCount + position <= length) {
             position += unsignedCount;
             return true;
@@ -128,16 +145,18 @@ std::string SeekableArrayInputStream::getName() const {
     return result.str();
 }
 
+static const uint64_t DEFAULT_FILE_BLOCK_SIZE = 256 * 1024;
 static uint64_t computeBlock(uint64_t request, uint64_t length) {
-    return std::min(length, request == 0 ? 256 * 1024 : request);
+    return std::min(length, request == 0 ? DEFAULT_FILE_BLOCK_SIZE : request);
 }
 
 SeekableFileInputStream::SeekableFileInputStream(InputStream* stream, uint64_t offset, uint64_t byteCount,
                                                  MemoryPool& _pool, uint64_t _blockSize)
         : pool(_pool), input(stream), start(offset), length(byteCount), blockSize(computeBlock(_blockSize, length)) {
     position = 0;
-    buffer.reset(new DataBuffer<char>(pool));
+    buffer = nullptr;
     pushBack = 0;
+    hasSeek = false;
 }
 
 SeekableFileInputStream::~SeekableFileInputStream() {
@@ -145,13 +164,19 @@ SeekableFileInputStream::~SeekableFileInputStream() {
 }
 
 bool SeekableFileInputStream::Next(const void** data, int* size) {
+    if (buffer == nullptr) {
+        buffer.reset(new DataBuffer<char>(pool, blockSize));
+    }
     uint64_t bytesRead;
     if (pushBack != 0) {
         *data = buffer->data() + (buffer->size() - pushBack);
         bytesRead = pushBack;
     } else {
         bytesRead = std::min(length - position, blockSize);
-        buffer->resize(bytesRead);
+        if (hasSeek) {
+            hasSeek = false;
+            bytesRead = std::min(bytesRead, input->getNaturalReadSizeAfterSeek());
+        }
         if (bytesRead > 0) {
             input->read(buffer->data(), bytesRead, start + position);
             *data = static_cast<void*>(buffer->data());
@@ -167,7 +192,7 @@ void SeekableFileInputStream::BackUp(int signedCount) {
     if (signedCount < 0) {
         throw std::logic_error("can't backup negative distances");
     }
-    uint64_t count = static_cast<uint64_t>(signedCount);
+    auto count = static_cast<uint64_t>(signedCount);
     if (pushBack > 0) {
         throw std::logic_error("can't backup unless we just called Next");
     }
@@ -182,7 +207,7 @@ bool SeekableFileInputStream::Skip(int signedCount) {
     if (signedCount < 0) {
         return false;
     }
-    uint64_t count = static_cast<uint64_t>(signedCount);
+    auto count = static_cast<uint64_t>(signedCount);
     position = std::min(position + count, length);
     pushBack = 0;
     return position < length;
@@ -199,6 +224,7 @@ void SeekableFileInputStream::seek(PositionProvider& location) {
         throw std::logic_error("seek too far");
     }
     pushBack = 0;
+    hasSeek = true;
 }
 
 std::string SeekableFileInputStream::getName() const {

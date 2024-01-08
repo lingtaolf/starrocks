@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/test/olap/tablet_meta_test.cpp
 
@@ -23,15 +36,14 @@
 
 #include <gtest/gtest.h>
 
-#include <cstdlib>
 #include <string>
+
+#include "runtime/decimalv2_value.h"
 
 namespace starrocks {
 
 // NOLINTNEXTLINE
 TEST(TabletMetaTest, test_create) {
-    config::storage_format_version = 2;
-
     TCreateTabletReq request;
     request.__set_tablet_id(1000001);
     request.__set_partition_id(1);
@@ -40,7 +52,6 @@ TEST(TabletMetaTest, test_create) {
 
     TTabletSchema& schema = request.tablet_schema;
     schema.__set_schema_hash(12345);
-    schema.__set_is_in_memory(false);
     schema.__set_keys_type(TKeysType::DUP_KEYS);
     schema.__set_short_key_column_count(1);
 
@@ -103,12 +114,17 @@ TEST(TabletMetaTest, test_create) {
     col_ordinal_to_unique_id[2] = 10002;
     col_ordinal_to_unique_id[3] = 10003;
 
-    auto mem_tracker = std::make_unique<MemTracker>();
+    request.__set_binlog_config(TBinlogConfig());
+    TBinlogConfig& binlog_config = request.binlog_config;
+    binlog_config.__set_version(5);
+    binlog_config.__set_binlog_enable(true);
+    binlog_config.__set_binlog_ttl_second(12323);
+    binlog_config.__set_binlog_max_size(23724);
+
     TabletMetaSharedPtr tablet_meta;
-    OLAPStatus st = TabletMeta::create(mem_tracker.get(), request, TabletUid(321, 456), 987 /*shared_id*/,
-                                       20000 /*next_unique_id*/, col_ordinal_to_unique_id, RowsetTypePB::BETA_ROWSET,
-                                       &tablet_meta);
-    ASSERT_EQ(OLAP_SUCCESS, st);
+    Status st = TabletMeta::create(request, TabletUid(321, 456), 987 /*shared_id*/, 20000 /*next_unique_id*/,
+                                   col_ordinal_to_unique_id, &tablet_meta);
+    ASSERT_TRUE(st.ok());
     ASSERT_TRUE(tablet_meta != nullptr);
 
     ASSERT_EQ(TabletUid(321, 456), tablet_meta->tablet_uid());
@@ -121,7 +137,6 @@ TEST(TabletMetaTest, test_create) {
     const TabletSchema& tablet_schema = tablet_meta->tablet_schema();
     ASSERT_EQ(3, tablet_schema.num_columns());
     ASSERT_EQ(KeysType::DUP_KEYS, tablet_schema.keys_type());
-    ASSERT_EQ(false, tablet_schema.is_in_memory());
 
     const TabletColumn& c0 = tablet_schema.column(0);
     const TabletColumn& c1 = tablet_schema.column(1);
@@ -132,7 +147,7 @@ TEST(TabletMetaTest, test_create) {
     // check c0.
     ASSERT_EQ(col_ordinal_to_unique_id[0], c0.unique_id());
     ASSERT_EQ("c0", c0.name());
-    ASSERT_EQ(OLAP_FIELD_TYPE_INT, c0.type());
+    ASSERT_EQ(TYPE_INT, c0.type());
     ASSERT_TRUE(c0.is_key());
     ASSERT_FALSE(c0.is_bf_column());
     ASSERT_TRUE(c0.is_nullable());
@@ -140,14 +155,13 @@ TEST(TabletMetaTest, test_create) {
     ASSERT_FALSE(c0.has_default_value());
     ASSERT_EQ(sizeof(int32_t), c0.length());
     ASSERT_EQ(sizeof(int32_t), c0.index_length());
-    ASSERT_EQ(OLAP_FIELD_AGGREGATION_NONE, c0.aggregation());
-    ASSERT_TRUE(c0.visible());
-    ASSERT_EQ(0, c0.get_subtype_count());
+    ASSERT_EQ(STORAGE_AGGREGATE_NONE, c0.aggregation());
+    ASSERT_EQ(0, c0.subcolumn_count());
 
     // check c1.
     ASSERT_EQ(col_ordinal_to_unique_id[1], c1.unique_id());
     ASSERT_EQ("c1", c1.name());
-    ASSERT_EQ(OLAP_FIELD_TYPE_ARRAY, c1.type());
+    ASSERT_EQ(TYPE_ARRAY, c1.type());
     ASSERT_FALSE(c1.is_key());
     ASSERT_FALSE(c1.is_bf_column());
     ASSERT_TRUE(c1.is_nullable());
@@ -155,24 +169,24 @@ TEST(TabletMetaTest, test_create) {
     ASSERT_FALSE(c1.has_default_value());
     ASSERT_EQ(24, c1.length());
     ASSERT_EQ(24, c1.index_length());
-    ASSERT_EQ(OLAP_FIELD_AGGREGATION_NONE, c1.aggregation());
-    ASSERT_EQ(1, c1.get_subtype_count());
+    ASSERT_EQ(STORAGE_AGGREGATE_NONE, c1.aggregation());
+    ASSERT_EQ(1, c1.subcolumn_count());
 
-    ASSERT_EQ("_c1_1", c1.get_sub_column(0).name());
-    ASSERT_EQ(kInvalidUniqueId, c1.get_sub_column(0).unique_id());
-    ASSERT_EQ(OLAP_FIELD_TYPE_DECIMAL_V2, c1.get_sub_column(0).type());
-    ASSERT_FALSE(c1.get_sub_column(0).is_key());
-    ASSERT_FALSE(c1.get_sub_column(0).is_bf_column());
-    ASSERT_TRUE(c1.get_sub_column(0).is_nullable());
-    ASSERT_FALSE(c1.get_sub_column(0).has_bitmap_index());
-    ASSERT_FALSE(c1.get_sub_column(0).has_default_value());
-    ASSERT_EQ(sizeof(DecimalV2Value), c1.get_sub_column(0).length());
-    ASSERT_EQ(sizeof(DecimalV2Value), c1.get_sub_column(0).index_length());
+    ASSERT_EQ("element", c1.subcolumn(0).name());
+    ASSERT_EQ(kInvalidUniqueId, c1.subcolumn(0).unique_id());
+    ASSERT_EQ(TYPE_DECIMALV2, c1.subcolumn(0).type());
+    ASSERT_FALSE(c1.subcolumn(0).is_key());
+    ASSERT_FALSE(c1.subcolumn(0).is_bf_column());
+    ASSERT_TRUE(c1.subcolumn(0).is_nullable());
+    ASSERT_FALSE(c1.subcolumn(0).has_bitmap_index());
+    ASSERT_FALSE(c1.subcolumn(0).has_default_value());
+    ASSERT_EQ(sizeof(DecimalV2Value), c1.subcolumn(0).length());
+    ASSERT_EQ(sizeof(DecimalV2Value), c1.subcolumn(0).index_length());
 
     // check c2.
     ASSERT_EQ(col_ordinal_to_unique_id[2], c2.unique_id());
     ASSERT_EQ("c2", c2.name());
-    ASSERT_EQ(OLAP_FIELD_TYPE_ARRAY, c2.type());
+    ASSERT_EQ(TYPE_ARRAY, c2.type());
     ASSERT_FALSE(c2.is_key());
     ASSERT_FALSE(c2.is_bf_column());
     ASSERT_FALSE(c2.is_nullable());
@@ -180,33 +194,62 @@ TEST(TabletMetaTest, test_create) {
     ASSERT_FALSE(c2.has_default_value());
     ASSERT_EQ(24, c2.length());
     ASSERT_EQ(24, c2.index_length());
-    ASSERT_EQ(OLAP_FIELD_AGGREGATION_NONE, c2.aggregation());
-    ASSERT_EQ(1, c2.get_subtype_count());
+    ASSERT_EQ(STORAGE_AGGREGATE_NONE, c2.aggregation());
+    ASSERT_EQ(1, c2.subcolumn_count());
 
-    ASSERT_EQ("_c2_1", c2.get_sub_column(0).name());
-    ASSERT_EQ(kInvalidUniqueId, c2.get_sub_column(0).unique_id());
-    ASSERT_EQ(OLAP_FIELD_TYPE_ARRAY, c2.get_sub_column(0).type());
-    ASSERT_FALSE(c2.get_sub_column(0).is_key());
-    ASSERT_FALSE(c2.get_sub_column(0).is_bf_column());
-    ASSERT_TRUE(c2.get_sub_column(0).is_nullable());
-    ASSERT_FALSE(c2.get_sub_column(0).has_bitmap_index());
-    ASSERT_FALSE(c2.get_sub_column(0).has_default_value());
-    ASSERT_EQ(24, c2.get_sub_column(0).length());
-    ASSERT_EQ(24, c2.get_sub_column(0).index_length());
-    ASSERT_EQ(1, c2.get_sub_column(0).get_subtype_count());
+    ASSERT_EQ("element", c2.subcolumn(0).name());
+    ASSERT_EQ(kInvalidUniqueId, c2.subcolumn(0).unique_id());
+    ASSERT_EQ(TYPE_ARRAY, c2.subcolumn(0).type());
+    ASSERT_FALSE(c2.subcolumn(0).is_key());
+    ASSERT_FALSE(c2.subcolumn(0).is_bf_column());
+    ASSERT_TRUE(c2.subcolumn(0).is_nullable());
+    ASSERT_FALSE(c2.subcolumn(0).has_bitmap_index());
+    ASSERT_FALSE(c2.subcolumn(0).has_default_value());
+    ASSERT_EQ(24, c2.subcolumn(0).length());
+    ASSERT_EQ(24, c2.subcolumn(0).index_length());
+    ASSERT_EQ(1, c2.subcolumn(0).subcolumn_count());
 
-    const TabletColumn& c2_1 = c2.get_sub_column(0);
-    ASSERT_EQ("_c2_2", c2_1.get_sub_column(0).name());
-    ASSERT_EQ(kInvalidUniqueId, c2_1.get_sub_column(0).unique_id());
-    ASSERT_EQ(OLAP_FIELD_TYPE_VARCHAR, c2_1.get_sub_column(0).type());
-    ASSERT_FALSE(c2_1.get_sub_column(0).is_key());
-    ASSERT_FALSE(c2_1.get_sub_column(0).is_bf_column());
-    ASSERT_TRUE(c2_1.get_sub_column(0).is_nullable());
-    ASSERT_FALSE(c2_1.get_sub_column(0).has_bitmap_index());
-    ASSERT_FALSE(c2_1.get_sub_column(0).has_default_value());
-    ASSERT_EQ(10 + sizeof(OLAP_STRING_MAX_LENGTH), c2_1.get_sub_column(0).length());
-    ASSERT_EQ(10, c2_1.get_sub_column(0).index_length());
-    ASSERT_EQ(0, c2_1.get_sub_column(0).get_subtype_count());
+    const TabletColumn& c2_1 = c2.subcolumn(0);
+    ASSERT_EQ("element", c2_1.subcolumn(0).name());
+    ASSERT_EQ(kInvalidUniqueId, c2_1.subcolumn(0).unique_id());
+    ASSERT_EQ(TYPE_VARCHAR, c2_1.subcolumn(0).type());
+    ASSERT_FALSE(c2_1.subcolumn(0).is_key());
+    ASSERT_FALSE(c2_1.subcolumn(0).is_bf_column());
+    ASSERT_TRUE(c2_1.subcolumn(0).is_nullable());
+    ASSERT_FALSE(c2_1.subcolumn(0).has_bitmap_index());
+    ASSERT_FALSE(c2_1.subcolumn(0).has_default_value());
+    ASSERT_EQ(10 + sizeof(OLAP_STRING_MAX_LENGTH), c2_1.subcolumn(0).length());
+    ASSERT_EQ(10 + sizeof(OLAP_STRING_MAX_LENGTH), c2_1.subcolumn(0).index_length());
+    ASSERT_EQ(0, c2_1.subcolumn(0).subcolumn_count());
+
+    std::shared_ptr<BinlogConfig> binlog_config_ptr = tablet_meta->get_binlog_config();
+    ASSERT_EQ(5, binlog_config_ptr->version);
+    ASSERT_TRUE(binlog_config_ptr->binlog_enable);
+    ASSERT_EQ(12323, binlog_config_ptr->binlog_ttl_second);
+    ASSERT_EQ(23724, binlog_config_ptr->binlog_max_size);
+}
+
+TEST(TabletMetaTest, test_init_from_pb) {
+    TabletMetaSharedPtr tablet_meta = TabletMeta::create();
+    std::shared_ptr<BinlogConfig> binlog_config_ptr = tablet_meta->get_binlog_config();
+    ASSERT_TRUE(binlog_config_ptr == nullptr);
+
+    BinlogConfig binlog_config;
+    binlog_config.update(3, true, 823, 984);
+    tablet_meta->set_binlog_config(binlog_config);
+    TabletMetaPB tablet_meta_pb;
+    tablet_meta->to_meta_pb(&tablet_meta_pb);
+
+    TabletMetaSharedPtr tablet_meta1 = TabletMeta::create();
+    binlog_config_ptr = tablet_meta1->get_binlog_config();
+    ASSERT_TRUE(binlog_config_ptr == nullptr);
+
+    tablet_meta1->init_from_pb(&tablet_meta_pb);
+    binlog_config_ptr = tablet_meta1->get_binlog_config();
+    ASSERT_EQ(3, binlog_config_ptr->version);
+    ASSERT_TRUE(binlog_config_ptr->binlog_enable);
+    ASSERT_EQ(823, binlog_config_ptr->binlog_ttl_second);
+    ASSERT_EQ(984, binlog_config_ptr->binlog_max_size);
 }
 
 } // namespace starrocks

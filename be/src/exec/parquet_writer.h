@@ -1,23 +1,17 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exec/parquet_writer.h
 
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #pragma once
 
@@ -31,53 +25,73 @@
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
 #include <parquet/exception.h>
-#include <stdint.h>
 
-#include <map>
-#include <string>
-
-#include "common/status.h"
-#include "gen_cpp/FileBrokerService_types.h"
-#include "gen_cpp/PlanNodes_types.h"
+#include "common/logging.h"
+#include "exec/pipeline/fragment_context.h"
+#include "formats/parquet/file_writer.h"
+#include "fs/fs.h"
 #include "gen_cpp/Types_types.h"
+#include "runtime/runtime_state.h"
 
 namespace starrocks {
 
-class ExprContext;
-class FileWriter;
-class RowBatch;
+struct TableInfo;
 
-class ParquetOutputStream : public arrow::io::OutputStream {
-public:
-    ParquetOutputStream(FileWriter* file_writer);
-    virtual ~ParquetOutputStream();
-
-    arrow::Status Write(const void* data, int64_t nbytes) override;
-    // return the current write position of the stream
-    arrow::Status Tell(int64_t* position) const override;
-    arrow::Status Close() override;
-
-    bool closed() const override { return _is_closed; }
-
-private:
-    FileWriter* _file_writer; // not owned
-    int64_t _cur_pos = 0;     // current write position
-    bool _is_closed = false;
+struct TableInfo {
+    TCompressionType::type compress_type = TCompressionType::SNAPPY;
+    bool enable_dictionary = true;
+    std::string partition_location = "";
+    std::shared_ptr<::parquet::schema::GroupNode> schema;
+    int64_t max_file_size = 1024 * 1024 * 1024; // 1GB
+    TCloudConfiguration cloud_conf;
 };
 
-// a wrapper of parquet output stream
-class ParquetWriterWrapper {
+class RollingAsyncParquetWriter {
 public:
-    ParquetWriterWrapper(FileWriter* file_writer, const std::vector<ExprContext*>& output_expr_ctxs);
-    virtual ~ParquetWriterWrapper();
+    RollingAsyncParquetWriter(TableInfo tableInfo, const std::vector<ExprContext*>& output_expr_ctxs,
+                              RuntimeProfile* parent_profile,
+                              std::function<void(starrocks::parquet::AsyncFileWriter*, RuntimeState*)> _commit_func,
+                              RuntimeState* state, int32_t driver_id);
 
-    Status write(const RowBatch& row_batch);
+    ~RollingAsyncParquetWriter() = default;
 
-    void close();
+    Status append_chunk(Chunk* chunk, RuntimeState* state);
+    Status init();
+    Status close(RuntimeState* state);
+    bool writable() const { return _writer == nullptr || _writer->writable(); }
+    bool closed();
+
+    void set_io_status(const Status& status) {
+        if (_io_status.ok()) {
+            _io_status = status;
+        }
+    }
+
+    Status get_io_status() const { return _io_status; }
 
 private:
-    ParquetOutputStream* _outstream;
-    const std::vector<ExprContext*>& _output_expr_ctxs;
+    std::string _new_file_location();
+
+    Status _new_file_writer(RuntimeState* state);
+    Status close_current_writer(RuntimeState* state);
+
+private:
+    std::unique_ptr<FileSystem> _fs;
+    std::shared_ptr<starrocks::parquet::AsyncFileWriter> _writer;
+    std::shared_ptr<::parquet::WriterProperties> _properties;
+    std::shared_ptr<::parquet::schema::GroupNode> _schema;
+    std::string _partition_location;
+    TableInfo _table_info;
+    int32_t _file_cnt = 0;
+    std::string _outfile_location;
+    Status _io_status;
+    std::vector<std::shared_ptr<starrocks::parquet::AsyncFileWriter>> _pending_commits;
+    int64_t _max_file_size;
+    std::vector<ExprContext*> _output_expr_ctxs;
+    RuntimeProfile* _parent_profile;
+    std::function<void(starrocks::parquet::AsyncFileWriter*, RuntimeState*)> _commit_func;
+    RuntimeState* _state;
+    int32_t _driver_id;
 };
 
 } // namespace starrocks

@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/catalog/RangePartitionInfoTest.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -22,12 +18,14 @@
 package com.starrocks.catalog;
 
 import com.google.common.collect.Lists;
-import com.starrocks.analysis.PartitionKeyDesc;
-import com.starrocks.analysis.PartitionKeyDesc.PartitionRangeType;
-import com.starrocks.analysis.PartitionValue;
-import com.starrocks.analysis.SingleRangePartitionDesc;
+import com.google.common.collect.Range;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.DdlException;
+import com.starrocks.sql.ast.PartitionKeyDesc;
+import com.starrocks.sql.ast.PartitionKeyDesc.PartitionRangeType;
+import com.starrocks.sql.ast.PartitionValue;
+import com.starrocks.sql.ast.SingleRangePartitionDesc;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -345,6 +343,21 @@ public class RangePartitionInfoTest {
             singleRangePartitionDesc.analyze(columns, null);
             partitionInfo.handleNewSinglePartitionDesc(singleRangePartitionDesc, 20000L, false);
         }
+    }
+
+    @Test
+    public void testCopyPartitionInfo() throws Exception {
+        Column k1 = new Column("k1", new ScalarType(PrimitiveType.INT), true, null, "", "");
+        partitionColumns.add(k1);
+        RangePartitionInfo rangePartitionInfo = new RangePartitionInfo(partitionColumns);
+        PartitionKey partitionKey = PartitionKey.createInfinityPartitionKey(partitionColumns, true);
+        Range<PartitionKey> range = Range.atLeast(partitionKey);
+        rangePartitionInfo.addPartition(123L, false, range, null, (short) 1,
+                false, null);
+        RangePartitionInfo copyInfo = (RangePartitionInfo) rangePartitionInfo.clone();
+        rangePartitionInfo.dropPartition(123L);
+        Assert.assertTrue(copyInfo.getRange(123L) != null);
+        Assert.assertTrue(rangePartitionInfo.getRange(123L) == null);
     }
 
 }

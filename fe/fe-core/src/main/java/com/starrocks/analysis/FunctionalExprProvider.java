@@ -1,8 +1,21 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package com.starrocks.analysis;
 
-import avro.shaded.com.google.common.collect.Maps;
-import com.clearspring.analytics.util.Lists;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import com.google.common.collect.ImmutableList;
 import com.starrocks.catalog.PrimitiveType;
 import com.starrocks.common.AnalysisException;
@@ -40,9 +53,9 @@ public abstract class FunctionalExprProvider<U> {
      * BiPredicate used to filter `LONG`, `DATETIME(will be converted from STRING to LONG)`
      * type values during the streaming process
      */
-    private static final BiPredicate<Long, Map.Entry<BinaryPredicate.Operator, Long>> LONG_BI_FILTER_FUNC =
+    private static final BiPredicate<Long, Map.Entry<BinaryType, Long>> LONG_BI_FILTER_FUNC =
             (num, entry) -> {
-                BinaryPredicate.Operator op = entry.getKey();
+                BinaryType op = entry.getKey();
                 Long rValue = entry.getValue();
                 switch (op) {
                     case EQ:
@@ -65,9 +78,9 @@ public abstract class FunctionalExprProvider<U> {
     /**
      * BiPredicate used to filter `STRING` type values during the streaming process
      */
-    private static final BiPredicate<String, Map.Entry<BinaryPredicate.Operator, StringLiteral>> STRING_BI_FILTER_FUNC =
+    private static final BiPredicate<String, Map.Entry<BinaryType, StringLiteral>> STRING_BI_FILTER_FUNC =
             (str, entry) -> {
-                BinaryPredicate.Operator op = entry.getKey();
+                BinaryType op = entry.getKey();
                 String rValue = entry.getValue().getStringValue();
                 switch (op) {
                     case EQ:
@@ -126,9 +139,23 @@ public abstract class FunctionalExprProvider<U> {
      */
     protected abstract boolean delegatePostRowFilter(ConnectContext ctx, U row);
 
+    @Deprecated
     public void analyze(Analyzer analyzer, Expr predicate, List<OrderByElement> orderByElements, LimitElement limit)
             throws AnalysisException {
         this.connCtx = analyzer.getContext();
+        // analyze where clase
+        predicateChain = null;
+        analyzeWhere(predicate);
+        connectPredicate(row -> delegatePostRowFilter(connCtx, row));
+        // analyze order by
+        analyzeOrder(orderByElements);
+        // analyze limit
+        analyzeLimit(limit);
+    }
+
+    public void analyze(ConnectContext connCtx, Expr predicate, List<OrderByElement> orderByElements, LimitElement limit)
+            throws AnalysisException {
+        this.connCtx = connCtx;
         // analyze where clase
         predicateChain = null;
         analyzeWhere(predicate);
@@ -186,8 +213,8 @@ public abstract class FunctionalExprProvider<U> {
                 }
                 if (PrimitiveType.VARCHAR == colValSupplier.get().getColumnType()) {
                     // handle predicates like `where col = 'starrocks'`
-                    if (binaryPredicate.getOp() != BinaryPredicate.Operator.EQ &&
-                            binaryPredicate.getOp() != BinaryPredicate.Operator.NE) {
+                    if (binaryPredicate.getOp() != BinaryType.EQ &&
+                            binaryPredicate.getOp() != BinaryType.NE) {
                         throw new AnalysisException(
                                 String.format(operatorNotSupported, binaryPredicate.getOp().toString(), leftKey));
                     }

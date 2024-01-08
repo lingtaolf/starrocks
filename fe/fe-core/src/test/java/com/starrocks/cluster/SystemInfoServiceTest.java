@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/cluster/SystemInfoServiceTest.java
 
@@ -22,24 +35,31 @@
 package com.starrocks.cluster;
 
 import com.google.common.collect.Lists;
-import com.starrocks.analysis.AddBackendClause;
 import com.starrocks.analysis.Analyzer;
-import com.starrocks.analysis.DropBackendClause;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.TabletInvertedIndex;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.DdlException;
-import com.starrocks.common.FeConstants;
+import com.starrocks.common.UserException;
+import com.starrocks.lake.StarOSAgent;
 import com.starrocks.persist.EditLog;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.RunMode;
+import com.starrocks.sql.ast.AddBackendClause;
+import com.starrocks.sql.ast.AlterSystemStmt;
+import com.starrocks.sql.ast.DropBackendClause;
 import com.starrocks.system.Backend;
+import com.starrocks.system.ComputeNode;
 import com.starrocks.system.SystemInfoService;
 import mockit.Expectations;
+import mockit.Mock;
+import mockit.MockUp;
 import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
 
 import java.io.BufferedInputStream;
 import java.io.DataInputStream;
@@ -48,13 +68,15 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 
 public class SystemInfoServiceTest {
 
     @Mocked
     private EditLog editLog;
     @Mocked
-    private Catalog catalog;
+    private GlobalStateMgr globalStateMgr;
     private SystemInfoService systemInfoService;
     private TabletInvertedIndex invertedIndex;
     @Mocked
@@ -85,46 +107,42 @@ public class SystemInfoServiceTest {
                 db.readUnlock();
                 minTimes = 0;
 
-                catalog.getNextId();
+                globalStateMgr.getNextId();
                 minTimes = 0;
                 result = backendId;
 
-                catalog.getEditLog();
+                globalStateMgr.getEditLog();
                 minTimes = 0;
                 result = editLog;
 
-                catalog.getDb(anyLong);
+                globalStateMgr.getDb(anyLong);
                 minTimes = 0;
                 result = db;
 
-                catalog.getCluster(anyString);
+                globalStateMgr.getCluster();
                 minTimes = 0;
                 result = new Cluster("cluster", 1);
 
-                catalog.clear();
+                globalStateMgr.clear();
                 minTimes = 0;
 
-                Catalog.getCurrentCatalog();
+                GlobalStateMgr.getCurrentState();
                 minTimes = 0;
-                result = catalog;
+                result = globalStateMgr;
 
                 systemInfoService = new SystemInfoService();
-                Catalog.getCurrentSystemInfo();
+                GlobalStateMgr.getCurrentSystemInfo();
                 minTimes = 0;
                 result = systemInfoService;
 
                 invertedIndex = new TabletInvertedIndex();
-                Catalog.getCurrentInvertedIndex();
+                GlobalStateMgr.getCurrentInvertedIndex();
                 minTimes = 0;
                 result = invertedIndex;
-
-                Catalog.getCurrentCatalogJournalVersion();
-                minTimes = 0;
-                result = FeConstants.meta_version;
             }
         };
 
-        analyzer = new Analyzer(catalog, new ConnectContext(null));
+        analyzer = new Analyzer(globalStateMgr, new ConnectContext(null));
     }
 
     public void mkdir(String dirString) {
@@ -179,78 +197,153 @@ public class SystemInfoServiceTest {
     }
 
     public void clearAllBackend() {
-        Catalog.getCurrentSystemInfo().dropAllBackend();
+        GlobalStateMgr.getCurrentSystemInfo().dropAllBackend();
     }
 
     @Test(expected = AnalysisException.class)
     public void validHostAndPortTest1() throws Exception {
         createHostAndPort(1);
-        systemInfoService.validateHostAndPort(hostPort);
+        systemInfoService.validateHostAndPort(hostPort, false);
     }
 
     @Test(expected = AnalysisException.class)
     public void validHostAndPortTest3() throws Exception {
         createHostAndPort(3);
-        systemInfoService.validateHostAndPort(hostPort);
+        systemInfoService.validateHostAndPort(hostPort, false);
     }
 
     @Test
     public void validHostAndPortTest4() throws Exception {
         createHostAndPort(4);
-        systemInfoService.validateHostAndPort(hostPort);
+        systemInfoService.validateHostAndPort(hostPort, false);
     }
 
     @Test
     public void addBackendTest() throws AnalysisException {
         clearAllBackend();
         AddBackendClause stmt = new AddBackendClause(Lists.newArrayList("192.168.0.1:1234"));
-        stmt.analyze(analyzer);
+        com.starrocks.sql.analyzer.Analyzer.analyze(new AlterSystemStmt(stmt), new ConnectContext(null));
         try {
-            Catalog.getCurrentSystemInfo().addBackends(stmt.getHostPortPairs(), true);
+            GlobalStateMgr.getCurrentSystemInfo().addBackends(stmt.getHostPortPairs());
         } catch (DdlException e) {
             Assert.fail();
         }
 
         try {
-            Catalog.getCurrentSystemInfo().addBackends(stmt.getHostPortPairs(), true);
+            GlobalStateMgr.getCurrentSystemInfo().addBackends(stmt.getHostPortPairs());
         } catch (DdlException e) {
             Assert.assertTrue(e.getMessage().contains("already exists"));
         }
 
-        Assert.assertNotNull(Catalog.getCurrentSystemInfo().getBackend(backendId));
-        Assert.assertNotNull(Catalog.getCurrentSystemInfo().getBackendWithHeartbeatPort("192.168.0.1", 1234));
+        Assert.assertNotNull(GlobalStateMgr.getCurrentSystemInfo().getBackend(backendId));
+        Assert.assertNotNull(GlobalStateMgr.getCurrentSystemInfo().getBackendWithHeartbeatPort("192.168.0.1", 1234));
 
-        Assert.assertTrue(Catalog.getCurrentSystemInfo().getBackendIds(false).size() == 1);
-        Assert.assertTrue(Catalog.getCurrentSystemInfo().getBackendIds(false).get(0) == backendId);
+        Assert.assertTrue(GlobalStateMgr.getCurrentSystemInfo().getTotalBackendNumber() == 1);
+        Assert.assertTrue(GlobalStateMgr.getCurrentSystemInfo().getBackendIds(false).get(0) == backendId);
 
-        Assert.assertTrue(Catalog.getCurrentSystemInfo().getBackendReportVersion(backendId) == 0L);
+        Assert.assertTrue(GlobalStateMgr.getCurrentSystemInfo().getBackendReportVersion(backendId) == 0L);
 
-        Catalog.getCurrentSystemInfo().updateBackendReportVersion(backendId, 2L, 20000L);
-        Assert.assertTrue(Catalog.getCurrentSystemInfo().getBackendReportVersion(backendId) == 2L);
+        GlobalStateMgr.getCurrentSystemInfo().updateBackendReportVersion(backendId, 2L, 20000L);
+        Assert.assertTrue(GlobalStateMgr.getCurrentSystemInfo().getBackendReportVersion(backendId) == 2L);
+    }
+
+    @Test
+    public void addComputeNodeTest() throws AnalysisException {
+        clearAllBackend();
+        AddBackendClause stmt = new AddBackendClause(Lists.newArrayList("192.168.0.1:1234"));
+        com.starrocks.sql.analyzer.Analyzer.analyze(new AlterSystemStmt(stmt), new ConnectContext(null));
+
+        try {
+            GlobalStateMgr.getCurrentSystemInfo().addComputeNodes(stmt.getHostPortPairs());
+        } catch (DdlException e) {
+            Assert.fail();
+        }
+
+        Assert.assertNotNull(GlobalStateMgr.getCurrentSystemInfo().
+                getComputeNodeWithHeartbeatPort("192.168.0.1", 1234));
+
+        try {
+            GlobalStateMgr.getCurrentSystemInfo().addBackends(stmt.getHostPortPairs());
+        } catch (DdlException e) {
+            Assert.assertTrue(e.getMessage().contains("Compute node already exists with same host"));
+        }
     }
 
     @Test
     public void removeBackendTest() throws AnalysisException {
         clearAllBackend();
         AddBackendClause stmt = new AddBackendClause(Lists.newArrayList("192.168.0.1:1234"));
-        stmt.analyze(analyzer);
+        com.starrocks.sql.analyzer.Analyzer.analyze(new AlterSystemStmt(stmt), new ConnectContext(null));
         try {
-            Catalog.getCurrentSystemInfo().addBackends(stmt.getHostPortPairs(), true);
+            GlobalStateMgr.getCurrentSystemInfo().addBackends(stmt.getHostPortPairs());
         } catch (DdlException e) {
             e.printStackTrace();
         }
 
         DropBackendClause dropStmt = new DropBackendClause(Lists.newArrayList("192.168.0.1:1234"));
-        dropStmt.analyze(analyzer);
+        com.starrocks.sql.analyzer.Analyzer.analyze(new AlterSystemStmt(dropStmt), new ConnectContext(null));
         try {
-            Catalog.getCurrentSystemInfo().dropBackends(dropStmt.getHostPortPairs());
+            GlobalStateMgr.getCurrentSystemInfo().dropBackends(dropStmt);
         } catch (DdlException e) {
             e.printStackTrace();
             Assert.fail();
         }
 
         try {
-            Catalog.getCurrentSystemInfo().dropBackends(dropStmt.getHostPortPairs());
+            GlobalStateMgr.getCurrentSystemInfo().dropBackends(dropStmt);
+        } catch (DdlException e) {
+            Assert.assertTrue(e.getMessage().contains("does not exist"));
+        }
+
+        new MockUp<RunMode>() {
+            @Mock
+            public RunMode getCurrentRunMode() {
+                return RunMode.SHARED_DATA;
+            }
+        };
+
+        StarOSAgent starosAgent = new StarOSAgent();
+        new Expectations(starosAgent) {
+            {
+                try {
+                    starosAgent.removeWorker("192.168.0.1:1235");
+                    minTimes = 0;
+                    result = null;
+                } catch (DdlException e) {
+                    e.printStackTrace();
+                }
+            }
+        };
+
+        new MockUp<GlobalStateMgr>() {
+            @Mock
+            StarOSAgent getStarOSAgent() {
+                return starosAgent;
+            }
+        };
+
+        AddBackendClause stmt2 = new AddBackendClause(Lists.newArrayList("192.168.0.1:1235"));
+        com.starrocks.sql.analyzer.Analyzer.analyze(new AlterSystemStmt(stmt2), new ConnectContext(null));
+
+        try {
+            GlobalStateMgr.getCurrentSystemInfo().addBackends(stmt2.getHostPortPairs());
+        } catch (DdlException e) {
+            e.printStackTrace();
+        }
+
+        DropBackendClause dropStmt2 = new DropBackendClause(Lists.newArrayList("192.168.0.1:1235"));
+        com.starrocks.sql.analyzer.Analyzer.analyze(new AlterSystemStmt(dropStmt2), new ConnectContext(null));
+
+        try {
+            GlobalStateMgr.getCurrentSystemInfo().dropBackends(dropStmt2);
+        } catch (DdlException e) {
+            e.printStackTrace();
+            Assert.assertTrue(e.getMessage()
+                    .contains("starletPort has not been updated by heartbeat from this backend"));
+        }
+
+        try {
+            GlobalStateMgr.getCurrentSystemInfo().dropBackends(dropStmt2);
         } catch (DdlException e) {
             Assert.assertTrue(e.getMessage().contains("does not exist"));
         }
@@ -264,13 +357,13 @@ public class SystemInfoServiceTest {
         File file = new File(dir, "image");
         file.createNewFile();
         DataOutputStream dos = new DataOutputStream(new FileOutputStream(file));
-        SystemInfoService systemInfoService = Catalog.getCurrentSystemInfo();
+        SystemInfoService systemInfoService = GlobalStateMgr.getCurrentSystemInfo();
         Backend back1 = new Backend(1L, "localhost", 3);
         back1.updateOnce(4, 6, 8);
         systemInfoService.replayAddBackend(back1);
         long checksum1 = systemInfoService.saveBackends(dos, 0);
-        catalog.clear();
-        catalog = null;
+        globalStateMgr.clear();
+        globalStateMgr = null;
         dos.close();
 
         DataInputStream dis = new DataInputStream(new BufferedInputStream(new FileInputStream(file)));
@@ -282,6 +375,57 @@ public class SystemInfoServiceTest {
         dis.close();
 
         deleteDir(dir);
+    }
+
+    @Test
+    public void testSeqChooseComputeNodes() {
+        clearAllBackend();
+        AddBackendClause stmt = new AddBackendClause(Lists.newArrayList("192.168.0.1:1234"));
+        com.starrocks.sql.analyzer.Analyzer.analyze(new AlterSystemStmt(stmt), new ConnectContext(null));
+
+        try {
+            GlobalStateMgr.getCurrentSystemInfo().addComputeNodes(stmt.getHostPortPairs());
+        } catch (DdlException e) {
+            Assert.fail();
+        }
+
+        Assert.assertNotNull(GlobalStateMgr.getCurrentSystemInfo().
+                getComputeNodeWithHeartbeatPort("192.168.0.1", 1234));
+
+        List<Long> longList = GlobalStateMgr.getCurrentSystemInfo().seqChooseComputeNodes(1, false, false);
+        Assert.assertEquals(1, longList.size());
+        ComputeNode computeNode = new ComputeNode();
+        computeNode.setHost("192.168.0.1");
+        computeNode.setHttpPort(9030);
+        computeNode.setAlive(true);
+        GlobalStateMgr.getCurrentSystemInfo().addComputeNode(computeNode);
+        List<Long> computeNods = GlobalStateMgr.getCurrentSystemInfo().seqChooseComputeNodes(1, true, false);
+        Assert.assertEquals(1, computeNods.size());
+
+        // test seqChooseBackendOrComputeId func
+        Exception exception = Assertions.assertThrows(UserException.class, () -> {
+            GlobalStateMgr.getCurrentSystemInfo().seqChooseBackendOrComputeId();
+        });
+        Assert.assertTrue(exception.getMessage().contains("No backend alive."));
+
+        new MockUp<RunMode>() {
+            @Mock
+            public RunMode getCurrentRunMode() {
+                return RunMode.SHARED_DATA;
+            }
+        };
+        new MockUp<SystemInfoService>() {
+            @Mock
+            public List<Long> seqChooseComputeNodes(int computeNodeNum,
+                                                    boolean needAvailable, boolean isCreate) {
+                return new ArrayList<>();
+            }
+        };
+
+        exception = Assert.assertThrows(UserException.class, () -> {
+            GlobalStateMgr.getCurrentSystemInfo().seqChooseBackendOrComputeId();
+        });
+        Assert.assertTrue(exception.getMessage().contains("No backend or compute node alive."));
     }
 
 }

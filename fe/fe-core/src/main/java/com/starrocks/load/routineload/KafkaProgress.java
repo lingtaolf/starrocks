@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/load/routineload/KafkaProgress.java
 
@@ -26,12 +39,11 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.gson.Gson;
+import com.google.gson.annotations.SerializedName;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.Pair;
 import com.starrocks.common.UserException;
-import com.starrocks.common.util.DebugUtil;
 import com.starrocks.common.util.KafkaUtil;
-import com.starrocks.thrift.TKafkaRLTaskProgress;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -59,15 +71,18 @@ public class KafkaProgress extends RoutineLoadProgress {
     public static final long OFFSET_END_VAL = -1;
 
     // (partition id, begin offset)
+    @SerializedName("po")
     private Map<Integer, Long> partitionIdToOffset = Maps.newConcurrentMap();
 
     public KafkaProgress() {
         super(LoadDataSourceType.KAFKA);
     }
 
-    public KafkaProgress(TKafkaRLTaskProgress tKafkaRLTaskProgress) {
+    public KafkaProgress(Map<Integer, Long> partitionOffsets) {
         super(LoadDataSourceType.KAFKA);
-        this.partitionIdToOffset = tKafkaRLTaskProgress.getPartitionCmtOffset();
+        if (partitionOffsets != null) {
+            this.partitionIdToOffset = partitionOffsets;
+        }
     }
 
     public Map<Integer, Long> getPartitionIdToOffset(List<Integer> partitionIds) {
@@ -80,6 +95,10 @@ public class KafkaProgress extends RoutineLoadProgress {
             }
         }
         return result;
+    }
+
+    public ImmutableMap<Integer, Long> getPartitionIdToOffset() {
+        return ImmutableMap.copyOf(partitionIdToOffset);
     }
 
     public void addPartitionOffset(Pair<Integer, Long> partitionOffset) {
@@ -119,17 +138,19 @@ public class KafkaProgress extends RoutineLoadProgress {
         }
     }
 
-    // modify the partition offset of this progess.
-    // throw exception is the specified partition does not exist in progress.
+    // modify the partition offset of this progress.
+    // all partitions are validated by the caller
     public void modifyOffset(List<Pair<Integer, Long>> kafkaPartitionOffsets) throws DdlException {
         for (Pair<Integer, Long> pair : kafkaPartitionOffsets) {
-            if (!partitionIdToOffset.containsKey(pair.first)) {
-                throw new DdlException("The specified partition " + pair.first + " is not in the consumed partitions");
-            }
-        }
-
-        for (Pair<Integer, Long> pair : kafkaPartitionOffsets) {
             partitionIdToOffset.put(pair.first, pair.second);
+        }
+        // update kafkaPartitionOffsets as well, so that the current partitonIdToOffset can be completely persisted
+        for (Integer partitionId : partitionIdToOffset.keySet()) {
+            Pair<Integer, Long> pair = new Pair<>(partitionId, partitionIdToOffset.get(partitionId));
+            if (!kafkaPartitionOffsets.contains(pair)) {
+                LOG.info("add {} to kafkaPartitionOffsets {}", pair, kafkaPartitionOffsets);
+                kafkaPartitionOffsets.add(pair);
+            }
         }
     }
 
@@ -177,13 +198,11 @@ public class KafkaProgress extends RoutineLoadProgress {
     }
 
     @Override
-    public void update(RLTaskTxnCommitAttachment attachment) {
-        KafkaProgress newProgress = (KafkaProgress) attachment.getProgress();
+    public void update(RoutineLoadProgress progress) {
+        KafkaProgress newProgress = (KafkaProgress) progress;
         // + 1 to point to the next msg offset to be consumed
         newProgress.partitionIdToOffset.entrySet().stream()
                 .forEach(entity -> this.partitionIdToOffset.put(entity.getKey(), entity.getValue() + 1));
-        LOG.debug("update kafka progress: {}, task: {}, job: {}",
-                newProgress.toJsonString(), DebugUtil.printId(attachment.getTaskId()), attachment.getJobId());
     }
 
     @Override

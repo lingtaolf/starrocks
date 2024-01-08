@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/mysql/privilege/RoleManager.java
 
@@ -26,20 +39,26 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.analysis.ResourcePattern;
 import com.starrocks.analysis.TablePattern;
-import com.starrocks.analysis.UserIdentity;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.io.Writable;
 import com.starrocks.mysql.privilege.Auth.PrivLevel;
+import com.starrocks.sql.ast.UserIdentity;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class RoleManager implements Writable {
-    private Map<String, Role> roles = Maps.newHashMap();
+    private static final Logger LOG = LogManager.getLogger(RoleManager.class);
+    protected Map<String, Role> roles = Maps.newHashMap();
 
     public RoleManager() {
         roles.put(Role.OPERATOR.getRoleName(), Role.OPERATOR);
@@ -123,10 +142,29 @@ public class RoleManager implements Writable {
         return existingRole;
     }
 
+    public Role revokePrivs(String role, UserIdentity securedUser) throws DdlException {
+        Role existingRole = roles.get(role);
+        if (existingRole == null) {
+            throw new DdlException("Role " + role + " does not exist");
+        }
+        existingRole.getImpersonateUsers().remove(securedUser);
+        return existingRole;
+    }
+
     public void dropUser(UserIdentity userIdentity) {
         for (Role role : roles.values()) {
             role.dropUser(userIdentity);
         }
+    }
+
+    public List<String> getRoleNamesByUser(UserIdentity userIdentity) {
+        List<String> ret = new ArrayList<>();
+        for (Role role : roles.values()) {
+            if (role.getUsers().contains(userIdentity)) {
+                ret.add(role.getRoleName());
+            }
+        }
+        return ret;
     }
 
     public void getRoleInfo(List<List<String>> results) {
@@ -146,7 +184,7 @@ public class RoleManager implements Writable {
                 }
             }
             if (!hasGlobal) {
-                info.add(FeConstants.null_string);
+                info.add(FeConstants.NULL_STRING);
             }
 
             // db
@@ -157,7 +195,7 @@ public class RoleManager implements Writable {
                 }
             }
             if (tmp.isEmpty()) {
-                info.add(FeConstants.null_string);
+                info.add(FeConstants.NULL_STRING);
             } else {
                 info.add(Joiner.on("; ").join(tmp));
             }
@@ -170,7 +208,7 @@ public class RoleManager implements Writable {
                 }
             }
             if (tmp.isEmpty()) {
-                info.add(FeConstants.null_string);
+                info.add(FeConstants.NULL_STRING);
             } else {
                 info.add(Joiner.on("; ").join(tmp));
             }
@@ -183,7 +221,7 @@ public class RoleManager implements Writable {
                 }
             }
             if (tmp.isEmpty()) {
-                info.add(FeConstants.null_string);
+                info.add(FeConstants.NULL_STRING);
             } else {
                 info.add(Joiner.on("; ").join(tmp));
             }
@@ -216,6 +254,28 @@ public class RoleManager implements Writable {
             Role role = Role.read(in);
             roles.put(role.getRoleName(), role);
         }
+    }
+
+    protected void loadImpersonateRoleToUser(Map<String, Set<UserIdentity>> impersonateRoleToUser) {
+        for (Map.Entry<String, Set<UserIdentity>> entry : impersonateRoleToUser.entrySet()) {
+            Role role = getRole(entry.getKey());
+            if (role == null) {
+                LOG.error("find non-existing role {} -> impersonate users {}", entry.getKey(), entry.getValue());
+                continue;
+            }
+            role.setImpersonateUsers(entry.getValue());
+        }
+    }
+
+    protected Map<String, Set<UserIdentity>> dumpImpersonateRoleToUser() {
+        Map<String, Set<UserIdentity>> ret = new HashMap<>();
+        for (Map.Entry<String, Role> entry : roles.entrySet()) {
+            Set<UserIdentity> users = entry.getValue().getImpersonateUsers();
+            if (!users.isEmpty()) {
+                ret.put(entry.getKey(), users);
+            }
+        }
+        return ret;
     }
 
     @Override

@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/planner/EmptySetNode.java
 
@@ -24,6 +37,7 @@ package com.starrocks.planner;
 import com.google.common.base.Preconditions;
 import com.starrocks.analysis.Analyzer;
 import com.starrocks.analysis.TupleId;
+import com.starrocks.thrift.TNormalPlanNode;
 import com.starrocks.thrift.TPlanNode;
 import com.starrocks.thrift.TPlanNodeType;
 
@@ -45,21 +59,10 @@ public class EmptySetNode extends PlanNode {
     public void computeStats(Analyzer analyzer) {
         avgRowSize = 0;
         cardinality = 0;
-        numNodes = 1;
     }
 
     @Override
     public void init(Analyzer analyzer) {
-        Preconditions.checkState(conjuncts.isEmpty());
-        // If the physical output tuple produced by an AnalyticEvalNode wasn't created
-        // the logical output tuple is returned by getMaterializedTupleIds(). It needs
-        // to be set as materialized (even though it isn't) to avoid failing precondition
-        // checks generating the thrift for slot refs that may reference this tuple.
-        for (TupleId id : tupleIds) {
-            analyzer.getTupleDesc(id).setIsMaterialized(true);
-        }
-        computeMemLayout(analyzer);
-        computeStats(analyzer);
     }
 
     @Override
@@ -68,13 +71,12 @@ public class EmptySetNode extends PlanNode {
     }
 
     @Override
-    public boolean isVectorized() {
-        return true;
+    public boolean canUseRuntimeAdaptiveDop() {
+        return getChildren().stream().allMatch(PlanNode::canUseRuntimeAdaptiveDop);
     }
 
     @Override
-    public void setUseVectorized(boolean flag) {
-        this.useVectorized = flag;
+    protected void toNormalForm(TNormalPlanNode planNode, FragmentNormalizer normalizer) {
+        planNode.setNode_type(TPlanNodeType.EXCHANGE_NODE);
     }
-
 }

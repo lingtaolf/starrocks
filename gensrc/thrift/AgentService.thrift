@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/gensrc/thrift/AgentService.thrift
 
@@ -37,13 +50,17 @@ struct TTabletSchema {
     5: required list<Descriptors.TColumn> columns
     6: optional double bloom_filter_fpp
     7: optional list<Descriptors.TOlapTableIndex> indexes
-    8: optional bool is_in_memory
+    8: optional bool is_in_memory // Deprecated
+    9: optional i64 id;
+    10: optional list<i32> sort_key_idxes
+    11: optional list<i32> sort_key_unique_ids
+    12: optional i32 schema_version;
 }
 
 // this enum stands for different storage format in src_backends
 // V1 for Segment-V1
 // V2 for Segment-V2
-enum TStorageFormat {
+enum TStorageFormat { //Deprecated
     DEFAULT,
     V1,
     V2
@@ -51,15 +68,37 @@ enum TStorageFormat {
 
 enum TTabletType {
     TABLET_TYPE_DISK = 0,
-    TABLET_TYPE_MEMORY = 1
+    TABLET_TYPE_MEMORY = 1,
+    TABLET_TYPE_LAKE = 2
+}
+
+enum TTxnType {
+    TXN_NORMAL = 0,
+    TXN_REPLICATION = 1
+}
+
+struct TBinlogConfig {
+    // Version of the configuration, and FE should deliver it to
+    // the BE when executing 'ALTER TABLE'. The configuration with
+    // a higher version can override that with a lower version.
+    1: optional i64 version;
+    2: optional bool binlog_enable;
+    3: optional i64 binlog_ttl_second;
+    4: optional i64 binlog_max_size;
+}
+
+// If you want to add types,
+// don't forget to also add type to PersistentIndexTypePB
+enum TPersistentIndexType {
+    LOCAL = 0
+    CLOUD_NATIVE = 1
 }
 
 struct TCreateTabletReq {
     1: required Types.TTabletId tablet_id
     2: required TTabletSchema tablet_schema
     3: optional Types.TVersion version
-    // Deprecated
-    4: optional Types.TVersionHash version_hash 
+    4: optional Types.TVersionHash version_hash // Deprecated
     5: optional Types.TStorageMedium storage_medium
     6: optional bool in_restore_mode
     // this new tablet should be colocate with base tablet
@@ -72,13 +111,21 @@ struct TCreateTabletReq {
     11: optional i64 allocation_term
     // indicate whether this tablet is a compute storage split mode, we call it "eco mode"
     12: optional bool is_eco_mode
-    13: optional TStorageFormat storage_format
+    13: optional TStorageFormat storage_format //Deprecated
     14: optional TTabletType tablet_type
+    15: optional bool enable_persistent_index
+    16: optional Types.TCompressionType compression_type = Types.TCompressionType.LZ4_FRAME
+    17: optional TBinlogConfig binlog_config;
+    18: optional TPersistentIndexType persistent_index_type;
+    19: optional i32 primary_index_cache_expire_sec;
+    // Whether or not need to create a separate file to hold schema information.
+    20: optional bool create_schema_file = true;
 }
 
 struct TDropTabletReq {
     1: required Types.TTabletId tablet_id
     2: optional Types.TSchemaHash schema_hash
+    3: optional bool force
 }
 
 struct TAlterTabletReq {
@@ -86,6 +133,19 @@ struct TAlterTabletReq {
     2: required Types.TSchemaHash base_schema_hash
     3: required TCreateTabletReq new_tablet_req
 }
+
+struct TAlterTabletMaterializedColumnReq {
+    1: optional InternalService.TQueryGlobals query_globals
+    2: optional InternalService.TQueryOptions query_options
+    3: optional map<i32, Exprs.TExpr> mc_exprs
+}
+
+enum TAlterJobType {
+    ROLLUP = 0,
+    SCHEMA_CHANGE = 1,
+    DECOMMISSION_BACKEND = 2
+}
+
 
 // This v2 request will replace the old TAlterTabletReq.
 // TAlterTabletReq should be deprecated after new alter job process merged.
@@ -96,8 +156,19 @@ struct TAlterTabletReqV2 {
     4: required Types.TSchemaHash new_schema_hash
     // version of data which this alter task should transform
     5: optional Types.TVersion alter_version
-    6: optional Types.TVersionHash alter_version_hash // Deprecated
     7: optional list<TAlterMaterializedViewParam> materialized_view_params
+    8: optional TTabletType tablet_type
+    9: optional i64 txn_id
+    10: optional TAlterTabletMaterializedColumnReq materialized_column_req
+    11: optional i64 job_id
+    12: optional InternalService.TQueryGlobals query_globals
+    13: optional InternalService.TQueryOptions query_options
+    14: optional list<Descriptors.TColumn> columns
+    // synchronized materialized view parameters
+    15: optional TAlterJobType alter_job_type = TAlterJobType.SCHEMA_CHANGE
+    16: optional Descriptors.TDescriptorTable desc_tbl
+    17: optional Exprs.TExpr where_expr
+    18: optional list<string> base_table_column_names 
 }
 
 struct TAlterMaterializedViewParam {
@@ -131,8 +202,13 @@ struct TPushReq {
     // 14 and 15 are used by spark load
     14: optional PlanNodes.TBrokerScanRange broker_scan_range
     15: optional Descriptors.TDescriptorTable desc_tbl
+    16: optional list<Descriptors.TColumn> columns_desc
 
     30: optional bool use_vectorized
+    // 31 are used by spark load
+    31: optional string timezone
+
+    32: optional TTabletType tablet_type
 }
 
 struct TCloneReq {
@@ -143,10 +219,12 @@ struct TCloneReq {
     // these are visible version(hash) actually
     5: optional Types.TVersion committed_version
     6: optional Types.TVersionHash committed_version_hash // Deprecated
-    7: optional i32 task_version;
-    8: optional i64 src_path_hash;
-    9: optional i64 dest_path_hash;
-    10: optional i32 timeout_s;
+    7: optional i32 task_version
+    8: optional i64 src_path_hash
+    9: optional i64 dest_path_hash
+    10: optional i32 timeout_s
+
+    30: optional bool is_local
 }
 
 struct TStorageMediumMigrateReq {
@@ -170,11 +248,23 @@ struct TCheckConsistencyReq {
     4: required Types.TVersionHash version_hash // Deprecated
 }
 
+struct TCompactionReq {
+    1: optional list<Types.TTableId> tablet_ids
+    2: optional bool is_base_compaction
+}
+
 struct TUploadReq {
     1: required i64 job_id;
     2: required map<string, string> src_dest_map
     3: required Types.TNetworkAddress broker_addr
     4: optional map<string, string> broker_prop
+    // If use_broker is set, we will write hdfs thourgh broker
+    // If use_broker is not set, we will write through libhdfs/S3 directly
+    5: optional bool use_broker
+    // hdfs_write_buffer_size_kb for writing through lib hdfs directly
+    6: optional i32 hdfs_write_buffer_size_kb = 0
+    // properties from hdfs-site.xml, core-site.xml and load_properties
+    7: optional PlanNodes.THdfsProperties hdfs_properties 
 }
 
 struct TDownloadReq {
@@ -182,12 +272,19 @@ struct TDownloadReq {
     2: required map<string, string> src_dest_map
     3: required Types.TNetworkAddress broker_addr
     4: optional map<string, string> broker_prop
+    // If use_broker is set, we will write hdfs thourgh broker
+    // If use_broker is not set, we will write through libhdfs/S3 directly
+    5: optional bool use_broker
+    // hdfs_read_buffer_size_kb for writing through lib hdfs directly
+    6: optional i32 hdfs_read_buffer_size_kb = 0
+    // properties from hdfs-site.xml, core-site.xml and load_properties
+    7: optional PlanNodes.THdfsProperties hdfs_properties 
 }
 
 struct TSnapshotRequest {
     1: required Types.TTabletId tablet_id
     2: required Types.TSchemaHash schema_hash
-    3: optional Types.TVersion version
+    3: optional Types.TVersion version // not used
     4: optional Types.TVersionHash version_hash // Deprecated
     5: optional i64 timeout
     6: optional list<Types.TVersion> missing_version
@@ -195,6 +292,11 @@ struct TSnapshotRequest {
     // if all nodes has been upgraded, it can be removed.
     8: optional bool allow_incremental_clone
     9: optional i32 preferred_snapshot_format = Types.TPREFER_SNAPSHOT_REQ_VERSION
+    // new format to replace `missing_version`, currently only used for primary tablet snapshot
+    // [range1_start, range1_end(inclusive), ... rangeN_start (implicit to INT64_MAX)]
+    // size must be 2*N + 1
+    10:optional list<Types.TVersion> missing_version_ranges
+    11:optional bool is_restore_task = false;
 }
 
 struct TReleaseSnapshotRequest {
@@ -210,6 +312,7 @@ struct TPartitionVersionInfo {
     1: required Types.TPartitionId partition_id
     2: required Types.TVersion version
     3: required Types.TVersionHash version_hash // Deprecated
+    4: optional TBinlogConfig binlog_config
 }
 
 struct TMoveDirReq {
@@ -220,6 +323,10 @@ struct TMoveDirReq {
     5: required bool overwrite
 }
 
+struct TDropAutoIncrementMapReq {
+    1: required i64 table_id
+}
+
 enum TAgentServiceVersion {
     V1
 }
@@ -228,7 +335,11 @@ struct TPublishVersionRequest {
     1: required Types.TTransactionId transaction_id
     2: required list<TPartitionVersionInfo> partition_version_infos
     // strict mode means BE will check tablet missing version
-    3: optional bool strict_mode = false
+    3: optional bool strict_mode = false // Deprecated
+    4: optional i64 commit_timestamp
+    5: optional string txn_trace_parent
+    6: optional bool enable_sync_publish = false
+    7: optional TTxnType txn_type = TTxnType.TXN_NORMAL
 }
 
 struct TClearAlterTaskRequest {
@@ -239,6 +350,7 @@ struct TClearAlterTaskRequest {
 struct TClearTransactionTaskRequest {
     1: required Types.TTransactionId transaction_id
     2: required list<Types.TPartitionId> partition_id
+    3: optional TTxnType txn_type = TTxnType.TXN_NORMAL
 }
 
 struct TRecoverTabletReq {
@@ -248,9 +360,56 @@ struct TRecoverTabletReq {
     4: optional Types.TVersionHash version_hash // Deprecated
 }
 
+struct TRemoteSnapshotRequest {
+     1: optional Types.TTransactionId transaction_id
+     2: optional Types.TTableId table_id
+     3: optional Types.TPartitionId partition_id
+     4: optional Types.TTabletId tablet_id
+     5: optional TTabletType tablet_type
+     6: optional Types.TSchemaHash schema_hash
+     7: optional Types.TVersion visible_version
+     8: optional string src_token
+     9: optional Types.TTabletId src_tablet_id
+     10: optional TTabletType src_tablet_type
+     11: optional Types.TSchemaHash src_schema_hash
+     12: optional Types.TVersion src_visible_version
+     13: optional list<Types.TBackend> src_backends
+     14: optional i32 timeout_sec
+ }
+
+ struct TRemoteSnapshotInfo {
+     1: optional Types.TBackend backend
+     2: optional string snapshot_path
+     3: optional bool incremental_snapshot
+ }
+
+ struct TReplicateSnapshotRequest {
+     1: optional Types.TTransactionId transaction_id
+     2: optional Types.TTableId table_id
+     3: optional Types.TPartitionId partition_id
+     4: optional Types.TTabletId tablet_id
+     5: optional TTabletType tablet_type
+     6: optional Types.TSchemaHash schema_hash
+     7: optional Types.TVersion visible_version
+     8: optional string src_token
+     9: optional Types.TTabletId src_tablet_id
+     10: optional TTabletType src_tablet_type
+     11: optional Types.TSchemaHash src_schema_hash
+     12: optional Types.TVersion src_visible_version
+     13: optional list<TRemoteSnapshotInfo> src_snapshot_infos
+ }
+
 enum TTabletMetaType {
     PARTITIONID,
-    INMEMORY
+    INMEMORY,
+    ENABLE_PERSISTENT_INDEX,
+    WRITE_QUORUM,
+    REPLICATED_STORAGE,
+    DISABLE_BINLOG,
+    BINLOG_CONFIG,
+    BUCKET_SIZE,
+    PRIMARY_INDEX_CACHE_EXPIRE_SEC,
+    STORAGE_TYPE
 }
 
 struct TTabletMetaInfo {
@@ -258,11 +417,17 @@ struct TTabletMetaInfo {
     2: optional Types.TSchemaHash schema_hash
     3: optional Types.TPartitionId partition_id
     4: optional TTabletMetaType meta_type
-    5: optional bool is_in_memory
+    5: optional bool is_in_memory // Deprecated
+    6: optional bool enable_persistent_index
+    7: optional TBinlogConfig binlog_config
+    8: optional i32 primary_index_cache_expire_sec
 }
 
 struct TUpdateTabletMetaInfoReq {
     1: optional list<TTabletMetaInfo> tabletMetaInfos
+    // for update lake tablet meta
+    2: optional TTabletType tablet_type
+    3: optional i64 txn_id
 }
 
 struct TPluginMetaInfo {
@@ -300,6 +465,10 @@ struct TAgentTaskRequest {
     24: optional TAlterTabletReqV2 alter_tablet_req_v2
     25: optional i64 recv_time // time the task is inserted to queue
     26: optional TUpdateTabletMetaInfoReq update_tablet_meta_info_req
+    27: optional TDropAutoIncrementMapReq drop_auto_increment_map_req
+    28: optional TCompactionReq compaction_req
+    29: optional TRemoteSnapshotRequest remote_snapshot_req
+    30: optional TReplicateSnapshotRequest replicate_snapshot_req
 }
 
 struct TAgentResult {

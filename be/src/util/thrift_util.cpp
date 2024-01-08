@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/util/thrift_util.cpp
 
@@ -27,9 +40,6 @@
 #include <thrift/transport/TServerSocket.h>
 #include <thrift/transport/TSocket.h>
 
-#include <boost/thread.hpp>
-
-#include "gen_cpp/Data_types.h"
 #include "gen_cpp/Types_types.h"
 #include "util/hash_util.hpp"
 #include "util/monotime.h"
@@ -59,9 +69,12 @@ ThriftSerializer::ThriftSerializer(bool compact, int initial_buffer_size)
 }
 
 std::shared_ptr<apache::thrift::protocol::TProtocol> create_deserialize_protocol(
-        std::shared_ptr<apache::thrift::transport::TMemoryBuffer> mem, bool compact) {
-    if (compact) {
+        const std::shared_ptr<apache::thrift::transport::TMemoryBuffer>& mem, TProtocolType type) {
+    if (type == TProtocolType::COMPACT) {
         apache::thrift::protocol::TCompactProtocolFactoryT<apache::thrift::transport::TMemoryBuffer> tproto_factory;
+        return tproto_factory.getProtocol(mem);
+    } else if (type == TProtocolType::JSON) {
+        apache::thrift::protocol::TJSONProtocolFactory tproto_factory;
         return tproto_factory.getProtocol(mem);
     } else {
         apache::thrift::protocol::TBinaryProtocolFactoryT<apache::thrift::transport::TMemoryBuffer> tproto_factory;

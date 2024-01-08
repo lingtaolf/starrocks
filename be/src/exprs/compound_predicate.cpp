@@ -1,94 +1,123 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exprs/compound_predicate.cpp
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "exprs/compound_predicate.h"
 
-#include <sstream>
-
-#include "runtime/runtime_state.h"
-#include "util/debug_util.h"
+#include "common/object_pool.h"
+#include "exprs/binary_function.h"
+#include "exprs/predicate.h"
+#include "exprs/unary_function.h"
 
 namespace starrocks {
 
-CompoundPredicate::CompoundPredicate(const TExprNode& node) : Predicate(node) {}
-#if 0
-Status CompoundPredicate::prepare(RuntimeState* state, const RowDescriptor& desc) {
-    DCHECK_LE(_children.size(), 2);
-    return Expr::prepare(state, desc);
-}
-#endif
+#define DEFINE_COMPOUND_CONSTRUCT(CLASS)              \
+    CLASS(const TExprNode& node) : Predicate(node) {} \
+    virtual ~CLASS() {}                               \
+    virtual Expr* clone(ObjectPool* pool) const override { return pool->add(new CLASS(*this)); }
 
-void CompoundPredicate::init() {}
-
-BooleanVal CompoundPredicate::compound_not(FunctionContext* context, const BooleanVal& v) {
-    if (v.is_null) {
-        return BooleanVal::null();
-    }
-    return BooleanVal(!v.val);
+/**
+ * IS NULL AND IS NULL = IS NULL
+ * IS NOT NULL AND IS NOT NULL = IS NOT NULL
+ * TRUE AND IS NULL = IS NULL
+ * FALSE AND IS NULL = IS NOT NULL(FALSE)
+ */
+DEFINE_LOGIC_NULL_BINARY_FUNCTION_WITH_IMPL(AndNullImpl, l_value, l_null, r_value, r_null) {
+    return (l_null & r_null) | (r_null & (l_null ^ l_value)) | (l_null & (r_null ^ r_value));
 }
 
-BooleanVal AndPredicate::get_boolean_val(ExprContext* context, TupleRow* row) {
-    DCHECK_EQ(_children.size(), 2);
-    BooleanVal val1 = _children[0]->get_boolean_val(context, row);
-    if (!val1.is_null && !val1.val) {
-        return BooleanVal(false);
-    }
-    BooleanVal val2 = _children[1]->get_boolean_val(context, row);
-    if (!val2.is_null && !val2.val) {
-        return BooleanVal(false);
-    }
-    if (val1.is_null || val2.is_null) {
-        return BooleanVal::null();
-    }
-    return BooleanVal(true);
+DEFINE_BINARY_FUNCTION_WITH_IMPL(AndImpl, l_value, r_value) {
+    return l_value & r_value;
 }
 
-BooleanVal OrPredicate::get_boolean_val(ExprContext* context, TupleRow* row) {
-    DCHECK_EQ(_children.size(), 2);
-    BooleanVal val1 = _children[0]->get_boolean_val(context, row);
-    if (!val1.is_null && val1.val) {
-        return BooleanVal(true);
+class VectorizedAndCompoundPredicate final : public Predicate {
+public:
+    DEFINE_COMPOUND_CONSTRUCT(VectorizedAndCompoundPredicate);
+    StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, ptr));
+        int l_falses = ColumnHelper::count_false_with_notnull(l);
+
+        // left all false and not null
+        if (l_falses == l->size()) {
+            return l->clone();
+        }
+
+        ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_checked(context, ptr));
+
+        return VectorizedLogicPredicateBinaryFunction<AndNullImpl, AndImpl>::template evaluate<TYPE_BOOLEAN>(l, r);
     }
-    BooleanVal val2 = _children[1]->get_boolean_val(context, row);
-    if (!val2.is_null && val2.val) {
-        return BooleanVal(true);
-    }
-    if (val1.is_null || val2.is_null) {
-        return BooleanVal::null();
-    }
-    return BooleanVal(false);
+};
+
+/**
+ * IS NULL OR IS NULL = IS NULL
+ * IS NOT NULL OR IS NOT NULL = IS NOT NULL
+ * TRUE OR NULL = IS NOT NULL(TRUE)
+ * FALSE OR IS NULL = IS NULL
+ */
+DEFINE_LOGIC_NULL_BINARY_FUNCTION_WITH_IMPL(OrNullImpl, l_value, l_null, r_value, r_null) {
+    return (l_null & r_null) | (r_null & (r_null ^ l_value)) | (l_null & (l_null ^ r_value));
 }
 
-BooleanVal NotPredicate::get_boolean_val(ExprContext* context, TupleRow* row) {
-    BooleanVal val = _children[0]->get_boolean_val(context, row);
-    if (val.is_null) {
-        return BooleanVal::null();
-    }
-    return BooleanVal(!val.val);
+DEFINE_BINARY_FUNCTION_WITH_IMPL(OrImpl, l_value, r_value) {
+    return l_value | r_value;
 }
 
-std::string CompoundPredicate::debug_string() const {
-    std::stringstream out;
-    out << "CompoundPredicate(" << Expr::debug_string() << ")";
-    return out.str();
+class VectorizedOrCompoundPredicate final : public Predicate {
+public:
+    DEFINE_COMPOUND_CONSTRUCT(VectorizedOrCompoundPredicate);
+    StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, ptr));
+
+        int l_trues = ColumnHelper::count_true_with_notnull(l);
+        // left all true and not null
+        if (l_trues == l->size()) {
+            return l->clone();
+        }
+
+        ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_checked(context, ptr));
+
+        return VectorizedLogicPredicateBinaryFunction<OrNullImpl, OrImpl>::template evaluate<TYPE_BOOLEAN>(l, r);
+    }
+};
+
+DEFINE_UNARY_FN_WITH_IMPL(CompoundPredNot, l) {
+    return !l;
+}
+
+class VectorizedNotCompoundPredicate final : public Predicate {
+public:
+    DEFINE_COMPOUND_CONSTRUCT(VectorizedNotCompoundPredicate);
+    StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, ptr));
+
+        return VectorizedStrictUnaryFunction<CompoundPredNot>::template evaluate<TYPE_BOOLEAN>(l);
+    }
+};
+
+#undef DEFINE_COMPOUND_CONSTRUCT
+
+Expr* VectorizedCompoundPredicateFactory::from_thrift(const TExprNode& node) {
+    switch (node.opcode) {
+    case TExprOpcode::COMPOUND_AND:
+        return new VectorizedAndCompoundPredicate(node);
+    case TExprOpcode::COMPOUND_OR:
+        return new VectorizedOrCompoundPredicate(node);
+    case TExprOpcode::COMPOUND_NOT:
+        return new VectorizedNotCompoundPredicate(node);
+    default:
+        DCHECK(false) << "Not support compound predicate: " << node.opcode;
+        return nullptr;
+    }
 }
 
 } // namespace starrocks

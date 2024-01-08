@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/test/java/org/apache/doris/common/io/DeepCopyTest.java
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -22,6 +18,7 @@
 package com.starrocks.common.io;
 
 import com.starrocks.persist.TableInfo;
+import com.starrocks.persist.gson.GsonSerializationTest;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -36,5 +33,14 @@ public class DeepCopyTest {
         Assert.assertEquals(1, copied.getDbId());
         Assert.assertEquals(2, copied.getTableId());
         Assert.assertEquals("newTbl", copied.getNewTableName());
+    }
+
+    @Test
+    public void testCopyWithJson() {
+        GsonSerializationTest.OrigClassA classA = new GsonSerializationTest.OrigClassA(1);
+        GsonSerializationTest.OrigClassA copied = DeepCopy.copyWithGson(classA, GsonSerializationTest.OrigClassA.class);
+        Assert.assertTrue(copied != null);
+        Assert.assertEquals(classA.flag, copied.flag);
+        Assert.assertEquals(classA.classA1.flag, copied.classA1.flag);
     }
 }

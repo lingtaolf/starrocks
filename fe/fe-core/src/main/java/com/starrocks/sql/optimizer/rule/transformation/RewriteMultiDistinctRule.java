@@ -1,24 +1,42 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package com.starrocks.sql.optimizer.rule.transformation;
 
 import com.google.common.collect.Lists;
 import com.starrocks.analysis.FunctionName;
-import com.starrocks.catalog.Catalog;
 import com.starrocks.catalog.Function;
 import com.starrocks.catalog.FunctionSet;
+import com.starrocks.catalog.ScalarType;
 import com.starrocks.catalog.Type;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.analyzer.DecimalV3FunctionAnalyzer;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
+import com.starrocks.sql.optimizer.operator.AggType;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAggregationOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalFilterOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalProjectOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
-import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriteRule;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriter;
 import com.starrocks.sql.optimizer.rewrite.scalar.ImplicitCastRule;
+import com.starrocks.sql.optimizer.rewrite.scalar.ScalarOperatorRewriteRule;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
 import java.util.HashMap;
@@ -45,18 +63,11 @@ public class RewriteMultiDistinctRule extends TransformationRule {
         LogicalAggregationOperator agg = (LogicalAggregationOperator) input.getOp();
 
         List<CallOperator> distinctAggOperatorList = agg.getAggregations().values().stream()
-                .filter(call -> call.isDistinct()).collect(Collectors.toList());
+                .filter(CallOperator::isDistinct).collect(Collectors.toList());
 
-        boolean hasMultiColumns = false;
-        for (CallOperator callOperator : distinctAggOperatorList) {
-            if (callOperator.getChildren().size() > 1) {
-                hasMultiColumns = true;
-                break;
-            }
-        }
-
-        return (distinctAggOperatorList.size() > 1 && !hasMultiColumns) || agg.getAggregations().values().stream()
-                .anyMatch(call -> call.isDistinct() && call.getFnName().equals(FunctionSet.AVG));
+        boolean hasMultiColumns = distinctAggOperatorList.stream().anyMatch(f -> f.getChildren().size() > 1);
+        return (distinctAggOperatorList.size() > 1 || agg.getAggregations().values().stream()
+                .anyMatch(call -> call.isDistinct() && call.getFnName().equals(FunctionSet.AVG))) && !hasMultiColumns;
     }
 
     @Override
@@ -73,6 +84,8 @@ public class RewriteMultiDistinctRule extends TransformationRule {
                     newAggOperator = buildMultiCountDistinct(oldFunctionCall);
                 } else if (oldFunctionCall.getFnName().equalsIgnoreCase(FunctionSet.SUM)) {
                     newAggOperator = buildMultiSumDistinct(oldFunctionCall);
+                } else if (oldFunctionCall.getFnName().equals(FunctionSet.ARRAY_AGG)) {
+                    newAggOperator = buildArrayAggDistinct(oldFunctionCall);
                 }
                 newAggMap.put(aggregation.getKey(), newAggOperator);
             } else {
@@ -115,37 +128,55 @@ public class RewriteMultiDistinctRule extends TransformationRule {
                 sumColRef = sumColRef == null ?
                         context.getColumnRefFactory().create(sum, sum.getType(), sum.isNullable()) : sumColRef;
                 newAggMapWithAvg.put(sumColRef, sum);
-
-                CallOperator multiAgv = (CallOperator) scalarRewriter.rewrite(
-                        new CallOperator("divide", oldFunctionCall.getType(),
-                                Lists.newArrayList(sumColRef, countColRef)),
-                        DEFAULT_TYPE_CAST_RULE);
-                projections.put(aggMap.getKey(), multiAgv);
+                CallOperator multiAvg = new CallOperator(FunctionSet.DIVIDE, oldFunctionCall.getType(),
+                        Lists.newArrayList(sumColRef, countColRef));
+                if (multiAvg.getType().isDecimalV3()) {
+                    // There is not need to apply ImplicitCastRule to divide operator of decimal types.
+                    // but we should cast BIGINT-typed countColRef into DECIMAL(38,0).
+                    ScalarType decimal128p38s0 = ScalarType.createDecimalV3NarrowestType(38, 0);
+                    multiAvg.getChildren().set(
+                            1, new CastOperator(decimal128p38s0, multiAvg.getChild(1), true));
+                } else {
+                    multiAvg = (CallOperator) scalarRewriter.rewrite(multiAvg,
+                            Lists.newArrayList(new ImplicitCastRule()));
+                }
+                projections.put(aggMap.getKey(), multiAvg);
             } else {
                 projections.put(aggMap.getKey(), aggMap.getKey());
                 newAggMapWithAvg.put(aggMap.getKey(), aggMap.getValue());
             }
         }
 
+        OptExpression result;
         if (hasAvg) {
             OptExpression aggOpt = OptExpression
-                    .create(new LogicalAggregationOperator(aggregationOperator.getGroupingKeys(), newAggMapWithAvg),
+                    .create(new LogicalAggregationOperator.Builder().withOperator(aggregationOperator)
+                                    .setType(AggType.GLOBAL)
+                                    .setAggregations(newAggMapWithAvg)
+                                    .build(),
                             input.getInputs());
             aggregationOperator.getGroupingKeys().forEach(c -> projections.put(c, c));
-            return Lists.newArrayList(
-                    OptExpression.create(new LogicalProjectOperator(projections), Lists.newArrayList(aggOpt)));
+            result = OptExpression.create(new LogicalProjectOperator(projections), Lists.newArrayList(aggOpt));
         } else {
-            OptExpression aggOpt = OptExpression
-                    .create(new LogicalAggregationOperator(aggregationOperator.getGroupingKeys(), newAggMap),
+            result = OptExpression
+                    .create(new LogicalAggregationOperator.Builder().withOperator(aggregationOperator)
+                                    .setType(AggType.GLOBAL)
+                                    .setAggregations(newAggMap)
+                                    .build(),
                             input.getInputs());
-            return Lists.newArrayList(aggOpt);
         }
+
+        if (aggregationOperator.getPredicate() != null) {
+            result = OptExpression.create(new LogicalFilterOperator(aggregationOperator.getPredicate()), result);
+        }
+
+        return Lists.newArrayList(result);
     }
 
     private CallOperator buildMultiCountDistinct(CallOperator oldFunctionCall) {
         Function searchDesc = new Function(new FunctionName(FunctionSet.MULTI_DISTINCT_COUNT),
                 oldFunctionCall.getFunction().getArgs(), Type.INVALID, false);
-        Function fn = Catalog.getCurrentCatalog().getFunction(searchDesc, IS_NONSTRICT_SUPERTYPE_OF);
+        Function fn = GlobalStateMgr.getCurrentState().getFunction(searchDesc, IS_NONSTRICT_SUPERTYPE_OF);
 
         return (CallOperator) scalarRewriter.rewrite(
                 new CallOperator(FunctionSet.MULTI_DISTINCT_COUNT, fn.getReturnType(), oldFunctionCall.getChildren(),
@@ -153,13 +184,23 @@ public class RewriteMultiDistinctRule extends TransformationRule {
                 DEFAULT_TYPE_CAST_RULE);
     }
 
-    private CallOperator buildMultiSumDistinct(CallOperator oldFunctionCall) {
-        Function searchDesc = new Function(new FunctionName(FunctionSet.MULTI_DISTINCT_SUM),
+    private CallOperator buildArrayAggDistinct(CallOperator oldFunctionCall) {
+        Function searchDesc = new Function(new FunctionName(FunctionSet.ARRAY_AGG_DISTINCT),
                 oldFunctionCall.getFunction().getArgs(), Type.INVALID, false);
-        Function fn = Catalog.getCurrentCatalog().getFunction(searchDesc, IS_NONSTRICT_SUPERTYPE_OF);
+        Function fn = GlobalStateMgr.getCurrentState().getFunction(searchDesc, IS_NONSTRICT_SUPERTYPE_OF);
 
         return (CallOperator) scalarRewriter.rewrite(
-                new CallOperator(FunctionSet.MULTI_DISTINCT_SUM, fn.getReturnType(), oldFunctionCall.getChildren(), fn),
+                new CallOperator(FunctionSet.ARRAY_AGG_DISTINCT, fn.getReturnType(), oldFunctionCall.getChildren(),
+                        fn),
                 DEFAULT_TYPE_CAST_RULE);
+    }
+
+    private CallOperator buildMultiSumDistinct(CallOperator oldFunctionCall) {
+        Function multiDistinctSum = DecimalV3FunctionAnalyzer.convertSumToMultiDistinctSum(
+                oldFunctionCall.getFunction(), oldFunctionCall.getChild(0).getType());
+        return (CallOperator) scalarRewriter.rewrite(
+                new CallOperator(
+                        FunctionSet.MULTI_DISTINCT_SUM, multiDistinctSum.getReturnType(),
+                        oldFunctionCall.getChildren(), multiDistinctSum), DEFAULT_TYPE_CAST_RULE);
     }
 }

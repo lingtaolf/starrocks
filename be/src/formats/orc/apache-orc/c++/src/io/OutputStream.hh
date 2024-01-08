@@ -1,7 +1,3 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/orc/tree/main/c++/src/io/OutputStream.hh
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -20,8 +16,7 @@
  * limitations under the License.
  */
 
-#ifndef ORC_OUTPUTSTREAM_HH
-#define ORC_OUTPUTSTREAM_HH
+#pragma once
 
 #include "Adaptor.hh"
 #include "orc/OrcFile.hh"
@@ -52,17 +47,18 @@ private:
 
 public:
     BufferedOutputStream(MemoryPool& pool, OutputStream* outStream, uint64_t capacity, uint64_t block_size);
-    virtual ~BufferedOutputStream() override;
+    ~BufferedOutputStream() override;
 
-    virtual bool Next(void** data, int* size) override;
-    virtual void BackUp(int count) override;
-    virtual google::protobuf::int64 ByteCount() const override;
-    virtual bool WriteAliasedRaw(const void* data, int size) override;
-    virtual bool AllowsAliasing() const override;
+    bool Next(void** data, int* size) override;
+    void BackUp(int count) override;
+    google::protobuf::int64 ByteCount() const override;
+    bool WriteAliasedRaw(const void* data, int size) override;
+    bool AllowsAliasing() const override;
 
     virtual std::string getName() const;
     virtual uint64_t getSize() const;
     virtual uint64_t flush();
+    virtual void suppress();
 
     virtual bool isCompressed() const { return false; }
 };
@@ -92,5 +88,3 @@ public:
     void recordPosition(PositionRecorder* recorder) const;
 };
 } // namespace orc
-
-#endif // ORC_OUTPUTSTREAM_HH

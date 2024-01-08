@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/be/src/runtime/result_buffer_mgr.cpp
 
@@ -21,22 +34,17 @@
 
 #include "runtime/result_buffer_mgr.h"
 
+#include <memory>
+
 #include "gen_cpp/InternalService_types.h"
-#include "gen_cpp/types.pb.h"
 #include "runtime/buffer_control_block.h"
-#include "runtime/raw_value.h"
-#include "util/debug_util.h"
+#include "util/misc.h"
 #include "util/starrocks_metrics.h"
+#include "util/thread.h"
 
 namespace starrocks {
 
-//std::size_t hash_value(const TUniqueId& fragment_id) {
-//    uint32_t value = RawValue::get_hash_value(&fragment_id.lo, TypeDescriptor(TYPE_BIGINT), 0);
-//    value = RawValue::get_hash_value(&fragment_id.hi, TypeDescriptor(TYPE_BIGINT), value);
-//    return value;
-//}
-
-ResultBufferMgr::ResultBufferMgr() : _is_stop(false) {
+ResultBufferMgr::ResultBufferMgr() {
     // Each BufferControlBlock has a limited queue size of 1024, it's not needed to count the
     // actual size of all BufferControlBlock.
     REGISTER_GAUGE_STARROCKS_METRIC(result_buffer_block_count, [this]() {
@@ -51,7 +59,9 @@ ResultBufferMgr::~ResultBufferMgr() {
 }
 
 Status ResultBufferMgr::init() {
-    _cancel_thread.reset(new boost::thread(std::bind<void>(std::mem_fn(&ResultBufferMgr::cancel_thread), this)));
+    _cancel_thread = std::make_unique<std::thread>(
+            std::bind<void>(std::mem_fn(&ResultBufferMgr::cancel_thread), this)); // NOLINT
+    Thread::set_thread_name(_cancel_thread->native_handle(), "res_buf_mgr");
     return Status::OK();
 }
 
@@ -75,19 +85,19 @@ Status ResultBufferMgr::create_sender(const TUniqueId& query_id, int buffer_size
 std::shared_ptr<BufferControlBlock> ResultBufferMgr::find_control_block(const TUniqueId& query_id) {
     // TODO(zhaochun): this lock can be bottleneck?
     std::lock_guard<std::mutex> l(_lock);
-    BufferMap::iterator iter = _buffer_map.find(query_id);
+    auto iter = _buffer_map.find(query_id);
 
     if (_buffer_map.end() != iter) {
         return iter->second;
     }
 
-    return std::shared_ptr<BufferControlBlock>();
+    return {};
 }
 
 Status ResultBufferMgr::fetch_data(const TUniqueId& query_id, TFetchDataResult* result) {
     std::shared_ptr<BufferControlBlock> cb = find_control_block(query_id);
 
-    if (NULL == cb) {
+    if (nullptr == cb) {
         // the sender tear down its buffer block
         return Status::InternalError("no result for this query.");
     }
@@ -110,7 +120,7 @@ void ResultBufferMgr::fetch_data(const PUniqueId& finst_id, GetResultBatchCtx* c
 
 Status ResultBufferMgr::cancel(const TUniqueId& query_id) {
     std::lock_guard<std::mutex> l(_lock);
-    BufferMap::iterator iter = _buffer_map.find(query_id);
+    auto iter = _buffer_map.find(query_id);
 
     if (_buffer_map.end() != iter) {
         iter->second->cancel();
@@ -122,7 +132,7 @@ Status ResultBufferMgr::cancel(const TUniqueId& query_id) {
 
 Status ResultBufferMgr::cancel_at_time(time_t cancel_time, const TUniqueId& query_id) {
     std::lock_guard<std::mutex> l(_timeout_lock);
-    TimeoutMap::iterator iter = _timeout_map.find(cancel_time);
+    auto iter = _timeout_map.find(cancel_time);
 
     if (_timeout_map.end() == iter) {
         _timeout_map.insert(std::pair<time_t, std::vector<TUniqueId> >(cancel_time, std::vector<TUniqueId>()));
@@ -139,14 +149,14 @@ void ResultBufferMgr::cancel_thread() {
     while (!_is_stop) {
         // get query
         std::vector<TUniqueId> query_to_cancel;
-        time_t now_time = time(NULL);
+        time_t now_time = time(nullptr);
         {
             std::lock_guard<std::mutex> l(_timeout_lock);
-            TimeoutMap::iterator end = _timeout_map.upper_bound(now_time + 1);
+            auto end = _timeout_map.upper_bound(now_time + 1);
 
-            for (TimeoutMap::iterator iter = _timeout_map.begin(); iter != end; ++iter) {
-                for (int i = 0; i < iter->second.size(); ++i) {
-                    query_to_cancel.push_back(iter->second[i]);
+            for (auto iter = _timeout_map.begin(); iter != end; ++iter) {
+                for (auto& i : iter->second) {
+                    query_to_cancel.push_back(i);
                 }
             }
 
@@ -154,11 +164,10 @@ void ResultBufferMgr::cancel_thread() {
         }
 
         // cancel query
-        for (int i = 0; i < query_to_cancel.size(); ++i) {
-            cancel(query_to_cancel[i]);
+        for (auto& i : query_to_cancel) {
+            (void)cancel(i);
         }
-
-        sleep(1);
+        nap_sleep(1, [this] { return _is_stop; });
     }
 
     LOG(INFO) << "result buffer manager cancel thread finish.";

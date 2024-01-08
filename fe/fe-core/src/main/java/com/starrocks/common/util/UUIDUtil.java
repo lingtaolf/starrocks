@@ -1,4 +1,17 @@
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 package com.starrocks.common.util;
 
@@ -10,14 +23,14 @@ import com.starrocks.thrift.TUniqueId;
 import java.util.UUID;
 
 public class UUIDUtil {
-    private static final EthernetAddress ethernetAddress = EthernetAddress.fromInterface();
-    private static final TimeBasedGenerator uuidGenerator = Generators.timeBasedGenerator(ethernetAddress);
+    private static final EthernetAddress ETHERNET_ADDRESS = EthernetAddress.fromInterface();
+    private static final TimeBasedGenerator UUID_GENERATOR = Generators.timeBasedGenerator(ETHERNET_ADDRESS);
 
     // java.util.UUID.randomUUID() uses SecureRandom to generate random uuid,
     // and SecureRandom hold locks when generate random bytes.
     // This method is faster than java.util.UUID.randomUUID() in high concurrency environment
     public static UUID genUUID() {
-        return uuidGenerator.generate();
+        return UUID_GENERATOR.generate();
     }
 
     public static UUID fromTUniqueid(TUniqueId id) {
@@ -29,7 +42,7 @@ public class UUIDUtil {
     }
 
     public static TUniqueId genTUniqueId() {
-        return toTUniqueId(uuidGenerator.generate());
+        return toTUniqueId(UUID_GENERATOR.generate());
     }
 
 }

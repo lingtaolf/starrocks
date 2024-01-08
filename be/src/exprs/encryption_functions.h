@@ -1,56 +1,93 @@
-// This file is made available under Elastic License 2.0.
-// This file is based on code available under the Apache license here:
-//   https://github.com/apache/incubator-doris/blob/master/be/src/exprs/encryption_functions.h
-
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-#ifndef STARROCKS_BE_SRC_QUERY_EXPRS_ENCRYPTION_FUNCTIONS_H
-#define STARROCKS_BE_SRC_QUERY_EXPRS_ENCRYPTION_FUNCTIONS_H
+#pragma once
 
-#include <stdint.h>
+#include <rapidjson/document.h>
 
-#include "udf/udf.h"
-#include "udf/udf_internal.h"
+#include "column/column_builder.h"
+#include "exprs/builtin_functions.h"
+#include "exprs/function_helper.h"
 
 namespace starrocks {
 
-class Expr;
-struct ExprValue;
-class TupleRow;
-
 class EncryptionFunctions {
 public:
-    static void init();
-    static starrocks_udf::StringVal aes_encrypt(starrocks_udf::FunctionContext* context,
-                                                const starrocks_udf::StringVal& val1,
-                                                const starrocks_udf::StringVal& val2);
-    static starrocks_udf::StringVal aes_decrypt(starrocks_udf::FunctionContext* context,
-                                                const starrocks_udf::StringVal& val1,
-                                                const starrocks_udf::StringVal& val2);
-    static starrocks_udf::StringVal from_base64(starrocks_udf::FunctionContext* context,
-                                                const starrocks_udf::StringVal& val1);
-    static starrocks_udf::StringVal to_base64(starrocks_udf::FunctionContext* context,
-                                              const starrocks_udf::StringVal& val1);
-    static starrocks_udf::StringVal md5sum(starrocks_udf::FunctionContext* ctx, int num_args,
-                                           const starrocks_udf::StringVal* args);
-    static starrocks_udf::StringVal md5(starrocks_udf::FunctionContext* ctx, const starrocks_udf::StringVal& src);
+    /**
+     * @param: [json_string, tagged_value]
+     * @paramType: [BinaryColumn, BinaryColumn]
+     * @return: Int32Column
+     */
+    DEFINE_VECTORIZED_FN(aes_encrypt);
+
+    /**
+     * @param: [json_string, tagged_value]
+     * @paramType: [BinaryColumn, BinaryColumn]
+     * @return: DoubleColumn
+     */
+    DEFINE_VECTORIZED_FN(aes_decrypt);
+
+    /**
+     * @param: [json_string, tagged_value]
+     * @paramType: [BinaryColumn, BinaryColumn]
+     * @return: BinaryColumn
+     */
+    DEFINE_VECTORIZED_FN(from_base64);
+
+    /**
+     * @param: [json_string, tagged_value]
+     * @paramType: [BinaryColumn, BinaryColumn]
+     * @return: Int32Column
+     */
+    DEFINE_VECTORIZED_FN(to_base64);
+
+    /**
+     * @param: [json_string, tagged_value]
+     * @paramType: [BinaryColumn, BinaryColumn]
+     * @return: Int32Column
+     */
+    DEFINE_VECTORIZED_FN(md5sum);
+    DEFINE_VECTORIZED_FN(md5sum_numeric);
+
+    /**
+     * @param: [json_string, tagged_value]
+     * @paramType: [BinaryColumn, BinaryColumn]
+     * @return: Int32Column
+     */
+    DEFINE_VECTORIZED_FN(md5);
+
+    /*
+     * Called by sha2 to the corresponding part
+     */
+    DEFINE_VECTORIZED_FN(sha224);
+    DEFINE_VECTORIZED_FN(sha256);
+    DEFINE_VECTORIZED_FN(sha384);
+    DEFINE_VECTORIZED_FN(sha512);
+    DEFINE_VECTORIZED_FN(invalid_sha);
+    /**
+     * @param: [json_string, tagged_value]
+     * @paramType: [BinaryColumn, BinaryColumn]
+     * @return: Int32Column
+     */
+    DEFINE_VECTORIZED_FN(sha2);
+    static Status sha2_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope);
+    static Status sha2_close(FunctionContext* context, FunctionContext::FunctionStateScope scope);
+
+    // method for sha2
+    struct SHA2Ctx {
+        ScalarFunction function;
+    };
 };
 
 } // namespace starrocks
-
-#endif

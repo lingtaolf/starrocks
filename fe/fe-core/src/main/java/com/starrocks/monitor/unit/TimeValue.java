@@ -1,4 +1,17 @@
-// This file is made available under Elastic License 2.0.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This file is based on code available under the Apache license here:
 //   https://github.com/apache/incubator-doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/monitor/unit/TimeValue.java
 
@@ -23,14 +36,8 @@ package com.starrocks.monitor.unit;
 
 import com.starrocks.monitor.utils.Strings;
 
-import java.util.Collections;
-import java.util.EnumMap;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 public class TimeValue implements Comparable<TimeValue> {
@@ -40,70 +47,15 @@ public class TimeValue implements Comparable<TimeValue> {
      */
     public static final long NSEC_PER_MSEC = TimeUnit.NANOSECONDS.convert(1, TimeUnit.MILLISECONDS);
 
-    private static Map<TimeUnit, Byte> TIME_UNIT_BYTE_MAP;
-    private static Map<Byte, TimeUnit> BYTE_TIME_UNIT_MAP;
-
-    static {
-        final Map<TimeUnit, Byte> timeUnitByteMap = new EnumMap<>(TimeUnit.class);
-        timeUnitByteMap.put(TimeUnit.NANOSECONDS, (byte) 0);
-        timeUnitByteMap.put(TimeUnit.MICROSECONDS, (byte) 1);
-        timeUnitByteMap.put(TimeUnit.MILLISECONDS, (byte) 2);
-        timeUnitByteMap.put(TimeUnit.SECONDS, (byte) 3);
-        timeUnitByteMap.put(TimeUnit.MINUTES, (byte) 4);
-        timeUnitByteMap.put(TimeUnit.HOURS, (byte) 5);
-        timeUnitByteMap.put(TimeUnit.DAYS, (byte) 6);
-
-        final Set<Byte> bytes = new HashSet<>();
-        for (TimeUnit value : TimeUnit.values()) {
-            assert timeUnitByteMap.containsKey(value) : value;
-            assert bytes.add(timeUnitByteMap.get(value));
-        }
-
-        final Map<Byte, TimeUnit> byteTimeUnitMap = new HashMap<>();
-        for (Map.Entry<TimeUnit, Byte> entry : timeUnitByteMap.entrySet()) {
-            byteTimeUnitMap.put(entry.getValue(), entry.getKey());
-        }
-
-        TIME_UNIT_BYTE_MAP = Collections.unmodifiableMap(timeUnitByteMap);
-        BYTE_TIME_UNIT_MAP = Collections.unmodifiableMap(byteTimeUnitMap);
-    }
-
     public static final TimeValue MINUS_ONE = timeValueMillis(-1);
     public static final TimeValue ZERO = timeValueMillis(0);
-
-    public static TimeValue timeValueNanos(long nanos) {
-        return new TimeValue(nanos, TimeUnit.NANOSECONDS);
-    }
 
     public static TimeValue timeValueMillis(long millis) {
         return new TimeValue(millis, TimeUnit.MILLISECONDS);
     }
 
-    public static TimeValue timeValueSeconds(long seconds) {
-        return new TimeValue(seconds, TimeUnit.SECONDS);
-    }
-
-    public static TimeValue timeValueMinutes(long minutes) {
-        return new TimeValue(minutes, TimeUnit.MINUTES);
-    }
-
-    public static TimeValue timeValueHours(long hours) {
-        return new TimeValue(hours, TimeUnit.HOURS);
-    }
-
     private final long duration;
-
-    // visible for testing
-    long duration() {
-        return duration;
-    }
-
     private final TimeUnit timeUnit;
-
-    // visible for testing
-    TimeUnit timeUnit() {
-        return timeUnit;
-    }
 
     public TimeValue(long millis) {
         this(millis, TimeUnit.MILLISECONDS);

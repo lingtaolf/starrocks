@@ -1,30 +1,35 @@
 #! /usr/bin/python3
-# This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+# Copyright 2021-present StarRocks, Inc. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https:#www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import argparse
+import hashlib
 import os
 import subprocess
 
 from datetime import datetime
 
-def func(a, *args, **kwargs):
-    print(a)
-    print(args)
-    print(kwargs)
-
 def get_version():
     version = os.getenv("STARROCKS_VERSION")
     if not version:
         version = "UNKNOWN"
-    return version.upper()
+    return version
 
 def get_commit_hash():
-    git_res = subprocess.Popen(["git", "rev-parse", "--short", "HEAD"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    out, err = git_res.communicate()
-
-    commit_hash = ''
-    if git_res.returncode == 0:
-        commit_hash = out.decode('utf-8').strip()
+    commit_hash = os.getenv("STARROCKS_COMMIT_HASH")
+    if not commit_hash:
+        commit_hash = "UNKNOWN"
     return commit_hash
 
 def get_build_type():
@@ -37,9 +42,14 @@ def get_current_time():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def get_user():
-    return os.getenv("USER")
+    user = os.getenv("USER")
+    if not user:
+        user = "StarRocks"
+    return user
 
 def get_hostname():
+    if os.path.exists('/.dockerenv'):
+        return "docker"
     res = subprocess.Popen(["hostname", "-f"], stdout=subprocess.PIPE)
     out, err = res.communicate()
     return out.decode('utf-8').strip()
@@ -53,15 +63,20 @@ def get_java_version():
         return out.decode('utf-8').replace("\"", "\\\"").strip()
     return "unknown jdk"
 
-def skip_write_if_commit_unchanged(file_name, file_content, commit_hash):
+def get_fingerprint(items):
+    if not isinstance(items, list):
+        items = [items]
+    return hashlib.md5(",".join(items).encode()).hexdigest()
+
+def skip_write_if_fingerprint_unchanged(file_name, file_content, fingerprint):
     if os.path.exists(file_name):
         with open(file_name) as fh:
             data = fh.read()
             import re
-            m = re.search("COMMIT_HASH: (?P<commit_hash>\w+)", data)
-            old_commit_hash = m.group('commit_hash') if m else None
-            print('gen_build_version.py {}: old commit = {}, new commit = {}'.format(file_name, old_commit_hash, commit_hash))
-            if old_commit_hash == commit_hash:
+            m = re.search(r"FINGERPRINT: (?P<fingerprint>\w+)", data)
+            old_fingerprint = m.group('fingerprint') if m else None
+            print('gen_build_version.py {}: old fingerprint = {}, new fingerprint = {}'.format(file_name, old_fingerprint, fingerprint))
+            if old_fingerprint == fingerprint:
                 return
     with open(file_name, 'w') as fh:
         fh.write(file_content)
@@ -71,9 +86,22 @@ def generate_java_file(java_path, version, commit_hash, build_type, build_time, 
 
 package com.starrocks.common;
 
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // This is a generated file, DO NOT EDIT IT.
-// COMMIT_HASH: {COMMIT_HASH}
+// FINGERPRINT: {FINGERPRINT}
 
 public class Version {{
     public static final String STARROCKS_VERSION = "{VERSION}";
@@ -85,50 +113,61 @@ public class Version {{
     public static final String STARROCKS_JAVA_COMPILE_VERSION = "{JAVA_VERSION}";
 }}
 '''
-    file_content = file_format.format(VERSION = version, COMMIT_HASH = commit_hash,
-            BUILD_TYPE = build_type, BUILD_TIME = build_time, BUILD_USER=user, BUILD_HOST=host,
-            JAVA_VERSION = java_version)
+    fingerprint = get_fingerprint([version, commit_hash, build_type, user, host, java_version])
+    file_content = file_format.format(VERSION=version, COMMIT_HASH=commit_hash,
+                                      BUILD_TYPE=build_type, BUILD_TIME=build_time,
+                                      BUILD_USER=user, BUILD_HOST=host,
+                                      JAVA_VERSION=java_version, FINGERPRINT=fingerprint)
 
     file_name = java_path + "/com/starrocks/common/Version.java"
     d = os.path.dirname(file_name)
     if not os.path.exists(d):
         os.makedirs(d)
-    skip_write_if_commit_unchanged(file_name, file_content, commit_hash)
+    skip_write_if_fingerprint_unchanged(file_name, file_content, fingerprint)
 
 def generate_cpp_file(cpp_path, version, commit_hash, build_type, build_time, user, host):
     file_format = '''
-// This file is licensed under the Elastic License 2.0. Copyright 2021 StarRocks Limited.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // NOTE: This is a generated file, DO NOT EDIT IT
-// COMMIT_HASH: {COMMIT_HASH}
-
-#pragma once
-
-#include <string>
+// FINGERPRINT: {FINGERPRINT}
 
 namespace starrocks {{
 
-#define STARROCKS_VERSION         "{VERSION}"
-#define STARROCKS_COMMIT_HASH     "{COMMIT_HASH}"
-#define STARROCKS_BUILD_TYPE      "{BUILD_TYPE}"
-#define STARROCKS_BUILD_TIME      "{BUILD_TIME}"
-#define STARROCKS_BUILD_USER      "{BUILD_USER}"
-#define STARROCKS_BUILD_HOST      "{BUILD_HOST}"
+const char* STARROCKS_VERSION = "{VERSION}";
+const char* STARROCKS_COMMIT_HASH = "{COMMIT_HASH}";
+const char* STARROCKS_BUILD_TIME = "{BUILD_TIME}";
+const char* STARROCKS_BUILD_USER = "{BUILD_USER}";
+const char* STARROCKS_BUILD_HOST = "{BUILD_HOST}";
 }}
 
 '''
-    file_content = file_format.format(VERSION = version, COMMIT_HASH = commit_hash,
-            BUILD_TYPE = build_type, BUILD_TIME = build_time,
-            BUILD_USER = user, BUILD_HOST = host)
+    fingerprint = get_fingerprint([version, commit_hash, build_type, user, host])
+    file_content = file_format.format(VERSION=version, COMMIT_HASH=commit_hash,
+                                      BUILD_TYPE=build_type, BUILD_TIME=build_time,
+                                      BUILD_USER=user, BUILD_HOST=host, FINGERPRINT=fingerprint)
 
-    file_name = cpp_path + "/version.h"
+    file_name = cpp_path + "/version.cpp"
     d = os.path.dirname(file_name)
     if not os.path.exists(d):
         os.makedirs(d)
-    skip_write_if_commit_unchanged(file_name, file_content, commit_hash)
+    skip_write_if_fingerprint_unchanged(file_name, file_content, fingerprint)
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cpp", dest='cpp_path', default="./version.h", help="Path of generated cpp file", type=str)
+    parser.add_argument("--cpp", dest='cpp_path', default="./version.cpp", help="Path of generated cpp file", type=str)
     parser.add_argument("--java", dest='java_path', default="./Version.java", help="Path of generated java file", type=str)
     args = parser.parse_args()
 
