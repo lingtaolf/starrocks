@@ -52,6 +52,10 @@ public class SubqueryRelation extends QueryRelation {
         return alias == null ? "anonymous" : alias.toString();
     }
 
+    public boolean isAnonymous() {
+        return alias == null;
+    }
+
     @Override
     public List<Expr> getOutputExpression() {
         return this.queryStatement.getQueryRelation().getOutputExpression();
@@ -59,6 +63,6 @@ public class SubqueryRelation extends QueryRelation {
 
     @Override
     public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
-        return visitor.visitSubquery(this, context);
+        return visitor.visitSubqueryRelation(this, context);
     }
 }

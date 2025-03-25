@@ -18,6 +18,7 @@
 #include <type_traits>
 #include <variant>
 
+#include "common/overloaded.h"
 #include "runtime/decimalv2_value.h"
 #include "storage/decimal12.h"
 #include "storage/uint24.h"
@@ -47,13 +48,6 @@ using DatumKey = std::variant<std::monostate, int8_t, uint8_t, int16_t, uint16_t
                               uint64_t, int96_t, int128_t, Slice, decimal12_t, DecimalV2Value, float, double>;
 using DatumMap = std::map<DatumKey, Datum>;
 using DatumStruct = std::vector<Datum>;
-
-template <class... Ts>
-struct overloaded : Ts... {
-    using Ts::operator()...;
-};
-template <class... Ts>
-overloaded(Ts...) -> overloaded<Ts...>;
 
 class Datum {
 public:
@@ -192,6 +186,10 @@ public:
     bool equal_datum_key(const DatumKey& key) const {
         return std::visit([&](const auto& arg) { return is_equal(arg); }, key);
     }
+
+    [[nodiscard]] bool operator==(const Datum& other) const { return _value == other._value; }
+
+    [[nodiscard]] bool operator!=(const Datum& other) const { return !(*this == other); }
 
 private:
     using Variant =

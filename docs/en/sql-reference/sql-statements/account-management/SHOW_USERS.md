@@ -1,8 +1,10 @@
 ---
-displayed_sidebar: "English"
+displayed_sidebar: docs
 ---
 
 # SHOW USERS
+
+import UserManagementPriv from '../../../_assets/commonMarkdown/userManagementPriv.md'
 
 ## Description
 
@@ -10,7 +12,7 @@ Displays all users in the system. Users mentioned here are user identities, not 
 
 You can use `SHOW GRANTS FOR <user_identity>;` to view the privileges of a specific user. For more information, see [SHOW GRANTS](SHOW_GRANTS.md).
 
-> Note: Only the `user_admin` role can execute this statement.
+<UserManagementPriv />
 
 ## Syntax
 

@@ -71,6 +71,7 @@ public class PseudoFrontend {
         MIN_FE_CONF.put("query_port", "9030");
         MIN_FE_CONF.put("edit_log_port", "9010");
         MIN_FE_CONF.put("priority_networks", "127.0.0.1/24");
+        MIN_FE_CONF.put("frontend_address", "127.0.0.1");
 
         LoggerContext context = (LoggerContext) LogManager.getContext(false);
         context.start();
@@ -197,8 +198,6 @@ public class PseudoFrontend {
 
                 GlobalStateMgr.getCurrentState().initialize(args);
                 GlobalStateMgr.getCurrentState().setStatisticStorage(new EmptyStatisticStorage());
-                StateChangeExecutor.getInstance().setMetaContext(
-                        GlobalStateMgr.getCurrentState().getMetaContext());
                 StateChangeExecutor.getInstance().registerStateChangeExecution(
                         GlobalStateMgr.getCurrentState().getStateChangeExecution());
                 StateChangeExecutor.getInstance().start();
@@ -207,8 +206,7 @@ public class PseudoFrontend {
 
                 GlobalStateMgr.getCurrentState().waitForReady();
 
-                QeService qeService = new QeService(Config.query_port, Config.mysql_service_nio_enabled,
-                        ExecuteEnv.getInstance().getScheduler());
+                QeService qeService = new QeService(Config.query_port, ExecuteEnv.getInstance().getScheduler());
                 qeService.start();
 
                 ThreadPoolManager.registerAllThreadPoolMetric();

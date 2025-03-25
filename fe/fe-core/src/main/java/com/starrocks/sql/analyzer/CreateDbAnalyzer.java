@@ -14,7 +14,7 @@
 
 package com.starrocks.sql.analyzer;
 
-import com.starrocks.common.AnalysisException;
+import com.google.common.base.Strings;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReport;
 import com.starrocks.common.util.PropertyAnalyzer;
@@ -23,7 +23,6 @@ import com.starrocks.server.RunMode;
 import com.starrocks.server.StorageVolumeMgr;
 import com.starrocks.sql.ast.CreateDbStmt;
 import com.starrocks.sql.common.MetaUtils;
-import org.apache.parquet.Strings;
 
 import java.util.Map;
 
@@ -38,11 +37,7 @@ public class CreateDbAnalyzer {
             statement.setCatalogName(catalogName);
         }
 
-        try {
-            MetaUtils.checkCatalogExistAndReport(catalogName);
-        } catch (AnalysisException e) {
-            ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_CATALOG_ERROR, catalogName);
-        }
+        MetaUtils.checkCatalogExistAndReport(catalogName);
 
         Map<String, String> properties = statement.getProperties();
         if (properties.containsKey(PropertyAnalyzer.PROPERTIES_STORAGE_VOLUME)) {

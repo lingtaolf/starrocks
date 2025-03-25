@@ -47,6 +47,7 @@ import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.common.util.UnitTestUtil;
+import com.starrocks.common.util.concurrent.lock.LockManager;
 import com.starrocks.metric.MetricRepo;
 import com.starrocks.persist.EditLog;
 import com.starrocks.server.GlobalStateMgr;
@@ -61,6 +62,7 @@ import com.starrocks.thrift.TFinishTaskRequest;
 import com.starrocks.thrift.TStatus;
 import com.starrocks.thrift.TStatusCode;
 import com.starrocks.thrift.TTaskType;
+import com.starrocks.transaction.GtidGenerator;
 import mockit.Delegate;
 import mockit.Expectations;
 import mockit.Mock;
@@ -101,6 +103,8 @@ public class BackupJobPrimaryKeyTest {
     private long repoId = 30000;
     private AtomicLong id = new AtomicLong(50000);
 
+    private static List<Path> pathsNeedToBeDeleted = Lists.newArrayList();
+
     @Mocked
     private GlobalStateMgr globalStateMgr;
 
@@ -136,31 +140,33 @@ public class BackupJobPrimaryKeyTest {
     private EditLog editLog;
 
     private Repository repo = new Repository(repoId, "repo_pk", false, "my_repo_pk",
-            new BlobStorage("broker", Maps.newHashMap()));
+                new BlobStorage("broker", Maps.newHashMap()));
 
     @BeforeClass
     public static void start() {
         Config.tmp_dir = "./";
         File backupDir = new File(BackupHandler.TEST_BACKUP_ROOT_DIR.toString());
-        backupDir.mkdirs();
+        if (!backupDir.exists()) {
+            backupDir.mkdirs();
+        }
 
         MetricRepo.init();
     }
 
     @AfterClass
     public static void end() throws IOException {
-        Config.tmp_dir = "./";
-        File backupDir = new File(BackupHandler.TEST_BACKUP_ROOT_DIR.toString());
-        if (backupDir.exists()) {
-            Files.walk(BackupHandler.TEST_BACKUP_ROOT_DIR,
-                            FileVisitOption.FOLLOW_LINKS).sorted(Comparator.reverseOrder()).map(Path::toFile)
-                    .forEach(File::delete);
+        for (Path path : pathsNeedToBeDeleted) {
+            File backupDir = new File(path.toString());
+            if (backupDir.exists()) {
+                Files.walk(path, FileVisitOption.FOLLOW_LINKS).sorted(Comparator.reverseOrder()).map(Path::toFile)
+                            .forEach(File::delete);
+            }
         }
     }
 
     @Before
     public void setUp() {
-
+        globalStateMgr = GlobalStateMgr.getCurrentState();
         repoMgr = new MockRepositoryMgr();
         backupHandler = new MockBackupHandler(globalStateMgr);
 
@@ -168,11 +174,13 @@ public class BackupJobPrimaryKeyTest {
         Deencapsulation.setField(globalStateMgr, "backupHandler", backupHandler);
 
         db = UnitTestUtil.createDbByName(dbId, tblId, partId, idxId, tabletId, backendId, version, KeysType.PRIMARY_KEYS,
-                                         testDbName, testTableName);
+                    testDbName, testTableName);
+
+        LockManager lockManager = new LockManager();
 
         new Expectations(globalStateMgr) {
             {
-                globalStateMgr.getDb(anyLong);
+                globalStateMgr.getLocalMetastore().getDb(anyLong);
                 minTimes = 0;
                 result = db;
 
@@ -183,6 +191,22 @@ public class BackupJobPrimaryKeyTest {
                 globalStateMgr.getEditLog();
                 minTimes = 0;
                 result = editLog;
+
+                globalStateMgr.getLockManager();
+                minTimes = 0;
+                result = lockManager;
+
+                globalStateMgr.getGtidGenerator();
+                minTimes = 0;
+                result = new GtidGenerator();
+
+                globalStateMgr.getLocalMetastore().getTable(testDbName, testTableName);
+                minTimes = 0;
+                result = db.getTable(tblId);
+
+                globalStateMgr.getLocalMetastore().getTable(testDbName, "unknown_tbl");
+                minTimes = 0;
+                result = null;
             }
         };
 
@@ -257,7 +281,7 @@ public class BackupJobPrimaryKeyTest {
         TStatus taskStatus = new TStatus(TStatusCode.OK);
         TBackend tBackend = new TBackend("", 0, 1);
         TFinishTaskRequest request = new TFinishTaskRequest(tBackend, TTaskType.MAKE_SNAPSHOT,
-                snapshotTask.getSignature(), taskStatus);
+                    snapshotTask.getSignature(), taskStatus);
         request.setSnapshot_files(snapshotFiles);
         request.setSnapshot_path(snapshotPath);
         Assert.assertTrue(job.finishTabletSnapshotTask(snapshotTask, request));
@@ -288,7 +312,7 @@ public class BackupJobPrimaryKeyTest {
         Assert.assertEquals(BackupJobState.UPLOADING, job.getState());
         Map<Long, List<String>> tabletFileMap = Maps.newHashMap();
         request = new TFinishTaskRequest(tBackend, TTaskType.UPLOAD,
-                upTask.getSignature(), taskStatus);
+                    upTask.getSignature(), taskStatus);
         request.setTablet_files(tabletFileMap);
 
         Assert.assertFalse(job.finishSnapshotUploadTask(upTask, request));
@@ -332,8 +356,7 @@ public class BackupJobPrimaryKeyTest {
             Assert.assertEquals(job.getLabel(), restoreJobInfo.name);
             Assert.assertEquals(1, restoreJobInfo.tables.size());
         } catch (IOException e) {
-            e.printStackTrace();
-            Assert.fail();
+            Assert.fail(e.getMessage());
         }
 
         Assert.assertNull(job.getBackupMeta());
@@ -343,6 +366,10 @@ public class BackupJobPrimaryKeyTest {
         job.run();
         Assert.assertEquals(Status.OK, job.getStatus());
         Assert.assertEquals(BackupJobState.FINISHED, job.getState());
+
+        if (job.getLocalJobDirPath() != null) {
+            pathsNeedToBeDeleted.add(job.getLocalJobDirPath());
+        }
     }
 
     @Test
@@ -356,5 +383,9 @@ public class BackupJobPrimaryKeyTest {
         job.run();
         Assert.assertEquals(Status.ErrCode.NOT_FOUND, job.getStatus().getErrCode());
         Assert.assertEquals(BackupJobState.CANCELLED, job.getState());
+
+        if (job.getLocalJobDirPath() != null) {
+            pathsNeedToBeDeleted.add(job.getLocalJobDirPath());
+        }
     }
 }

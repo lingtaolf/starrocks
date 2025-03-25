@@ -1,13 +1,14 @@
 ---
-displayed_sidebar: "English"
+displayed_sidebar: docs
 sidebar_position: 3
 description: Data Lakehouse with Apache Iceberg
 toc_max_heading_level: 2
+keywords: ['iceberg']
 ---
-import DataLakeIntro from '../assets/commonMarkdown/datalakeIntro.md'
-import Clients from '../assets/quick-start/_clientsCompose.mdx'
+import DataLakeIntro from '../_assets/commonMarkdown/datalakeIntro.md'
+import Clients from '../_assets/quick-start/_clientsCompose.mdx'
 
-# Data Lakehouse with Apache Iceberg
+# Apache Iceberg Lakehouse
 
 ## Overview
 
@@ -28,7 +29,7 @@ import Clients from '../assets/quick-start/_clientsCompose.mdx'
 
 ### SQL client
 
-You can use the SQL client provided in the Docker environment, or use one on your system. Many MySQL compatible clients will work, and this guide covers the configuration of DBeaver and MySQL WorkBench.
+You can use the SQL client provided in the Docker environment, or use one on your system. Many MySQL compatible clients will work, and this guide covers the configuration of DBeaver and MySQL Workbench.
 
 ### curl
 
@@ -39,10 +40,12 @@ You can use the SQL client provided in the Docker environment, or use one on you
 ## StarRocks terminology
 
 ### FE
+
 Frontend nodes are responsible for metadata management, client connection management, query planning, and query scheduling. Each FE stores and maintains a complete copy of metadata in its memory, which guarantees indiscriminate services among the FEs.
 
 ### BE
-Backend nodes are responsible for both data storage and executing query plans in shared-nothing deployments. When using an external catalog (like the Iceberg catalog used in this guide) only local data is stored on the BE node(s).
+
+Backend (BE) nodes are responsible for both data storage and executing query plans in shared-nothing deployments. When an external catalog (like the Iceberg catalog used in this guide) is used, the BE nodes can cache the data from the external catalog to accelerate queries.
 
 ---
 
@@ -64,6 +67,7 @@ There are six containers (services) used in this guide, and all are deployed wit
 In order to provide an environment with the three necessary containers StarRocks provides a Docker compose file.  Download the compose file and dataset with curl.
 
 The Docker compose file:
+
 ```bash
 mkdir iceberg
 cd iceberg
@@ -71,6 +75,7 @@ curl -O https://raw.githubusercontent.com/StarRocks/demo/master/documentation-sa
 ```
 
 And the dataset:
+
 ```bash
 curl -O https://raw.githubusercontent.com/StarRocks/demo/master/documentation-samples/iceberg/datasets/green_tripdata_2023-05.parquet
 ```
@@ -100,8 +105,7 @@ docker compose up -d
 
 Check the progress of the services. It should take around 30 seconds for the FE and BE to become healthy.
 
-Run `docker compose ps` until the FE and BE show a status of `healthy`. The rest of the services do not have
-healthcheck configurations, but you will be interacting with them and will know whether or not they are working:
+Run `docker compose ps` until the FE and BE show a status of `healthy`. The rest of the services do not have healthcheck configurations, but you will be interacting with them and will know whether or not they are working:
 
 :::tip
 If you have `jq` installed and prefer a shorter list from `docker compose ps` try:
@@ -205,11 +209,13 @@ root
 
 >>>
 ```
+
 Examine the first few (seven) columns of the first few (three) rows of data:
 
 ```python
 df.select(df.columns[:7]).show(3)
 ```
+
 ```plaintext
 +--------+--------------------+---------------------+------------------+----------+------------+------------+
 |VendorID|lpep_pickup_datetime|lpep_dropoff_datetime|store_and_fwd_flag|RatecodeID|PULocationID|DOLocationID|
@@ -220,6 +226,7 @@ df.select(df.columns[:7]).show(3)
 +--------+--------------------+---------------------+------------------+----------+------------+------------+
 only showing top 3 rows
 ```
+
 ### Write to a table
 
 The table created in this step will be in the catalog that will be made available in StarRocks in the next step.
@@ -253,7 +260,6 @@ Run this command from the directory containing the `docker-compose.yml` file.
 If you are using a client other than the mysql CLI, open that now.
 :::
 
-
 ```bash
 docker compose exec starrocks-fe \
   mysql -P 9030 -h 127.0.0.1 -u root --prompt="StarRocks > "
@@ -271,6 +277,7 @@ configuration properties will be detailed after the command.
 
 ```sql
 CREATE EXTERNAL CATALOG 'iceberg'
+COMMENT "External catalog to Apache Iceberg on MinIO"
 PROPERTIES
 (
   "type"="iceberg",
@@ -281,7 +288,7 @@ PROPERTIES
   "aws.s3.secret_key"="password",
   "aws.s3.endpoint"="http://minio:9000",
   "aws.s3.enable_path_style_access"="true",
-  "client.factory"="com.starrocks.connector.iceberg.IcebergAwsClientFactory"
+  "client.factory"="com.starrocks.connector.iceberg.IcebergAwsClientFactory"  
 );
 ```
 
@@ -308,7 +315,7 @@ SHOW CATALOGS;
 | Catalog         | Type     | Comment                                                          |
 +-----------------+----------+------------------------------------------------------------------+
 | default_catalog | Internal | An internal catalog contains this cluster's self-managed tables. |
-| iceberg         | Iceberg  | NULL                                                             |
+| iceberg         | Iceberg  | External catalog to Apache Iceberg on MinIO                      |
 +-----------------+----------+------------------------------------------------------------------+
 2 rows in set (0.03 sec)
 ```
@@ -320,6 +327,7 @@ SET CATALOG iceberg;
 ```sql
 SHOW DATABASES;
 ```
+
 :::tip
 The database that you see was created in your PySpark
 session. When you added the CATALOG `iceberg`, the 
@@ -327,12 +335,13 @@ database `nyc` became visible in StarRocks.
 :::
 
 ```plaintext
-+----------+
-| Database |
-+----------+
-| nyc      |
-+----------+
-1 row in set (0.07 sec)
++--------------------+
+| Database           |
++--------------------+
+| information_schema |
+| nyc                |
++--------------------+
+2 rows in set (0.07 sec)
 ```
 
 ```sql
@@ -364,35 +373,35 @@ DESCRIBE greentaxis;
 ```
 
 :::tip
-Compare the schema that StarRocks uses with the output of `df.printSchema()` from the earlier PySpark session. The Spark `timestamp_ntz` datatypes are represented as StarRocks `DATETIME` etc.
+Compare the schema that StarRocks uses with the output of `df.printSchema()` from the earlier PySpark session. The Spark `timestamp_ntz` data types are represented as StarRocks `DATETIME` etc.
 :::
 
 ```plaintext
-+-----------------------+------------------+------+-------+---------+-------+
-| Field                 | Type             | Null | Key   | Default | Extra |
-+-----------------------+------------------+------+-------+---------+-------+
-| VendorID              | INT              | Yes  | false | NULL    |       |
-| lpep_pickup_datetime  | DATETIME         | Yes  | false | NULL    |       |
-| lpep_dropoff_datetime | DATETIME         | Yes  | false | NULL    |       |
-| store_and_fwd_flag    | VARCHAR(1048576) | Yes  | false | NULL    |       |
-| RatecodeID            | BIGINT           | Yes  | false | NULL    |       |
-| PULocationID          | INT              | Yes  | false | NULL    |       |
-| DOLocationID          | INT              | Yes  | false | NULL    |       |
-| passenger_count       | BIGINT           | Yes  | false | NULL    |       |
-| trip_distance         | DOUBLE           | Yes  | false | NULL    |       |
-| fare_amount           | DOUBLE           | Yes  | false | NULL    |       |
-| extra                 | DOUBLE           | Yes  | false | NULL    |       |
-| mta_tax               | DOUBLE           | Yes  | false | NULL    |       |
-| tip_amount            | DOUBLE           | Yes  | false | NULL    |       |
-| tolls_amount          | DOUBLE           | Yes  | false | NULL    |       |
-| ehail_fee             | DOUBLE           | Yes  | false | NULL    |       |
-| improvement_surcharge | DOUBLE           | Yes  | false | NULL    |       |
-| total_amount          | DOUBLE           | Yes  | false | NULL    |       |
-| payment_type          | BIGINT           | Yes  | false | NULL    |       |
-| trip_type             | BIGINT           | Yes  | false | NULL    |       |
-| congestion_surcharge  | DOUBLE           | Yes  | false | NULL    |       |
-+-----------------------+------------------+------+-------+---------+-------+
-20 rows in set (0.04 sec)
++-----------------------+---------------------+------+-------+---------+-------+---------+
+| Field                 | Type                | Null | Key   | Default | Extra | Comment |
++-----------------------+---------------------+------+-------+---------+-------+---------+
+| VendorID              | INT                 | Yes  | false | NULL    |       | NULL    |
+| lpep_pickup_datetime  | DATETIME            | Yes  | false | NULL    |       | NULL    |
+| lpep_dropoff_datetime | DATETIME            | Yes  | false | NULL    |       | NULL    |
+| store_and_fwd_flag    | VARCHAR(1073741824) | Yes  | false | NULL    |       | NULL    |
+| RatecodeID            | BIGINT              | Yes  | false | NULL    |       | NULL    |
+| PULocationID          | INT                 | Yes  | false | NULL    |       | NULL    |
+| DOLocationID          | INT                 | Yes  | false | NULL    |       | NULL    |
+| passenger_count       | BIGINT              | Yes  | false | NULL    |       | NULL    |
+| trip_distance         | DOUBLE              | Yes  | false | NULL    |       | NULL    |
+| fare_amount           | DOUBLE              | Yes  | false | NULL    |       | NULL    |
+| extra                 | DOUBLE              | Yes  | false | NULL    |       | NULL    |
+| mta_tax               | DOUBLE              | Yes  | false | NULL    |       | NULL    |
+| tip_amount            | DOUBLE              | Yes  | false | NULL    |       | NULL    |
+| tolls_amount          | DOUBLE              | Yes  | false | NULL    |       | NULL    |
+| ehail_fee             | DOUBLE              | Yes  | false | NULL    |       | NULL    |
+| improvement_surcharge | DOUBLE              | Yes  | false | NULL    |       | NULL    |
+| total_amount          | DOUBLE              | Yes  | false | NULL    |       | NULL    |
+| payment_type          | BIGINT              | Yes  | false | NULL    |       | NULL    |
+| trip_type             | BIGINT              | Yes  | false | NULL    |       | NULL    |
+| congestion_surcharge  | DOUBLE              | Yes  | false | NULL    |       | NULL    |
++-----------------------+---------------------+------+-------+---------+-------+---------+
+20 rows in set (0.03 sec)
 ```
 
 :::tip

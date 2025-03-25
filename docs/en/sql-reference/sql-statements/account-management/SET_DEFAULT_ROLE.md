@@ -1,5 +1,5 @@
 ---
-displayed_sidebar: "English"
+displayed_sidebar: docs
 ---
 
 # SET DEFAULT ROLE
@@ -9,6 +9,12 @@ displayed_sidebar: "English"
 Sets the roles that are activated by default when the user connects to the server.
 
 This command is supported from v3.0.
+
+:::tip
+Common users can set default roles for themselves. Users with the `user_admin` role can set default roles for other users. Before you perform this operation, make sure that the user has already been assigned these roles.
+
+You can query the roles of a user using [SHOW GRANTS](SHOW_GRANTS.md).
+:::
 
 ## Syntax
 
@@ -26,12 +32,6 @@ SET DEFAULT ROLE NONE TO <user_identity>;
 `role_name`: the role name
 
 `user_identity`: the user identity
-
-## Usage notes
-
-Individual users can set default roles for themselves. `user_admin` can set default roles for other users. Before you perform this operation, make sure that the user has already been assigned these roles.
-
-You can query the roles of a user using [SHOW GRANTS](SHOW_GRANTS.md).
 
 ## Examples
 

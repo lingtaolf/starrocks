@@ -40,37 +40,8 @@ using namespace starrocks;
 class LakeMetacacheTest : public TestBase {
 public:
     LakeMetacacheTest() : TestBase(kTestDirectory) {
-        _tablet_metadata = std::make_shared<TabletMetadata>();
-        _tablet_metadata->set_id(next_id());
-        _tablet_metadata->set_version(1);
-        //
-        //  | column | type | KEY | NULL |
-        //  +--------+------+-----+------+
-        //  |   c0   |  INT | YES |  NO  |
-        //  |   c1   |  INT | NO  |  NO  |
-        auto schema = _tablet_metadata->mutable_schema();
-        schema->set_id(next_id());
-        schema->set_num_short_key_columns(1);
-        schema->set_keys_type(DUP_KEYS);
-        schema->set_num_rows_per_row_block(65535);
-        auto c0 = schema->add_column();
-        {
-            c0->set_unique_id(next_id());
-            c0->set_name("c0");
-            c0->set_type("INT");
-            c0->set_is_key(true);
-            c0->set_is_nullable(false);
-        }
-        auto c1 = schema->add_column();
-        {
-            c1->set_unique_id(next_id());
-            c1->set_name("c1");
-            c1->set_type("INT");
-            c1->set_is_key(false);
-            c1->set_is_nullable(false);
-        }
-
-        _tablet_schema = TabletSchema::create(*schema);
+        _tablet_metadata = generate_simple_tablet_metadata(DUP_KEYS);
+        _tablet_schema = TabletSchema::create(_tablet_metadata->schema());
         _schema = std::make_shared<Schema>(ChunkHelper::convert_schema(_tablet_schema));
     }
 
@@ -175,8 +146,8 @@ TEST_F(LakeMetacacheTest, test_segment_cache) {
     c2->append_numbers(k1.data(), k1.size() * sizeof(int));
     c3->append_numbers(v1.data(), v1.size() * sizeof(int));
 
-    Chunk chunk0({c0, c1}, _schema);
-    Chunk chunk1({c2, c3}, _schema);
+    Chunk chunk0({std::move(c0), std::move(c1)}, _schema);
+    Chunk chunk1({std::move(c2), std::move(c3)}, _schema);
 
     const int segment_rows = chunk0.num_rows() + chunk1.num_rows();
 
@@ -283,7 +254,7 @@ TEST_F(LakeMetacacheTest, test_cache_segment_if_absent) {
     std::string segment_path("test_cache_segment_if_absent.dat");
 
     EXPECT_EQ(nullptr, metacache->lookup_segment(segment_path));
-    auto seg1 = std::make_shared<Segment>(fs, segment_path, segment_id, schema, _tablet_mgr.get());
+    auto seg1 = std::make_shared<Segment>(fs, FileInfo{segment_path}, segment_id, schema, _tablet_mgr.get());
 
     {
         // cache seg1, since there is no segment cached before, cache_segment_if_absent will cache the seg1 and return it.
@@ -293,7 +264,7 @@ TEST_F(LakeMetacacheTest, test_cache_segment_if_absent) {
         EXPECT_EQ(seg1, metacache->lookup_segment(segment_path));
     }
 
-    auto seg2 = std::make_shared<Segment>(fs, segment_path, segment_id, schema, _tablet_mgr.get());
+    auto seg2 = std::make_shared<Segment>(fs, FileInfo{segment_path}, segment_id, schema, _tablet_mgr.get());
     {
         auto seg = metacache->cache_segment_if_absent(segment_path, seg2);
         EXPECT_TRUE(seg != nullptr);
@@ -342,7 +313,7 @@ TEST_F(LakeMetacacheTest, test_cache_segment_if_absent_concurrency) {
     for (int i = 0; i < kConcurrency; ++i) {
         TestCacheSegmentConcurrency ctx;
         ctx.pending_count = &pending_count;
-        ctx.segment = std::make_shared<Segment>(fs, segment_path, segment_id, schema, _tablet_mgr.get());
+        ctx.segment = std::make_shared<Segment>(fs, FileInfo{segment_path}, segment_id, schema, _tablet_mgr.get());
         ctx.mutex = &m;
         ctx.cv = &cv;
         ctx.cache = metacache;
@@ -369,6 +340,25 @@ TEST_F(LakeMetacacheTest, test_cache_segment_if_absent_concurrency) {
             EXPECT_EQ(final_result, res);
         }
     }
+}
+
+TEST_F(LakeMetacacheTest, test_combined_txn_log_cache) {
+    auto* metacache = _tablet_mgr->metacache();
+
+    auto log = std::make_shared<CombinedTxnLogPB>();
+    metacache->cache_combined_txn_log("combined1", log);
+
+    auto log2 = metacache->lookup_combined_txn_log("combined1");
+    EXPECT_EQ(log.get(), log2.get());
+
+    auto log3 = metacache->lookup_combined_txn_log("combined2");
+    ASSERT_TRUE(log3 == nullptr);
+
+    auto meta = std::make_shared<TabletMetadataPB>();
+    metacache->cache_tablet_metadata("meta1", meta);
+
+    auto log4 = metacache->lookup_combined_txn_log("meta1");
+    ASSERT_TRUE(log4 == nullptr);
 }
 
 } // namespace starrocks::lake

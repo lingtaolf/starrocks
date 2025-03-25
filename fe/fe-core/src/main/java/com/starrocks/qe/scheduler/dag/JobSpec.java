@@ -27,6 +27,9 @@ import com.starrocks.planner.StreamLoadPlanner;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.GlobalVariable;
 import com.starrocks.qe.SessionVariable;
+import com.starrocks.qe.scheduler.slot.SlotProvider;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.LoadPlanner;
 import com.starrocks.thrift.TCompressionType;
 import com.starrocks.thrift.TDescriptorTable;
@@ -78,11 +81,21 @@ public class JobSpec {
     private TQueryOptions queryOptions;
     private TWorkGroup resourceGroup;
 
+    private long warehouseId = WarehouseManager.DEFAULT_WAREHOUSE_ID;
+
+    public long getWarehouseId() {
+        return warehouseId;
+    }
+
     private String planProtocol;
 
     private boolean enableQueue = false;
     private boolean needQueued = false;
     private boolean enableGroupLevelQueue = false;
+
+    private boolean incrementalScanRanges = false;
+
+    private boolean isSyncStreamLoad = false;
 
     public static class Factory {
         private Factory() {
@@ -95,12 +108,14 @@ public class JobSpec {
                                             TQueryType queryType) {
             TQueryOptions queryOptions = context.getSessionVariable().toThrift();
             queryOptions.setQuery_type(queryType);
+            queryOptions.setQuery_timeout(context.getExecTimeout());
 
             TQueryGlobals queryGlobals = genQueryGlobals(context.getStartTimeInstant(),
                     context.getSessionVariable().getTimeZone());
             if (context.getLastQueryId() != null) {
                 queryGlobals.setLast_query_id(context.getLastQueryId().toString());
             }
+            queryGlobals.setConnector_scan_node_number(scanNodes.stream().filter(x -> x.isRunningAsConnectorOperator()).count());
 
             return new Builder()
                     .queryId(context.getExecutionId())
@@ -110,10 +125,11 @@ public class JobSpec {
                     .enableStreamPipeline(false)
                     .isBlockQuery(false)
                     .needReport(context.getSessionVariable().isEnableProfile() ||
-                            context.getSessionVariable().isEnableBigQueryProfile())
+                            context.getSessionVariable().isEnableBigQueryProfile() || queryType == TQueryType.LOAD)
                     .queryGlobals(queryGlobals)
                     .queryOptions(queryOptions)
                     .commonProperties(context)
+                    .warehouseId(context.getCurrentWarehouseId())
                     .setPlanProtocol(context.getSessionVariable().getThriftPlanProtocol())
                     .build();
         }
@@ -129,6 +145,7 @@ public class JobSpec {
             if (context.getLastQueryId() != null) {
                 queryGlobals.setLast_query_id(context.getLastQueryId().toString());
             }
+            queryGlobals.setConnector_scan_node_number(scanNodes.stream().filter(x -> x.isRunningAsConnectorOperator()).count());
 
             return new Builder()
                     .queryId(context.getExecutionId())
@@ -155,7 +172,7 @@ public class JobSpec {
                 queryGlobals.setLast_query_id(context.getLastQueryId().toString());
             }
 
-            return new JobSpec.Builder()
+            return new Builder()
                     .loadJobId(loadPlanner.getLoadJobId())
                     .queryId(loadPlanner.getLoadId())
                     .fragments(loadPlanner.getFragments())
@@ -167,6 +184,7 @@ public class JobSpec {
                     .queryGlobals(queryGlobals)
                     .queryOptions(queryOptions)
                     .commonProperties(context)
+                    .warehouseId(loadPlanner.getWarehouseId())
                     .build();
         }
 
@@ -201,6 +219,7 @@ public class JobSpec {
                     .needReport(true)
                     .queryGlobals(queryGlobals)
                     .queryOptions(queryOptions)
+                    .warehouseId(context.getCurrentWarehouseId())
                     .commonProperties(context)
                     .build();
         }
@@ -212,7 +231,7 @@ public class JobSpec {
                                                              List<ScanNode> scanNodes) {
             TQueryOptions queryOptions = context.getSessionVariable().toThrift();
             TQueryGlobals queryGlobals = genQueryGlobals(context.getStartTimeInstant(),
-                                                         context.getSessionVariable().getTimeZone());
+                    context.getSessionVariable().getTimeZone());
 
             return new JobSpec.Builder()
                     .queryId(queryId)
@@ -236,7 +255,8 @@ public class JobSpec {
                                                                String timezone,
                                                                long startTime,
                                                                Map<String, String> sessionVariables,
-                                                               long execMemLimit) {
+                                                               long execMemLimit,
+                                                               long warehouseId) {
             TQueryOptions queryOptions = new TQueryOptions();
             setSessionVariablesToLoadQueryOptions(queryOptions, sessionVariables);
             queryOptions.setQuery_type(TQueryType.LOAD);
@@ -252,7 +272,7 @@ public class JobSpec {
 
             TQueryGlobals queryGlobals = genQueryGlobals(Instant.ofEpochMilli(startTime), timezone);
 
-            return new JobSpec.Builder()
+            return new Builder()
                     .loadJobId(loadJobId)
                     .queryId(queryId)
                     .fragments(fragments)
@@ -264,6 +284,7 @@ public class JobSpec {
                     .queryGlobals(queryGlobals)
                     .queryOptions(queryOptions)
                     .commonProperties(context)
+                    .warehouseId(warehouseId)
                     .build();
         }
 
@@ -283,6 +304,8 @@ public class JobSpec {
                     .queryOptions(null)
                     .enablePipeline(false)
                     .resourceGroup(null)
+                    .warehouseId(planner.getWarehouseId())
+                    .setSyncStreamLoad()
                     .build();
         }
 
@@ -307,7 +330,7 @@ public class JobSpec {
                     .needReport(false)
                     .queryGlobals(queryGlobals)
                     .queryOptions(queryOptions)
-                    .enablePipeline(true)
+                    .enablePipeline(context.getSessionVariable().isEnablePipelineEngine())
                     .resourceGroup(null)
                     .build();
         }
@@ -365,6 +388,7 @@ public class JobSpec {
                 ", enableStreamPipeline=" + enableStreamPipeline +
                 ", isBlockQuery=" + isBlockQuery +
                 ", resourceGroup=" + resourceGroup +
+                ", warehouseId=" + warehouseId +
                 '}';
     }
 
@@ -378,6 +402,10 @@ public class JobSpec {
 
     public void setLoadJobId(long loadJobId) {
         this.loadJobId = loadJobId;
+    }
+
+    public TLoadJobType getLoadJobType() {
+        return queryOptions.getLoad_job_type();
     }
 
     public boolean isSetLoadJobId() {
@@ -464,12 +492,41 @@ public class JobSpec {
         return queryOptions.getLoad_job_type() == TLoadJobType.STREAM_LOAD;
     }
 
+    public boolean isBrokerLoad() {
+        return queryOptions.getLoad_job_type() == TLoadJobType.BROKER;
+    }
+
     public String getPlanProtocol() {
         return planProtocol;
     }
 
+    public boolean isIncrementalScanRanges() {
+        return incrementalScanRanges;
+    }
+
+    public void setIncrementalScanRanges(boolean v) {
+        incrementalScanRanges = v;
+    }
+
     public void reset() {
         fragments.forEach(PlanFragment::reset);
+    }
+
+    public SlotProvider getSlotProvider() {
+        if (!isNeedQueued() || !isEnableQueue()) {
+            return GlobalStateMgr.getCurrentState().getLocalSlotProvider();
+        } else {
+            return GlobalStateMgr.getCurrentState().getGlobalSlotProvider();
+        }
+    }
+
+    public boolean hasOlapTableSink() {
+        for (PlanFragment fragment : fragments) {
+            if (fragment.hasOlapTableSink()) {
+                return true;
+            }
+        }
+        return isSyncStreamLoad;
     }
 
     public static class Builder {
@@ -552,6 +609,11 @@ public class JobSpec {
             return this;
         }
 
+        private Builder warehouseId(long warehouseId) {
+            instance.warehouseId = warehouseId;
+            return this;
+        }
+
         private Builder needReport(boolean needReport) {
             instance.needReport = needReport;
             return this;
@@ -559,6 +621,11 @@ public class JobSpec {
 
         private Builder setPlanProtocol(String planProtocol) {
             instance.planProtocol = StringUtils.lowerCase(planProtocol);
+            return this;
+        }
+
+        private Builder setSyncStreamLoad() {
+            instance.isSyncStreamLoad = true;
             return this;
         }
 

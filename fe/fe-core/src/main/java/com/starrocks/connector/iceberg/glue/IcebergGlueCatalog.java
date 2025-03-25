@@ -20,11 +20,11 @@ import com.google.common.collect.Maps;
 import com.starrocks.catalog.Database;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.connector.exception.StarRocksConnectorException;
-import com.starrocks.connector.iceberg.IcebergAwsClientFactory;
 import com.starrocks.connector.iceberg.IcebergCatalog;
 import com.starrocks.connector.iceberg.IcebergCatalogType;
 import com.starrocks.connector.iceberg.cost.IcebergMetricsReporter;
 import com.starrocks.connector.iceberg.io.IcebergCachingFileIO;
+import com.starrocks.connector.share.iceberg.IcebergAwsClientFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -48,10 +48,10 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 import static com.starrocks.connector.ConnectorTableId.CONNECTOR_ID_GENERATOR;
+import static com.starrocks.connector.iceberg.IcebergMetadata.LOCATION_PROPERTY;
 
 public class IcebergGlueCatalog implements IcebergCatalog {
     private static final Logger LOG = LogManager.getLogger(IcebergGlueCatalog.class);
-    public static final String LOCATION_PROPERTY = "location";
 
     private final Configuration conf;
     private final GlueCatalog delegate;
@@ -90,7 +90,7 @@ public class IcebergGlueCatalog implements IcebergCatalog {
     }
 
     @Override
-    public void createDb(String dbName, Map<String, String> properties) {
+    public void createDB(String dbName, Map<String, String> properties) {
         properties = properties == null ? new HashMap<>() : properties;
         for (Map.Entry<String, String> entry : properties.entrySet()) {
             String key = entry.getKey();
@@ -113,7 +113,7 @@ public class IcebergGlueCatalog implements IcebergCatalog {
     }
 
     @Override
-    public void dropDb(String dbName) throws MetaNotFoundException {
+    public void dropDB(String dbName) throws MetaNotFoundException {
         Database database;
         try {
             database = getDB(dbName);
@@ -154,6 +154,16 @@ public class IcebergGlueCatalog implements IcebergCatalog {
             PartitionSpec partitionSpec,
             String location,
             Map<String, String> properties) {
+        if (Strings.isNullOrEmpty(location)) {
+            String dbLocation = getDB(dbName).getLocation();
+            if (Strings.isNullOrEmpty(dbLocation)) {
+                throw new StarRocksConnectorException("Failed to find location in database '%s'. Please define the location" +
+                        " when you create table or recreate another database with location." +
+                        " You could execute the SQL command like 'CREATE TABLE <table_name> <columns> " +
+                        "PROPERTIES('location' = '<location>')", dbName);
+            }
+        }
+
         Table nativeTable = delegate.buildTable(TableIdentifier.of(dbName, tableName), schema)
                 .withLocation(location)
                 .withPartitionSpec(partitionSpec)
@@ -166,6 +176,11 @@ public class IcebergGlueCatalog implements IcebergCatalog {
     @Override
     public boolean dropTable(String dbName, String tableName, boolean purge) {
         return delegate.dropTable(TableIdentifier.of(dbName, tableName), purge);
+    }
+
+    @Override
+    public void renameTable(String dbName, String tblName, String newTblName) throws StarRocksConnectorException {
+        delegate.renameTable(TableIdentifier.of(dbName, tblName), TableIdentifier.of(dbName, newTblName));
     }
 
     @Override

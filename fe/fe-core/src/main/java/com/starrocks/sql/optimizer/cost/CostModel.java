@@ -36,8 +36,9 @@ import com.starrocks.sql.optimizer.base.PhysicalPropertySet;
 import com.starrocks.sql.optimizer.operator.DataSkewInfo;
 import com.starrocks.sql.optimizer.operator.Operator;
 import com.starrocks.sql.optimizer.operator.OperatorVisitor;
-import com.starrocks.sql.optimizer.operator.Projection;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAggregationOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalExceptOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalIntersectOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalAssertOneRowOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalCTEAnchorOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalCTEConsumeOperator;
@@ -171,21 +172,9 @@ public class CostModel {
                         anyMatch(ColumnStatistic::isUnknown) && mvStatistics.getColumnStatistics().values().stream().
                         noneMatch(ColumnStatistic::isUnknown)) {
                     return adjustCostForMV(context);
-                } else {
-                    ColumnRefSet usedColumns = statistics.getUsedColumns();
-                    Projection projection = node.getProjection();
-                    if (projection != null) {
-                        // we will add a projection on top of rewritten mv plan to keep the output columns the same as
-                        // original query.
-                        // excludes this projection keys when costing mv,
-                        // or the cost of mv may be larger than original query,
-                        // which will lead to mismatch of mv
-                        usedColumns.except(projection.getColumnRefMap().keySet());
-                    }
-                    // use the used columns to calculate the cost of mv
-                    return CostEstimate.of(statistics.getOutputSize(usedColumns), 0, 0);
                 }
             }
+
             return CostEstimate.of(statistics.getComputeSize(), 0, 0);
         }
 
@@ -336,7 +325,7 @@ public class CostModel {
                     // 2. Remove ExchangeNode between AggNode and ScanNode when building fragments.
                     boolean ignoreNetworkCost = sessionVariable.isEnableLocalShuffleAgg()
                             && sessionVariable.isEnablePipelineEngine()
-                            && GlobalStateMgr.getCurrentSystemInfo().isSingleBackendAndComputeNode();
+                            && GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().isSingleBackendAndComputeNode();
                     double networkCost = ignoreNetworkCost ? 0 : Math.max(outputSize, 1);
 
                     result = CostEstimate.of(outputSize * factor, 0, networkCost * factor);
@@ -476,6 +465,20 @@ public class CostModel {
             return CostEstimate.zero();
         }
 
+        @Override
+        public CostEstimate visitLogicalExcept(LogicalExceptOperator node, ExpressionContext context) {
+            double computeSize = context.getChildrenStatistics().stream().mapToDouble(Statistics::getComputeSize).sum();
+            double memoryCost = context.getChildStatistics(0).getComputeSize();
+            return CostEstimate.of(computeSize, memoryCost, 0);
+        }
+
+        @Override
+        public CostEstimate visitLogicalIntersect(LogicalIntersectOperator node, ExpressionContext context) {
+            double computeSize = context.getChildrenStatistics().stream().mapToDouble(Statistics::getComputeSize).sum();
+            double memoryCost = context.getChildStatistics(0).getComputeSize();
+            return CostEstimate.of(computeSize, memoryCost, 0);
+        }
+
         // if there exists a skew hint factor use it
         // if this is an enforcer above a local agg set 0.1 to reduce this exchange cost.
         // The reason is as below:
@@ -509,7 +512,6 @@ public class CostModel {
         private Optional<CostEstimate> invalidOneStageAggCost(PhysicalHashAggregateOperator node, ExpressionContext context) {
             boolean mustMultiStageAgg = Utils.mustGenerateMultiStageAggregate(node, context.getChildOperator(0));
             if (mustMultiStageAgg && !node.isSplit() && node.getType().isGlobal()) {
-
                 return Optional.of(CostEstimate.infinite());
             }
             return Optional.empty();

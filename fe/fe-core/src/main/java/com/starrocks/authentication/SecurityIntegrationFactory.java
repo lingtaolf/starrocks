@@ -14,19 +14,34 @@
 
 package com.starrocks.authentication;
 
-import com.starrocks.common.DdlException;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSortedSet;
+import com.starrocks.mysql.privilege.AuthPlugin;
+import com.starrocks.sql.analyzer.SemanticException;
 
 import java.util.Map;
 
 public class SecurityIntegrationFactory {
-    public static SecurityIntegration createSecurityIntegration(String name, Map<String, String> propertyMap)
-            throws DdlException {
-        String type = propertyMap.get(SecurityIntegration.SECURITY_INTEGRATION_PROPERTY_TYPE_KEY);
-        if (type.equals(SecurityIntegration.SECURITY_INTEGRATION_TYPE_LDAP)) {
-            return new LDAPSecurityIntegration(name, propertyMap);
-        } else {
-            throw new DdlException("unsupported '" + type + "' type security integration");
-        }
+    private static final ImmutableSortedSet<String> SUPPORTED_AUTH_MECHANISM =
+            ImmutableSortedSet.orderedBy(String.CASE_INSENSITIVE_ORDER)
+                    .add(AuthPlugin.Server.AUTHENTICATION_OPENID_CONNECT.name())
+                    .build();
 
+    public static void checkSecurityIntegrationIsSupported(String securityIntegrationType) {
+        if (!SUPPORTED_AUTH_MECHANISM.contains(securityIntegrationType)) {
+            throw new SemanticException("unsupported security integration type '" + securityIntegrationType + "'");
+        }
+    }
+
+    public static SecurityIntegration createSecurityIntegration(String name, Map<String, String> propertyMap) {
+        String type = propertyMap.get(SecurityIntegration.SECURITY_INTEGRATION_PROPERTY_TYPE_KEY);
+        checkSecurityIntegrationIsSupported(type);
+
+        SecurityIntegration securityIntegration = null;
+        if (type.equalsIgnoreCase(AuthPlugin.Server.AUTHENTICATION_OPENID_CONNECT.name())) {
+            securityIntegration = new OIDCSecurityIntegration(name, propertyMap);
+        }
+        Preconditions.checkArgument(securityIntegration != null);
+        return securityIntegration;
     }
 }

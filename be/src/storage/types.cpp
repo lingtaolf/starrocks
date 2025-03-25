@@ -37,7 +37,6 @@
 #include "gutil/strings/numbers.h"
 #include "runtime/datetime_value.h"
 #include "runtime/decimalv2_value.h"
-#include "runtime/large_int_value.h"
 #include "runtime/mem_pool.h"
 #include "runtime/time_types.h"
 #include "storage/collection.h"
@@ -50,6 +49,7 @@
 #include "storage/type_traits.h"
 #include "types/array_type_info.h"
 #include "types/date_value.hpp"
+#include "types/large_int_value.h"
 #include "types/map_type_info.h"
 #include "types/struct_type_info.h"
 #include "util/hash_util.hpp"
@@ -897,9 +897,9 @@ template <>
 struct ScalarTypeInfoImpl<TYPE_CHAR> : public ScalarTypeInfoImplBase<TYPE_CHAR> {
     static Status from_string(void* buf, const std::string& scan_key) {
         size_t value_len = scan_key.length();
-        if (value_len > OLAP_STRING_MAX_LENGTH) {
+        if (value_len > get_olap_string_max_length()) {
             return Status::InvalidArgument(fmt::format("String(length={}) is too long, the max length is: {}",
-                                                       value_len, OLAP_STRING_MAX_LENGTH));
+                                                       value_len, get_olap_string_max_length()));
         }
 
         auto slice = unaligned_load<Slice>(buf);
@@ -962,11 +962,11 @@ struct ScalarTypeInfoImpl<TYPE_VARCHAR> : public ScalarTypeInfoImpl<TYPE_CHAR> {
 
     static Status from_string(void* buf, const std::string& scan_key) {
         size_t value_len = scan_key.length();
-        if (value_len > OLAP_STRING_MAX_LENGTH) {
+        if (value_len > get_olap_string_max_length()) {
             LOG(WARNING) << "String(length=" << value_len << ") is too long, the max length is "
-                         << OLAP_STRING_MAX_LENGTH;
+                         << get_olap_string_max_length();
             return Status::InternalError(fmt::format("String(length={}) is too long, the max length is: {}", value_len,
-                                                     OLAP_STRING_MAX_LENGTH));
+                                                     get_olap_string_max_length()));
         }
 
         auto slice = unaligned_load<Slice>(buf);

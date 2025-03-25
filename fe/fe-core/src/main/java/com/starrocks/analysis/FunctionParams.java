@@ -37,13 +37,11 @@ package com.starrocks.analysis;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.starrocks.catalog.Function;
-import com.starrocks.catalog.FunctionSet;
 import com.starrocks.common.io.Writable;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
@@ -63,7 +61,7 @@ public class FunctionParams implements Writable {
     private List<OrderByElement> orderByElements;
     // c'tor for non-star params
     public FunctionParams(boolean isDistinct, List<Expr> exprs) {
-        if (exprs.stream().anyMatch(e -> e instanceof NamedArgument)) {
+        if (exprs != null && exprs.stream().anyMatch(e -> e instanceof NamedArgument)) {
             this.exprs = exprs.stream().map(e -> (e instanceof NamedArgument ? ((NamedArgument) e).getExpr()
                     : e)).collect(Collectors.toList());
             this.exprsNames = exprs.stream().map(e -> (e instanceof NamedArgument ? ((NamedArgument) e).getName()
@@ -81,11 +79,6 @@ public class FunctionParams implements Writable {
         this.isDistinct = isDistinct;
         this.exprs = exprs;
         this.orderByElements = orderByElements;
-        // add order-by exprs in exprs, so that treating them as function's children
-        if(orderByElements != null && !orderByElements.isEmpty()) {
-            this.exprs.addAll(orderByElements.stream().map(OrderByElement::getExpr)
-                    .collect(Collectors.toList()));
-        }
     }
 
     // c'tor for non-star, non-distinct params
@@ -197,6 +190,10 @@ public class FunctionParams implements Writable {
 
     public void setIsDistinct(boolean v) {
         isDistinct = v;
+    }
+
+    public void setExprs(List<Expr> exprs) {
+        this.exprs = exprs;
     }
 
     @Override

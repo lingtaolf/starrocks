@@ -59,7 +59,7 @@ enum PartialUpdateCloneCase {
 };
 
 template <class T>
-static void append_datum_func(std::shared_ptr<Column> col, T val) {
+static void append_datum_func(ColumnPtr& col, T val) {
     if (val == -1) {
         col->append_nulls(1);
     } else {
@@ -275,7 +275,8 @@ public:
         return *writer->build();
     }
 
-    RowsetSharedPtr create_rowset_column_with_row(const TabletSharedPtr& tablet, const vector<int64_t>& keys) {
+    StatusOr<RowsetSharedPtr> create_rowset_column_with_row(const TabletSharedPtr& tablet, const vector<int64_t>& keys,
+                                                            bool large_var_column = false) {
         RowsetWriterContext writer_context;
         RowsetId rowset_id = StorageEngine::instance()->next_rowset_id();
         writer_context.rowset_id = rowset_id;
@@ -301,13 +302,19 @@ public:
         }
         auto schema_without_full_row_column = std::make_unique<Schema>(&schema, cids);
         auto chunk = ChunkHelper::new_chunk(*schema_without_full_row_column, nkeys);
+        string varchar_value;
+        if (large_var_column) {
+            varchar_value = std::string(1024 * 1024, 'a');
+        } else {
+            varchar_value = std::string(1024, 'a');
+        }
         auto& cols = chunk->columns();
         for (int64_t key : keys) {
             cols[0]->append_datum(Datum(key));
             cols[1]->append_datum(Datum((int16_t)(nkeys - 1 - key)));
-            cols[2]->append_datum(Datum((int32_t)(key)));
+            cols[2]->append_datum(Datum(Slice(varchar_value)));
         }
-        CHECK_OK(writer->flush_chunk(*chunk));
+        RETURN_IF_ERROR(writer->flush_chunk(*chunk));
         return *writer->build();
     }
 
@@ -370,7 +377,9 @@ public:
         return *writer->build();
     }
 
-    TabletSharedPtr create_tablet(int64_t tablet_id, int32_t schema_hash, bool multi_column_pk = false) {
+    TabletSharedPtr create_tablet(int64_t tablet_id, int32_t schema_hash, bool multi_column_pk = false,
+                                  int64_t schema_id = 0, int32_t schema_version = 0) {
+        srand(GetCurrentTimeMicros());
         TCreateTabletReq request;
         request.tablet_id = tablet_id;
         request.__set_version(1);
@@ -379,6 +388,8 @@ public:
         request.tablet_schema.short_key_column_count = 1;
         request.tablet_schema.keys_type = TKeysType::PRIMARY_KEYS;
         request.tablet_schema.storage_type = TStorageType::COLUMN;
+        request.tablet_schema.__set_id(schema_id);
+        request.tablet_schema.__set_schema_version(schema_version);
 
         if (multi_column_pk) {
             TColumn pk1;
@@ -534,14 +545,15 @@ public:
         TColumn k3;
         k3.column_name = "v2";
         k3.__set_is_key(false);
-        k3.column_type.type = TPrimitiveType::INT;
+        k3.column_type.type = TPrimitiveType::VARCHAR;
+        k3.column_type.len = TypeDescriptor::MAX_VARCHAR_LENGTH;
         request.tablet_schema.columns.push_back(k3);
 
         TColumn row;
         row.column_name = Schema::FULL_ROW_COLUMN;
         TColumnType ctype;
         ctype.__set_type(TPrimitiveType::VARCHAR);
-        ctype.__set_len(65535);
+        ctype.__set_len(TypeDescriptor::MAX_VARCHAR_LENGTH);
         row.__set_column_type(ctype);
         row.__set_aggregation_type(TAggregationType::REPLACE);
         row.__set_is_allow_null(false);
@@ -665,7 +677,10 @@ public:
         return StorageEngine::instance()->tablet_manager()->get_tablet(tablet_id, false);
     }
 
-    void SetUp() override { _compaction_mem_tracker = std::make_unique<MemTracker>(-1); }
+    void SetUp() override {
+        _compaction_mem_tracker = std::make_unique<MemTracker>(-1);
+        config::enable_pk_size_tiered_compaction_strategy = false;
+    }
 
     void TearDown() override {
         if (_tablet2) {
@@ -676,6 +691,7 @@ public:
             (void)StorageEngine::instance()->tablet_manager()->drop_tablet(_tablet->tablet_id());
             _tablet.reset();
         }
+        config::enable_pk_size_tiered_compaction_strategy = true;
     }
 
     static Status full_clone(const TabletSharedPtr& source_tablet, int clone_version,
@@ -776,13 +792,17 @@ public:
     void test_load_from_pb(bool enable_persistent_index);
     void test_remove_expired_versions(bool enable_persistent_index);
     void test_apply(bool enable_persistent_index, bool has_merge_condition);
+    void test_apply_breakpoint_check(bool enable_persistent_index);
     void test_condition_update_apply(bool enable_persistent_index);
     void test_concurrent_write_read_and_gc(bool enable_persistent_index);
     void test_compaction_score_not_enough(bool enable_persistent_index);
     void test_compaction_score_enough_duplicate(bool enable_persistent_index);
     void test_compaction_score_enough_normal(bool enable_persistent_index);
-    void test_horizontal_compaction(bool enable_persistent_index);
+    void test_horizontal_compaction(bool enable_persistent_index, bool show_status = false,
+                                    bool random_compaction = false);
     void test_vertical_compaction(bool enable_persistent_index);
+    void test_horizontal_compaction_with_rows_mapper(bool enable_persistent_index);
+    void test_vertical_compaction_with_rows_mapper(bool enable_persistent_index);
     void test_compaction_with_empty_rowset(bool enable_persistent_index, bool vertical, bool multi_column_pk);
     void test_link_from(bool enable_persistent_index);
     void test_convert_from(bool enable_persistent_index);
@@ -823,6 +843,9 @@ public:
                           const TabletMetaSharedPtr& snapshot_tablet_meta);
     void load_snapshot(const std::string& meta_dir, const TabletSharedPtr& tablet, SegmentFooterPB* footer);
     void test_schema_change_optimiazation_adding_generated_column(bool enable_persistent_index);
+    void test_pk_dump(size_t rowset_cnt);
+    void update_and_recover(bool enable_persistent_index);
+    void test_recover_rowset_sorter();
 
 protected:
     TabletSharedPtr _tablet;

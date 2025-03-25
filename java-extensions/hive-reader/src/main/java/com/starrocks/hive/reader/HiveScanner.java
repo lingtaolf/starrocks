@@ -86,12 +86,14 @@ public class HiveScanner extends ConnectorScanner {
     // The value buffer used to store the value data.
     private Writable value;
 
+    private final String timeZone;
+
     public HiveScanner(int fetchSize, Map<String, String> params) {
         this.fetchSize = fetchSize;
         this.hiveColumnNames = params.get("hive_column_names");
-        this.hiveColumnTypes = params.get("hive_column_types").split("#");
-        this.requiredFields = params.get("required_fields").split(",");
-        this.nestedFields = params.getOrDefault("nested_fields", "").split(",");
+        this.hiveColumnTypes = ScannerHelper.splitAndOmitEmptyStrings(params.get("hive_column_types"), "#");
+        this.requiredFields = ScannerHelper.splitAndOmitEmptyStrings(params.get("required_fields"), ",");
+        this.nestedFields = ScannerHelper.splitAndOmitEmptyStrings(params.getOrDefault("nested_fields", ""), ",");
         this.dataFilePath = params.get("data_file_path");
         this.blockOffset = Long.parseLong(params.get("block_offset"));
         this.blockLength = Long.parseLong(params.get("block_length"));
@@ -107,6 +109,7 @@ public class HiveScanner extends ConnectorScanner {
             }
             LOG.debug("key = " + kv.getKey() + ", value = " + kv.getValue());
         }
+        this.timeZone = params.get("time_zone");
     }
 
     private JobConf makeJobConf(Properties properties) {
@@ -118,7 +121,7 @@ public class HiveScanner extends ConnectorScanner {
     }
 
     private void parseRequiredTypes() {
-        String[] hiveColumnNames = this.hiveColumnNames.split(",");
+        String[] hiveColumnNames = ScannerHelper.splitAndOmitEmptyStrings(this.hiveColumnNames, ",");
         HashMap<String, Integer> hiveColumnNameToIndex = new HashMap<>();
         HashMap<String, String> hiveColumnNameToType = new HashMap<>();
         for (int i = 0; i < hiveColumnNames.length; i++) {
@@ -242,7 +245,7 @@ public class HiveScanner extends ConnectorScanner {
                     if (fieldData == null) {
                         appendData(i, null);
                     } else {
-                        ColumnValue fieldValue = new HiveColumnValue(fieldInspectors[i], fieldData);
+                        ColumnValue fieldValue = new HiveColumnValue(fieldInspectors[i], fieldData, timeZone);
                         appendData(i, fieldValue);
                     }
                 }

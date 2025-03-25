@@ -1,5 +1,5 @@
 ---
-displayed_sidebar: "Chinese"
+displayed_sidebar: docs
 ---
 
 # 部署前提条件
@@ -18,10 +18,6 @@ StarRocks 依靠 AVX2 指令集充分发挥其矢量化能力。因此，在生�
 cat /proc/cpuinfo | grep avx2
 ```
 
-> **说明**
->
-> ARM 架构不支持 SIMD 指令集，因此在某些场景下的性能不及 x86 架构。我们只推荐您在开发环境中部署 ARM 架构下的 StarRocks。
-
 ### 内存
 
 StarRocks 对内存没有特定要求。关于推荐的内存大小，请参考 [规划 StarRocks 集群 - CPU 和内存](../deployment/plan_cluster.md#cpu-和内存)。
@@ -32,7 +28,7 @@ StarRocks 支持 HDD 和 SSD 作为存储介质。
 
 在实时数据分析场景、以及涉及大量数据扫描或随机磁盘访问的场景下，强烈建议您选择 SSD 作为存储介质。
 
-在涉及 [主键模型](../table_design/table_types/primary_key_table.md) 持久化索引的场景中，您必须使用 SSD 作为存储介质。
+在涉及 [主键表](../table_design/table_types/primary_key_table.md) 持久化索引的场景中，您必须使用 SSD 作为存储介质。
 
 ### 网络
 
@@ -40,7 +36,7 @@ StarRocks 支持 HDD 和 SSD 作为存储介质。
 
 ## 操作系统
 
-StarRocks 支持在 CentOS Linux 7.9 和 Ubuntu Linux 22.04 上部署。
+StarRocks 支持在 Red Hat Enterprise Linux 7.9、CentOS Linux 7.9 或 Ubuntu Linux 22.04 上部署。
 
 ## 软件
 

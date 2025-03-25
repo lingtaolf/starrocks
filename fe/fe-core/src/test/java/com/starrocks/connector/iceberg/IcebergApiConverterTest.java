@@ -31,6 +31,7 @@ import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.types.Types;
 import org.junit.Assert;
 import org.junit.Test;
@@ -73,6 +74,13 @@ public class IcebergApiConverterTest {
         org.apache.iceberg.types.Type icebergType = Types.StringType.get();
         Type resType = fromIcebergType(icebergType);
         Assert.assertEquals(resType, stringType);
+    }
+
+    @Test
+    public void testUUID() {
+        org.apache.iceberg.types.Type icebergType = Types.UUIDType.get();
+        Type resType = fromIcebergType(icebergType);
+        Assert.assertTrue(resType.isBinaryType());
     }
 
     @Test
@@ -192,22 +200,22 @@ public class IcebergApiConverterTest {
 
         Schema schema = IcebergApiConverter.toIcebergApiSchema(columns);
         Assert.assertEquals("table {\n" +
-                "  1: c1: required boolean ()\n" +
-                "  2: c2: required int ()\n" +
-                "  3: c3: required long ()\n" +
-                "  4: c4: required float ()\n" +
-                "  5: c5: required double ()\n" +
-                "  6: c6: required date ()\n" +
-                "  7: c7: required timestamp ()\n" +
-                "  8: c8: required string ()\n" +
-                "  9: c9: required string ()\n" +
-                "  10: c10: required decimal(-1, -1) ()\n" +
-                "  11: c11: required decimal(-1, -1) ()\n" +
-                "  12: c12: required decimal(-1, -1) ()\n" +
-                "  13: c13: required list<int> ()\n" +
-                "  14: c14: required map<int, int> ()\n" +
-                "  15: c15: required struct<20: col1: optional int> ()\n" +
-                "  16: c16: required time ()\n" +
+                "  1: c1: required boolean\n" +
+                "  2: c2: required int\n" +
+                "  3: c3: required long\n" +
+                "  4: c4: required float\n" +
+                "  5: c5: required double\n" +
+                "  6: c6: required date\n" +
+                "  7: c7: required timestamp\n" +
+                "  8: c8: required string\n" +
+                "  9: c9: required string\n" +
+                "  10: c10: required decimal(-1, -1)\n" +
+                "  11: c11: required decimal(-1, -1)\n" +
+                "  12: c12: required decimal(-1, -1)\n" +
+                "  13: c13: required list<int>\n" +
+                "  14: c14: required map<int, int>\n" +
+                "  15: c15: required struct<20: col1: optional int>\n" +
+                "  16: c16: required time\n" +
                 "}", schema.toString());
 
         PartitionSpec spec = IcebergApiConverter.parsePartitionFields(schema, Lists.newArrayList("c1"));
@@ -240,5 +248,12 @@ public class IcebergApiConverterTest {
         org.apache.iceberg.types.Type icebergType = Types.TimeType.get();
         Type resType = fromIcebergType(icebergType);
         Assert.assertEquals(resType, timeType);
+    }
+
+    @Test
+    public void testConvertDbNameToNamespace() {
+        Assert.assertEquals(Namespace.of(""), IcebergApiConverter.convertDbNameToNamespace(""));
+        Assert.assertEquals(Namespace.of("a"), IcebergApiConverter.convertDbNameToNamespace("a"));
+        Assert.assertEquals(Namespace.of("a", "b", "c"), IcebergApiConverter.convertDbNameToNamespace("a.b.c"));
     }
 }

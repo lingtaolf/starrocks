@@ -39,18 +39,18 @@ import com.google.common.base.MoreObjects.ToStringHelper;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.starrocks.analysis.Analyzer;
-import com.starrocks.analysis.DescriptorTable;
 import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.SlotRef;
 import com.starrocks.analysis.SortInfo;
 import com.starrocks.analysis.TupleId;
-import com.starrocks.common.UserException;
+import com.starrocks.common.StarRocksException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.optimizer.base.DistributionSpec;
 import com.starrocks.sql.optimizer.operator.TopNType;
 import com.starrocks.thrift.TExchangeNode;
 import com.starrocks.thrift.TExplainLevel;
+import com.starrocks.thrift.TLateMaterializeMode;
 import com.starrocks.thrift.TNormalExchangeNode;
 import com.starrocks.thrift.TNormalPlanNode;
 import com.starrocks.thrift.TNormalSortInfo;
@@ -83,9 +83,13 @@ public class ExchangeNode extends PlanNode {
     // Offset after which the exchange begins returning rows. Currently valid
     // only if mergeInfo_ is non-null, i.e. this is a merging exchange node.
     private long offset;
-
+    // partitionType is used for BE's exchange source node to specify the input partition type
+    // exchange source then decide whether local shuffle is needed
+    // to be set in ExecutionDAG::connectXXXFragmentToDestFragments
     private TPartitionType partitionType;
+    // this is the same as input fragment's output dataPartition, right now only used for explain
     private DataPartition dataPartition;
+    // distributionType is used for plan fragment builder to decide join's DistributionMode(broadcast,colocate,etc)
     private DistributionSpec.DistributionType distributionType;
     // Specify the columns which need to send, work on CTE, and keep empty in other sense
     private List<Integer> receiveColumns;
@@ -144,6 +148,13 @@ public class ExchangeNode extends PlanNode {
         return mergeInfo != null;
     }
 
+    public long getOffset() {
+        return offset;
+    }
+    public void setOffset(long offset) {
+        this.offset = offset;
+    }
+
     public void setReceiveColumns(List<Integer> receiveColumns) {
         this.receiveColumns = receiveColumns;
     }
@@ -160,7 +171,7 @@ public class ExchangeNode extends PlanNode {
     }
 
     @Override
-    public void init(Analyzer analyzer) throws UserException {
+    public void init(Analyzer analyzer) throws StarRocksException {
         super.init(analyzer);
         Preconditions.checkState(conjuncts.isEmpty());
     }
@@ -192,8 +203,10 @@ public class ExchangeNode extends PlanNode {
         if (partitionType != null) {
             msg.exchange_node.setPartition_type(partitionType);
         }
-        SessionVariable sessionVariable = ConnectContext.get().getSessionVariable();
-        msg.exchange_node.setEnable_parallel_merge(sessionVariable.isEnableParallelMerge());
+        SessionVariable sv = ConnectContext.get().getSessionVariable();
+        msg.exchange_node.setEnable_parallel_merge(sv.isEnableParallelMerge());
+        TLateMaterializeMode mode = TLateMaterializeMode.valueOf(sv.getParallelMergeLateMaterializationMode().toUpperCase());
+        msg.exchange_node.setParallel_merge_late_materialize_mode(mode);
     }
 
     @Override
@@ -234,22 +247,18 @@ public class ExchangeNode extends PlanNode {
     }
 
     @Override
-    public int getNumInstances() {
-        return numInstances;
-    }
-
-    @Override
     public boolean canUseRuntimeAdaptiveDop() {
         return true;
     }
 
     @Override
-    public boolean pushDownRuntimeFilters(DescriptorTable descTbl, RuntimeFilterDescription description, Expr probeExpr,
+    public boolean pushDownRuntimeFilters(RuntimeFilterPushDownContext context, Expr probeExpr,
                                           List<Expr> partitionByExprs) {
+        RuntimeFilterDescription description = context.getDescription();
         if (!canPushDownRuntimeFilter()) {
             return false;
         }
-        boolean accept = pushCrossExchange(descTbl, description, probeExpr, partitionByExprs);
+        boolean accept = pushCrossExchange(context, probeExpr, partitionByExprs);
         // Add the rf onto ExchangeNode if it can not be pushed down to Exchange's offsprings or
         // session variable runtime_filter_on_exchange_node is true(in default is false).
         boolean onExchangeNode = (!accept || ConnectContext.get().getSessionVariable().isRuntimeFilterOnExchangeNode());
@@ -263,10 +272,16 @@ public class ExchangeNode extends PlanNode {
         // we enable this only when:
         // - session variable enabled &
         // - this rf has been accepted by children nodes(global rf).
-        if (probeExpr.isBoundByTupleIds(getTupleIds()) && description.canAcceptFilter(this)) {
+        boolean isBound = probeExpr.isBoundByTupleIds(getTupleIds());
+        // local runtime filter won't use partition by expr to evaluate runtime filters
+        if (!description.inLocalFragmentInstance()) {
+            isBound = isBound && partitionByExprs.stream().allMatch(expr -> expr.isBoundByTupleIds(getTupleIds()));
+        }
+        if (isBound && description.canAcceptFilter(this, context)) {
             if (onExchangeNode || (description.isLocalApplicable() && description.inLocalFragmentInstance())) {
                 description.addProbeExpr(id.asInt(), probeExpr);
-                description.addPartitionByExprsIfNeeded(id.asInt(), probeExpr, partitionByExprs);
+                description.addPartitionByExprsIfNeeded(id.asInt(), probeExpr,
+                        description.inLocalFragmentInstance() ? Lists.newArrayList() : partitionByExprs);
                 probeRuntimeFilters.add(description);
                 accept = true;
             }
@@ -274,9 +289,9 @@ public class ExchangeNode extends PlanNode {
         return accept;
     }
 
-    private boolean pushCrossExchange(DescriptorTable descTbl,
-                                      RuntimeFilterDescription description, Expr probeExpr,
+    private boolean pushCrossExchange(RuntimeFilterPushDownContext context, Expr probeExpr,
                                       List<Expr> partitionByExprs) {
+        RuntimeFilterDescription description = context.getDescription();
         if (!description.canPushAcrossExchangeNode()) {
             return false;
         }
@@ -310,7 +325,7 @@ public class ExchangeNode extends PlanNode {
         boolean accept = false;
         description.enterExchangeNode();
         for (PlanNode node : children) {
-            if (node.pushDownRuntimeFilters(descTbl, description, probeExpr, partitionByExprs)) {
+            if (node.pushDownRuntimeFilters(context, probeExpr, partitionByExprs)) {
                 description.setHasRemoteTargets(true);
                 accept = true;
             }

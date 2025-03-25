@@ -12,18 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package com.starrocks.sql.ast;
 
 import com.google.common.collect.Lists;
 import com.starrocks.analysis.Predicate;
 import com.starrocks.analysis.RedirectStatus;
+import com.starrocks.authorization.AccessDeniedException;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.ScalarType;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.MetaNotFoundException;
-import com.starrocks.privilege.AccessDeniedException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.ShowResultSetMetaData;
 import com.starrocks.server.GlobalStateMgr;
@@ -70,7 +69,7 @@ public class ShowAnalyzeJobStmt extends ShowStmt {
 
         if (!analyzeJob.isAnalyzeAllDb()) {
             String dbName = analyzeJob.getDbName();
-            Database db = GlobalStateMgr.getCurrentState().getMetadataMgr().getDb(analyzeJob.getCatalogName(), dbName);
+            Database db = GlobalStateMgr.getCurrentState().getMetadataMgr().getDb(context, analyzeJob.getCatalogName(), dbName);
 
             if (db == null) {
                 throw new MetaNotFoundException("No found database: " + dbName);
@@ -80,8 +79,8 @@ public class ShowAnalyzeJobStmt extends ShowStmt {
 
             if (!analyzeJob.isAnalyzeAllTable()) {
                 String tableName = analyzeJob.getTableName();
-                Table table = GlobalStateMgr.getCurrentState().getMetadataMgr().getTable(analyzeJob.getCatalogName(),
-                        dbName, tableName);
+                Table table = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                        .getTable(context, analyzeJob.getCatalogName(), dbName, tableName);
 
                 if (table == null) {
                     throw new MetaNotFoundException("No found table: " + tableName);
@@ -93,8 +92,7 @@ public class ShowAnalyzeJobStmt extends ShowStmt {
                 // for jobs on entire instance or entire db, we just show it directly because there isn't a specified
                 // table to check privilege on.
                 try {
-                    Authorizer.checkAnyActionOnTableLikeObject(context.getCurrentUserIdentity(),
-                            context.getCurrentRoleIds(), db.getFullName(), table);
+                    Authorizer.checkAnyActionOnTableLikeObject(context, db.getFullName(), table);
                 } catch (AccessDeniedException e) {
                     return null;
                 }

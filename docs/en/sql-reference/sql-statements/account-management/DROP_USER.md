@@ -1,12 +1,16 @@
 ---
-displayed_sidebar: "English"
+displayed_sidebar: docs
 ---
 
 # DROP USER
 
+import UserManagementPriv from '../../../_assets/commonMarkdown/userManagementPriv.md'
+
 ## Description
 
-Deletes a specified user identity.
+Drops a specified user identity.
+
+<UserManagementPriv />
 
 ## Syntax
 
@@ -21,7 +25,7 @@ user@['domain']
 
 ## Examples
 
-Delete user jack@'192.%'.
+Drop user `jack@'192.%'`.
 
 ```sql
 DROP USER 'jack'@'192.%'

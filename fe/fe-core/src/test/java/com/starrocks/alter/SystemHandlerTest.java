@@ -22,15 +22,14 @@ import com.starrocks.catalog.DiskInfo;
 import com.starrocks.catalog.FakeEditLog;
 import com.starrocks.catalog.FakeGlobalStateMgr;
 import com.starrocks.catalog.GlobalStateMgrTestUtil;
-import com.starrocks.common.DdlException;
-import com.starrocks.common.UserException;
+import com.starrocks.common.StarRocksException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.Analyzer;
 import com.starrocks.sql.ast.AlterClause;
 import com.starrocks.sql.ast.AlterSystemStmt;
 import com.starrocks.sql.ast.DecommissionBackendClause;
-import com.starrocks.sql.ast.ModifyBackendAddressClause;
+import com.starrocks.sql.ast.ModifyBackendClause;
 import com.starrocks.sql.ast.ModifyFrontendAddressClause;
 import com.starrocks.system.Backend;
 import org.junit.Before;
@@ -60,16 +59,16 @@ public class SystemHandlerTest {
         systemHandler = new SystemHandler();
     }
 
-    @Test(expected = DdlException.class)
-    public void testModifyBackendAddressLogic() throws UserException {
-        ModifyBackendAddressClause clause = new ModifyBackendAddressClause("127.0.0.1", "sandbox-fqdn");
+    @Test(expected = RuntimeException.class)
+    public void testModifyBackendAddressLogic() throws StarRocksException {
+        ModifyBackendClause clause = new ModifyBackendClause("127.0.0.1", "sandbox-fqdn");
         List<AlterClause> clauses = new ArrayList<>();
         clauses.add(clause);
         systemHandler.process(clauses, null, null);
     }
 
     @Test(expected = NullPointerException.class)
-    public void testModifyFrontendAddressLogic() throws UserException {
+    public void testModifyFrontendAddressLogic() throws StarRocksException {
         ModifyFrontendAddressClause clause = new ModifyFrontendAddressClause("127.0.0.1", "sandbox-fqdn");
         List<AlterClause> clauses = new ArrayList<>();
         clauses.add(clause);
@@ -77,29 +76,29 @@ public class SystemHandlerTest {
     }
 
     @Test
-    public void testDecommissionInvalidBackend() throws UserException {
+    public void testDecommissionInvalidBackend() throws StarRocksException {
         List<String> hostAndPorts = Lists.newArrayList("192.168.1.11:1234");
         DecommissionBackendClause decommissionBackendClause = new DecommissionBackendClause(hostAndPorts);
         Analyzer.analyze(new AlterSystemStmt(decommissionBackendClause), new ConnectContext());
 
-        expectedException.expect(DdlException.class);
+        expectedException.expect(RuntimeException.class);
         expectedException.expectMessage("Backend does not exist");
         systemHandler.process(Lists.newArrayList(decommissionBackendClause), null, null);
     }
 
     @Test
-    public void testDecommissionBackendsReplicasRequirement() throws UserException {
+    public void testDecommissionBackendsReplicasRequirement() throws StarRocksException {
         List<String> hostAndPorts = Lists.newArrayList("host1:123");
         DecommissionBackendClause decommissionBackendClause = new DecommissionBackendClause(hostAndPorts);
         Analyzer.analyze(new AlterSystemStmt(decommissionBackendClause), new ConnectContext());
 
-        expectedException.expect(DdlException.class);
+        expectedException.expect(RuntimeException.class);
         expectedException.expectMessage("It will cause insufficient BE number");
         systemHandler.process(Lists.newArrayList(decommissionBackendClause), null, null);
     }
 
     @Test
-    public void testDecommissionBackendsSpaceRequirement() throws UserException {
+    public void testDecommissionBackendsSpaceRequirement() throws StarRocksException {
         List<String> hostAndPorts = Lists.newArrayList("host1:123");
         DecommissionBackendClause decommissionBackendClause = new DecommissionBackendClause(hostAndPorts);
         Analyzer.analyze(new AlterSystemStmt(decommissionBackendClause), new ConnectContext());
@@ -111,24 +110,24 @@ public class SystemHandlerTest {
         Map<String, DiskInfo> diskInfoMap = Maps.newHashMap();
         diskInfoMap.put("/data", diskInfo);
 
-        for (Backend backend : GlobalStateMgr.getCurrentSystemInfo().getBackends()) {
+        for (Backend backend : GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackends()) {
             backend.setDisks(ImmutableMap.copyOf(diskInfoMap));
         }
 
-        expectedException.expect(DdlException.class);
+        expectedException.expect(RuntimeException.class);
         expectedException.expectMessage("It will cause insufficient disk space");
         systemHandler.process(Lists.newArrayList(decommissionBackendClause), null, null);
     }
 
     @Test
-    public void testDecommissionBackends() throws UserException {
+    public void testDecommissionBackends() throws StarRocksException {
         List<String> hostAndPorts = Lists.newArrayList("host1:123");
         DecommissionBackendClause decommissionBackendClause = new DecommissionBackendClause(hostAndPorts);
         Analyzer.analyze(new AlterSystemStmt(decommissionBackendClause), new ConnectContext());
 
         Backend backend4 = new Backend(100, "host4", 123);
         backend4.setAlive(true);
-        GlobalStateMgr.getCurrentSystemInfo().addBackend(backend4);
+        GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().addBackend(backend4);
 
         DiskInfo diskInfo = new DiskInfo("/data");
         diskInfo.setAvailableCapacityB(900);
@@ -137,7 +136,7 @@ public class SystemHandlerTest {
         Map<String, DiskInfo> diskInfoMap = Maps.newHashMap();
         diskInfoMap.put("/data", diskInfo);
 
-        for (Backend backend : GlobalStateMgr.getCurrentSystemInfo().getBackends()) {
+        for (Backend backend : GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo().getBackends()) {
             backend.setDisks(ImmutableMap.copyOf(diskInfoMap));
         }
 

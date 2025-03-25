@@ -18,6 +18,7 @@ import com.google.common.collect.Lists;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.common.FeConstants;
 import com.starrocks.planner.TpchSQL;
+import com.starrocks.qe.SessionVariableConstants;
 import com.starrocks.server.GlobalStateMgr;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -36,12 +37,13 @@ public class TPCHPlanTest extends PlanTestBase {
         FeConstants.runningUnitTest = true;
         connectContext.getSessionVariable().setNewPlanerAggStage(2);
         connectContext.getSessionVariable().setEnableViewBasedMvRewrite(false);
+        connectContext.getSessionVariable().setCboEqBaseType(SessionVariableConstants.DOUBLE);
     }
 
     @Test
     public void testJoin() {
         GlobalStateMgr globalStateMgr = connectContext.getGlobalStateMgr();
-        OlapTable table1 = (OlapTable) globalStateMgr.getDb("test").getTable("t0");
+        OlapTable table1 = (OlapTable) globalStateMgr.getLocalMetastore().getDb("test").getTable("t0");
         setTableStatistics(table1, 10000);
         runFileUnitTest("optimized-plan/join");
         setTableStatistics(table1, 0);
@@ -105,7 +107,13 @@ public class TPCHPlanTest extends PlanTestBase {
     @ParameterizedTest(name = "Tpch.{0}")
     @MethodSource("tpchSource")
     public void testTPCH(String name, String sql, String resultFile) {
-        runFileUnitTest(sql, resultFile);
+        if ("q16".equals(name)) {
+            connectContext.getSessionVariable().setNewPlanerAggStage(0);
+            runFileUnitTest(sql, resultFile);
+            connectContext.getSessionVariable().setNewPlanerAggStage(2);
+        } else {
+            runFileUnitTest(sql, resultFile);
+        }
     }
 
     private static Stream<Arguments> tpchSource() {
